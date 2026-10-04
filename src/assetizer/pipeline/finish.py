@@ -61,11 +61,14 @@ def review_check(ctx: RunContext) -> dict:
                 continue
             for iss in chk["issues"]:
                 found += 1
-                ctx.flag("UNIT", u["id"], "AI_" + iss["kind"], iss["severity"], f"「{u['title']}」{_KIND_ZH.get(iss['kind'], iss['kind'])}",
+                # fidelity problems need the reviewer; boundary polish notes do not
+                sev = iss["severity"] if iss["kind"] in FIDELITY_KINDS else "INFO"
+                ctx.flag("UNIT", u["id"], "AI_" + iss["kind"], sev, f"「{u['title']}」{_KIND_ZH.get(iss['kind'], iss['kind'])}",
                          iss.get("note", ""), evidence={"quote": iss.get("evidence")}, origin="AI_CHECK")
     return {"items": len(items), "issues": found}
 
 
+FIDELITY_KINDS = {"CLAIM_MISMATCH", "ATTRIBUTION_RISK", "OVERSTATEMENT"}
 _KIND_ZH = {"HALF_SENTENCE_START": "片段从半句开始", "DANGLING_REFERENCE": "开头指代不明",
             "ENDS_BEFORE_CONCLUSION": "片段在结论前结束", "NEXT_TOPIC_BLEED": "结尾混入下一主题",
             "CLAIM_MISMATCH": "陈述与原话可能不一致", "ATTRIBUTION_RISK": "归属可能有误", "OVERSTATEMENT": "程度可能被加强"}
