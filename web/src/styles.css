@@ -231,7 +231,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .press-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
 .press-head h3 { margin: 0; font: 600 24px/1.35 var(--serif); max-width: 60ch; }
 .press-head .eta { margin-left: auto; font: 500 13px var(--mono); color: var(--ink-2); white-space: nowrap; }
-.rail { position: relative; margin-top: 26px; height: 46px; }
+.rail { position: relative; margin-top: 26px; height: 58px; }
 .rail-line { position: absolute; left: 0; right: 0; top: 10px; height: 1px; background: var(--rule-2); }
 .rail-fill {
   position: absolute; left: 0; top: 9px; height: 3px; background: var(--ink);
@@ -248,13 +248,16 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .rail-stop.warn i { background: var(--paper); border-color: var(--zhu); }
 .rail-stop.run i { background: var(--zhu); border-color: var(--zhu); box-shadow: 0 0 0 5px var(--zhu-wash); }
 .rail-stop span {
-  margin-top: 9px; font: 11px var(--sans); color: var(--ink-3); white-space: nowrap;
+  position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
+  font: 11px var(--sans); color: var(--ink-3); white-space: nowrap;
   opacity: 0; transition: opacity 0.2s;
 }
+.rail-stop.first span { left: 0; transform: none; }
+.rail-stop.last span { left: auto; right: 0; transform: none; }
 .rail-stop.run span, .rail:hover .rail-stop span, .rail-stop.first span, .rail-stop.last span { opacity: 1; }
 .rail-stop.run span { color: var(--zhu); font-weight: 600; }
 .rail:hover .rail-stop:not(.run) span { opacity: 0.85; }
-.rail-stop:nth-child(even) span { margin-top: 24px; }
+.rail-stop:nth-child(even):not(.first):not(.last):not(.run) span { top: 37px; }
 
 .queue { margin-top: 14px; display: flex; gap: 8px 22px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
 .queue b { font-weight: 500; color: var(--ink); }

@@ -55,10 +55,36 @@ _TRANSIENT_MARKERS = ("429", "503", "500", "502", "504", "unavailable",
 _AUTH_MARKERS = ("unauthenticated", "401", "login", "sign in", "oauth", "credential", "not logged")
 
 
+def gemini_schema(node: Any) -> Any:
+    """Down-convert JSON Schema to the subset Gemini function declarations accept.
+
+    Gemini rejects ``null`` in enums and multi-type arrays; local validation still
+    uses the full schema, so nullable fields simply arrive as strings/absent.
+    """
+    if isinstance(node, list):
+        return [gemini_schema(x) for x in node]
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for k, v in node.items():
+        if k == "type" and isinstance(v, list):
+            types = [t for t in v if t != "null"]
+            out[k] = types[0] if types else "string"
+        elif k == "enum" and isinstance(v, list):
+            out[k] = [x for x in v if x is not None]
+        elif k in ("pattern", "minItems", "maxItems", "minimum", "maximum"):
+            continue  # enforced locally; keeps the declaration portable
+        else:
+            out[k] = gemini_schema(v)
+    return out
+
+
 def classify_error(text: str) -> str:
     t = (text or "").lower()
     if "output token limit" in t or "max_tokens" in t or "output limit" in t:
         return "PROVIDER_OUTPUT_LIMIT"
+    if "invalid_argument" in t and ("schema" in t or "function_declarations" in t):
+        return "PROVIDER_SCHEMA_REJECTED"
     if "quota" in t or "exceeded your" in t or "billing" in t:
         return "PROVIDER_QUOTA"
     if any(m in t for m in _AUTH_MARKERS):
@@ -115,7 +141,7 @@ class AgyProvider:
         if effort:
             cmd += ["--effort", effort]
         if schema is not None:
-            write_json(call_dir / "schema.json", schema)
+            write_json(call_dir / "schema.json", gemini_schema(schema))
             cmd += ["--json-schema", str((call_dir / "schema.json").resolve())]
         for d in sorted({str(Path(a).parent) for a in allowed}):
             cmd += ["--add-dir", d]
