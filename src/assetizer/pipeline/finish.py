@@ -164,23 +164,9 @@ def cleanup(ctx: RunContext) -> dict:
 
 
 def sweep_agy_state(max_age_s: int = 3600) -> int:
-    """Delete agy conversation state older than max_age_s (calls are serial, so nothing live is that old)."""
-    root = config.get().agy_state_dir
-    freed, cutoff = 0, time.time() - max_age_s
-    for sub in ("conversations", "brain"):
-        d = root / sub
-        if not d.is_dir():
-            continue
-        for p in d.iterdir():
-            try:
-                if p.stat().st_mtime > cutoff:
-                    continue
-                if p.is_dir():
-                    freed += sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    freed += p.stat().st_size
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
-    return freed
+    """Delete leftover agy state for conversations *this app* created (recorded in model_calls).
+    Never touches the user's own interactive agy sessions."""
+    from ..providers.agy import AgyProvider
+    ids = [r["conversation_id"] for r in db.q("SELECT DISTINCT conversation_id FROM model_calls WHERE conversation_id IS NOT NULL")]
+    p = AgyProvider()
+    return sum(p.purge_conversation(c) for c in ids)

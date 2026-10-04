@@ -109,10 +109,11 @@ def _set_stage(run_id: str, name: str, **kw) -> None:
     db.exec(f"UPDATE stages SET {sets} WHERE run_id=? AND name=?", *kw.values(), run_id, name)
 
 
-def _exec_stage(ctx: RunContext, name: str, fn) -> tuple[str, dict | str]:
+def _exec_stage(ctx: RunContext, name: str, fn, foreground: bool = True) -> tuple[str, dict | str]:
     t0 = time.monotonic()
     _set_stage(ctx.id, name, status="RUNNING", started_at=now())
-    db.exec("UPDATE runs SET stage=? WHERE id=?", name, ctx.id)
+    if foreground:
+        db.exec("UPDATE runs SET stage=? WHERE id=?", name, ctx.id)
     try:
         detail = fn(ctx) or {}
         _set_stage(ctx.id, name, status="DONE", finished_at=now(), wall_seconds=round(time.monotonic() - t0, 1), detail=db.j(detail))
@@ -139,6 +140,20 @@ def _classify(e: BaseException) -> str:
 
 
 def execute(run_id: str) -> str:
+    import fcntl
+    lockf = (config.get().runs_dir / f".{run_id}.lock").open("w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return "LOCKED"
+    try:
+        return _execute(run_id)
+    finally:
+        fcntl.flock(lockf, fcntl.LOCK_UN)
+        lockf.close()
+
+
+def _execute(run_id: str) -> str:
     run = db.one("SELECT * FROM runs WHERE id=?", run_id)
     source = db.one("SELECT * FROM sources WHERE id=?", run["source_id"])
     ctx = RunContext(run=run, source=source)
@@ -151,7 +166,7 @@ def execute(run_id: str) -> str:
 
     def run_bg():
         try:
-            st, _ = _exec_stage(ctx, "TRANSCRIBE", media_stages.transcribe)
+            st, _ = _exec_stage(ctx, "TRANSCRIBE", media_stages.transcribe, foreground=False)
         except Exception as e:  # noqa: BLE001 — transcript is non-blocking
             bg_err.append(e)
             _set_stage(ctx.id, "TRANSCRIBE", status="WARN", detail=db.j({"warning": str(e)[:500]}))

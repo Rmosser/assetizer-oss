@@ -81,11 +81,14 @@ def screenshots(ctx: RunContext) -> dict:
         for i, a in enumerate(u.get("screenshot_anchors", [])[:2]):
             p = ctx.path("assets", "screenshots", u["label"], f"{i + 1}.jpg")
             try:
-                if p.exists():
-                    t = read_json(p.with_suffix(".json"))["t_actual"]
+                side = p.with_suffix(".json")
+                if p.exists() and side.exists():
+                    t = read_json(side)["t_actual"]
                 else:
-                    _, t = ffmpeg.sharpest_frame(ctx.media, a["t"], p)
-                    write_json(p.with_suffix(".json"), {"anchor": a, "t_actual": t})
+                    tmp = p.with_name(f".{p.stem}.tmp.jpg")
+                    _, t = ffmpeg.sharpest_frame(ctx.media, a["t"], tmp)
+                    write_json(side, {"anchor": a, "t_actual": t})
+                    tmp.replace(p)
                 _asset(ctx, u["id"], "screenshot", "GENERATED", p, start=t, end=t,
                        meta={"reason": a.get("reason"), "timeframe": a.get("timeframe"),
                              "visible_structure": a.get("visible_structure"), "anchor_t": a["t"]})
@@ -296,10 +299,13 @@ def clips(ctx: RunContext) -> dict:
                     (d / stale).unlink(missing_ok=True)
                 ffmpeg.render_clip(ctx.media, a, e, clean)
                 write_json(params, want)
-            ffmpeg.frame(clean, min(3.0, (e - a) / 2), d / "poster.jpg", width=1280)
             _asset(ctx, uid, "clip", "GENERATED", clean, a, e, meta, selection=b["selection"],
                    publication_priority=b["publication_priority"], standalone=standalone)
-            _asset(ctx, uid, "poster", "GENERATED", d / "poster.jpg", a, a)
+            try:
+                ffmpeg.frame(clean, min(3.0, (e - a) / 2), d / "poster.jpg", width=1280)
+                _asset(ctx, uid, "poster", "GENERATED", d / "poster.jpg", a, a)
+            except ffmpeg.MediaError:
+                pass  # a poster failure never fails a good clip
             ok += 1
             if e - a < 8:
                 ctx.flag("ASSET", uid, "CLIP_TOO_SHORT", "REVIEW", f"「{u['title']}」片段只有 {e - a:.0f} 秒")

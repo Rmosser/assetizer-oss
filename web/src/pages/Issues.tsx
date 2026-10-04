@@ -121,7 +121,7 @@ export default function Issues() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" style={{ color: "var(--zhu)", marginTop: 3 }}><path d="M12 3 2.5 20h19L12 3Z" strokeLinejoin="round" /><path d="M12 10v4.5M12 17.2v.3" strokeLinecap="round" /></svg>
               <div>
                 <h4>{a.title}</h4>
-                <p dangerouslySetInnerHTML={{ __html: (a.body || "").replace(/`([^`]+)`/g, "<code>$1</code>") }} />
+                <p>{(a.body || "").split(/`([^`]+)`/).map((part: string, i: number) => (i % 2 ? <code key={i}>{part}</code> : part))}</p>
               </div>
             </div>
           ))}

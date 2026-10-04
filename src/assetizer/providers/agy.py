@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -50,9 +51,10 @@ class CallResult:
     meta: dict = field(default_factory=dict)
 
 
-_TRANSIENT_MARKERS = ("429", "503", "500", "502", "504", "unavailable",
-                      "deadline", "timed out", "timeout", "temporarily", "overloaded", "rate limit")
-_AUTH_MARKERS = ("unauthenticated", "401", "login", "sign in", "oauth", "credential", "not logged")
+_TRANSIENT_RE = re.compile(r"\b(429|500|502|503|504)\b|resource_exhausted|unavailable|deadline exceeded|timed out|"
+                           r"temporarily|overloaded|rate limit", re.I)
+_AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sign in again|invalid_grant|"
+                      r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
 
 
 def _seconds(spec: str) -> float:
@@ -93,9 +95,9 @@ def classify_error(text: str) -> str:
         return "PROVIDER_SCHEMA_REJECTED"
     if "quota" in t or "exceeded your" in t or "billing" in t:
         return "PROVIDER_QUOTA"
-    if any(m in t for m in _AUTH_MARKERS):
+    if _AUTH_RE.search(t):
         return "AGY_AUTH_REQUIRED"
-    if any(m in t for m in _TRANSIENT_MARKERS):
+    if _TRANSIENT_RE.search(t):
         return "PROVIDER_TRANSIENT"
     return "PROVIDER_FAILURE"
 

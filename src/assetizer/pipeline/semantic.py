@@ -181,13 +181,15 @@ def knowledge(ctx: RunContext) -> dict:
             if d["label"] in labels:
                 details[d["label"]] = d
 
+    keep = {r["label"]: r["id"] for r in db.q("SELECT id, label FROM units WHERE run_id=?", ctx.id)}  # stable ids on rerun
     db.exec("DELETE FROM units WHERE run_id=?", ctx.id)
     final = []
     speaker_key = (ctx.playbook.get("identity") or {}).get("speaker_key", "host")
     for i, u in enumerate(units):
+        uid = keep.get(u["label"]) or ulid()
         d = details.get(u["label"])
         if d is None:
-            ctx.flag("UNIT", u["label"], "UNIT_DETAIL_MISSING", "REVIEW", f"知识单元「{u['title']}」详细内容生成失败，仅保留骨架")
+            ctx.flag("UNIT", uid, "UNIT_DETAIL_MISSING", "REVIEW", f"知识单元「{u['title']}」详细内容生成失败，仅保留骨架")
             d = {"summary": u.get("why", ""), "speaker_key": speaker_key, "teacher_reasoning": "", "visual_evidence": [],
                  "screenshot_anchors": [], "required_context": "", "claims": [], "facets": {}, "uncertainties": ["详细内容缺失"]}
         anchors = []
@@ -197,11 +199,11 @@ def knowledge(ctx: RunContext) -> dict:
             except ValueError:
                 continue
             if not (u["start"] - 60 <= t <= u["end"] + 60):
-                ctx.flag("UNIT", u["label"], "ANCHOR_OUT_OF_RANGE", "INFO", f"截图锚点 {a['t']} 不在单元区间内，已忽略")
+                ctx.flag("UNIT", uid, "ANCHOR_OUT_OF_RANGE", "INFO", f"截图锚点 {a['t']} 不在单元区间内，已忽略")
                 continue
             anchors.append({**a, "t": t})
         ku = {
-            "id": ulid(), "label": u["label"], "title": u["title"], "start": u["start"], "end": u["end"],
+            "id": uid, "label": u["label"], "title": u["title"], "start": u["start"], "end": u["end"],
             "segments": u["segments"], "provenance": {"chunk_topic_refs": u["chunk_topic_refs"], "merged_topic_refs": u["topic_refs"]},
             "speaker_key": d.get("speaker_key") or speaker_key, "tickers": u.get("tickers", []),
             "knowledge_type": u["knowledge_type"], "learning_priority": u["learning_priority"],
