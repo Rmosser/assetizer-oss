@@ -75,7 +75,7 @@ UNDERSTAND_SCHEMA = obj({
 def understand_prompt(playbook: dict, media_path: str, chunk: dict, duration_hint: float) -> str:
     return f"""{context(playbook, 'understanding')}
 
-你是多模态理解 Worker。第一且唯一的媒体动作：用 view_file 读取下面指定的完整视频，且只读取一次。禁止其他工具、ASR、搜索、截图或 ffmpeg 替代；无法读取就直接失败，不要改走间接路径。
+你是多模态理解 Worker。第一且唯一的媒体动作：用 view_file 读取下面指定的完整视频，且只读取一次。禁止其他工具、ASR、搜索、截图或 ffmpeg 替代；无法读取就直接失败，不要改走间接路径。读取完成后直接给出最终 JSON，不要再调用任何工具（包括 run_command、list_dir）。
 只输出机器 JSON，不写文章。把这段视频按内容拆成 topics（主题、案例、问题、标的或教学单元；不按固定时长）。
 - start / end / claims[].t 一律使用**本视频播放器内的时间码**（从 00:00 开始，格式 MM:SS 或 H:MM:SS）。不要换算成整场直播的时间，系统会自动换算。本段视频时长约 {duration_hint/60:.1f} 分钟，时间不得超过它。
 - claims 区分 kind 与 modality；有条件/观察范围时填写 condition 与 time_scope（NOW 当前操作 / NEXT_SESSION 下一交易日 / WATCH 继续观察 / PAST 已发生）。
@@ -257,7 +257,7 @@ def boundary_prompt(playbook: dict, media_path: str, unit: dict, window_len: flo
     return f"""{context(playbook, 'selection')}
 
 你是视频 Clip Boundary Worker，不是总结器。唯一任务：在当前窗口视频中选择一段连续、可独立观看的完整内容，给出自然开始与完整结束。
-第一且唯一媒体动作：用 view_file 读取下面指定的窗口视频，只读一次。禁止访问其他文件、ASR、截图、ffmpeg、网络。
+第一且唯一媒体动作：用 view_file 读取下面指定的窗口视频，只读一次。禁止访问其他文件、ASR、截图、ffmpeg、网络。读取完成后直接给出最终结果，不要再调用任何工具。
 - 没有固定时长目标，短不是更好；不得切掉必要条件、代词主体或结论；不得为去掉内部跑题而拼接。
 - start / end 使用**本窗口视频播放器内的时间码**（从 00:00 开始，MM:SS），窗口时长约 {window_len:.0f} 秒；end 必须大于 start。
 - 无法获得完整上下文时 context_missing=true、standalone_confidence=LOW，不要假装可发布。

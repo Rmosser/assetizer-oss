@@ -24,9 +24,20 @@ def understand(ctx: RunContext) -> dict:
     llm = ctx.llm()
     out = []
     for ch in plan["chunks"]:
+        def check(o, L=ch["length"]):
+            spans = []
+            for t in o["topics"]:
+                try:
+                    spans.append(parse_tc(t["end"]) - parse_tc(t["start"]))
+                except ValueError:
+                    spans.append(0)
+            covered = sum(x for x in spans if x > 0)
+            if covered < min(0.3 * L, 600):
+                raise ContractError("CONTENT_FAILURE", f"topics cover only {covered:.0f}s of {L:.0f}s")
+
         rec = llm.structured(ctx.calls, f"understand-{ch['part_id']}",
                              P.understand_prompt(ctx.playbook, ch["path"], ch, ch["length"]),
-                             P.UNDERSTAND_SCHEMA, media=[ch["path"]])
+                             P.UNDERSTAND_SCHEMA, media=[ch["path"]], check=check)
         topics = []
         for t in rec["topics"]:
             try:
@@ -281,7 +292,7 @@ def select(ctx: RunContext) -> dict:
                                                                                      "knowledge_type", "summary", "required_context",
                                                                                      "clip_candidate", "depends_on")}
                                                                 | {"duration_s": round(u["end"] - u["start"])} for u in units]),
-                                 P.SELECT_SCHEMA, effort="medium", check=check)
+                                 P.SELECT_SCHEMA, effort="medium", check=check, enforce=True)
     except ContractError as e:
         raise StageWarning(f"selection contract failed: {e}")
     sel = {s["label"]: s for s in o["selections"]}

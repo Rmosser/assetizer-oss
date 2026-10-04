@@ -210,7 +210,7 @@ def boundary(ctx: RunContext) -> dict:
                                P.boundary_prompt(ctx.playbook, str(win), {k: u[k] for k in ("label", "title", "summary", "required_context")}
                                                  | {"unit_start_in_window": fmt_tc(u["start"] - w0), "unit_end_in_window": fmt_tc(u["end"] - w0)},
                                                  w1 - w0),
-                               P.BOUNDARY_SCHEMA, media=[str(win)], check=check)
+                               P.BOUNDARY_SCHEMA, media=[str(win)], check=check, enforce=True)
             a, b = w0 + parse_tc(o["start"]), min(w1, w0 + parse_tc(o["end"]))
             stats["model"] += 1
         except ProviderError as e:

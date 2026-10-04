@@ -45,7 +45,7 @@ def review_check(ctx: RunContext) -> dict:
     for bi in range(0, len(items), 8):
         try:
             o = llm.structured(ctx.calls, f"review-check-{bi // 8 + 1:02}", P.check_prompt(items[bi:bi + 8]),
-                               P.CHECK_SCHEMA, effort="medium")
+                               P.CHECK_SCHEMA, effort="medium", enforce=True)
         except ContractError as e:
             ctx.event(f"review check batch failed: {e}", "warn")
             continue

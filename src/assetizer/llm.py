@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import jsonschema
 
-from .providers.agy import AgyProvider, ProviderError
+from .providers.agy import AgyProvider, ProviderError, gemini_schema
 from .util import read_json, write_json
 
 Recorder = Callable[[dict], None]
@@ -113,35 +113,65 @@ class LLM:
 
     def structured(self, call_root: Path, stage: str, prompt: str, schema: dict, *,
                    media: list[str] | None = None, effort: str | None = None,
-                   check: Callable[[Any], None] | None = None) -> Any:
-        """Return validated JSON. ``check`` may raise ContractError for semantic checks."""
+                   check: Callable[[Any], None] | None = None, enforce: bool = False) -> Any:
+        """Return validated JSON. ``check`` may raise ContractError for semantic checks.
+
+        ``enforce=True`` uses agy ``--json-schema`` (function-call output). Only for small
+        outputs: on a 50-min chunk it burned the output budget on thinking and returned
+        an empty list (2026-10-05). Large stages embed the schema in the prompt — the
+        Run-014 validated path — and are validated locally.
+
+        Recovery policy:
+          * deviation / empty / parseable-but-invalid → regenerate once (fresh call);
+          * unparseable text → one media-free contract repair (pure reformatting);
+          * repair output must pass the same validation and check, otherwise fail.
+        """
         d = Path(call_root) / stage
         accepted = d / "accepted.json"
         if accepted.exists():
             return read_json(accepted)
-        r = self._call(d / "attempt-1", stage, prompt, kind=stage, schema=schema, media=media, effort=effort)
-        if len(r.text.strip().strip("}{[] \n")) < 2:
-            # empty / bare-brace responses (Run-011 S02, Run-014 unit_14): regenerate once, repair cannot help
-            r = self._call(d / "attempt-2", stage, prompt, kind=stage, schema=schema, media=media, effort=effort)
-        try:
-            obj = _strip_extras(extract_json(r.text), schema)
-            validate(obj, schema)
+        full_prompt = prompt if enforce else (
+            prompt + "\n\n输出格式：只输出一个 JSON 对象，不要 Markdown 代码块、不要任何解释文字。必须符合以下 JSON Schema：\n"
+            + json.dumps(gemini_schema(schema), ensure_ascii=False))
+        kw = dict(kind=stage, schema=schema if enforce else None, media=media, effort=effort)
+
+        def parse(text: str) -> Any:
+            o = _strip_extras(extract_json(text), schema)
+            validate(o, schema)
             if check:
-                check(obj)
-        except ContractError as first:
-            write_json(d / "invalid.json", {"classification": first.kind, "detail": str(first)})
-            if first.kind not in {"FORMAT_NONCOMPLIANCE", "SCHEMA_VIOLATION"}:
-                raise
-            repair_prompt = (
-                "禁止使用任何工具、媒体与外部知识。你的唯一任务是把下面冻结的响应转换为符合给定 JSON Schema 的对象。"
-                "不得改写事实、增加观点或补充证据；原响应没有的信息用 null 或空数组，并在可用的 uncertainties 字段记录缺失。"
-                f"\n失败原因：{first}\n\nJSON Schema：\n{json.dumps(schema, ensure_ascii=False)}"
-                f"\n\n冻结响应：\n{r.text}"
-            )
-            rr = self._call(d / "contract-repair", stage + ":repair", repair_prompt, kind="contract-repair", schema=schema)
-            obj = _strip_extras(extract_json(rr.text), schema)
-            validate(obj, schema)
-            if check:
-                check(obj)
+                check(o)
+            return o
+
+        last: ContractError | ProviderError | None = None
+        r = None
+        for n in (1, 2):
+            try:
+                r = self._call(d / f"attempt-{n}", stage, full_prompt, **kw)
+            except ProviderError as e:
+                if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT") or n == 2:
+                    raise
+                last = e
+                continue
+            try:
+                obj = parse(r.text)
+                write_json(accepted, obj)
+                return obj
+            except ContractError as e:
+                write_json(d / f"invalid-{n}.json", {"classification": e.kind, "detail": str(e)})
+                last = e
+                if e.kind == "FORMAT_NONCOMPLIANCE" and len(r.text.strip().strip("}{[] \n")) >= 20:
+                    break  # real content in a broken envelope → repair below
+        if r is None or not isinstance(last, ContractError) or last.kind != "FORMAT_NONCOMPLIANCE" \
+                or len(r.text.strip().strip("}{[] \n")) < 20:
+            raise last if last else ContractError("CONTENT_FAILURE")
+        repair_prompt = (
+            "禁止使用任何工具、媒体与外部知识。你的唯一任务是把下面冻结的响应转换为符合给定 JSON Schema 的对象。"
+            "不得改写事实、增加观点或补充证据；原响应没有的信息用空字符串或空数组，并在可用的 uncertainties 字段记录缺失。"
+            "绝不允许为了满足 Schema 编造占位内容。"
+            f"\n失败原因：{last}\n\nJSON Schema：\n{json.dumps(gemini_schema(schema), ensure_ascii=False)}"
+            f"\n\n冻结响应：\n{r.text}"
+        )
+        rr = self._call(d / "contract-repair", stage + ":repair", repair_prompt, kind="contract-repair")
+        obj = parse(rr.text)
         write_json(accepted, obj)
         return obj

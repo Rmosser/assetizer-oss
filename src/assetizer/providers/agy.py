@@ -197,7 +197,7 @@ class AgyProvider:
                 su = e.get("step_update") or {}
                 if su.get("conversation_id") and not receipt.get("conversation_id"):
                     receipt["conversation_id"] = su["conversation_id"]
-                if su.get("step_type") == "tool" and su.get("tool_name") == "finish" and schema is not None:
+                if su.get("step_type") == "tool" and su.get("tool_name") == "finish":
                     pass  # structured output is delivered through the finish tool
                 elif su.get("step_type") == "tool":
                     name = su.get("tool_name")
