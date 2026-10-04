@@ -24,7 +24,7 @@ const FLAG_KIND: Record<string, string> = {
   ANCHOR_OUT_OF_RANGE: "截图锚点", HALF_SENTENCE_START: "片段起点", NEXT_TOPIC_BLEED: "片段终点", ENDS_BEFORE_CONCLUSION: "片段终点",
   DANGLING_REFERENCE: "指代", ATTRIBUTION_RISK: "归属", OVERSTATEMENT: "程度", CLIP_SHARED: "共用片段", UNIT_SPLIT_SPAN: "单元区间",
   CLIP_TOO_LONG: "片段过长", SELECTION_FALLBACK: "选片兜底", MERGE_UNREFERENCED_TOPIC: "合并", SCREENSHOT_FAILED: "截图",
-  BAD_TIMECODE: "时间码", CLIP_RENDER_FAILED: "剪辑失败", EDITORIAL_TERM: "措辞",
+  BAD_TIMECODE: "时间码", CLIP_RENDER_FAILED: "剪辑失败",
 };
 const flagKind = (k: string) => FLAG_KIND[k] || FLAG_KIND[k.replace(/^AI_/, "")] || k.replace(/^AI_/, "").toLowerCase();
 
