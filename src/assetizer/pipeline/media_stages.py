@@ -180,6 +180,7 @@ def _seg_end_indices(t: dict) -> set[int]:
 
 
 MAX_CLIP = 15 * 60
+BOUNDARY_PARALLEL = 3
 
 
 def main_span(u: dict, gap: float = 60.0) -> tuple[float, float]:
@@ -209,13 +210,11 @@ def boundary(ctx: RunContext) -> dict:
     words = tr["words"] if tr else []
     seg_ends = _seg_end_indices(tr) if tr else set()
     llm = ctx.llm()
-    results, stats = {}, {"model": 0, "fallback": 0, "snapped": 0}
-    for sl in sel:
-        if sl["verdict"] == "REJECT":
-            continue
+
+    def one(sl: dict) -> tuple[str, dict] | None:
         u = units.get(sl["unit_id"])
         if not u:
-            continue
+            return None
         span_a, span_b = main_span(u)
         if (span_a, span_b) != (u["start"], u["end"]):
             ctx.flag("UNIT", u["id"], "UNIT_SPLIT_SPAN", "INFO", f"「{u['title']}」引用了不相邻的段落，片段只取主要部分",
@@ -242,7 +241,6 @@ def boundary(ctx: RunContext) -> dict:
                                                  w1 - w0),
                                P.BOUNDARY_SCHEMA, media=[str(win)], check=check, enforce=True)
             a, b = w0 + parse_tc(o["start"]), min(w1, w0 + parse_tc(o["end"]))
-            stats["model"] += 1
         except ProviderError as e:
             if e.kind in ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"):
                 raise
@@ -251,7 +249,6 @@ def boundary(ctx: RunContext) -> dict:
             o, src = {"error": str(e)[:200]}, "fallback"
         if src == "fallback":
             a, b = span_a, span_b
-            stats["fallback"] += 1
             ctx.flag("UNIT", u["id"], "BOUNDARY_FALLBACK", "REVIEW", f"「{u['title']}」边界模型失败，已按单元区间确定性剪辑",
                      evidence={"error": o.get("error")})
         if words:
@@ -259,16 +256,26 @@ def boundary(ctx: RunContext) -> dict:
             if not (sn["start_snapped"] and sn["end_snapped"]):
                 ctx.flag("UNIT", u["id"], "BOUNDARY_UNCERTAIN", "INFO", f"「{u['title']}」边界附近没有找到清晰句界",
                          evidence={"start": fmt_tc(a), "end": fmt_tc(b)})
-            else:
-                stats["snapped"] += 1
         else:
             sn = {"start": a, "end": b, "start_snapped": False, "end_snapped": False}
-        results[u["id"]] = {"label": u["label"], "model": o, "source": src, "model_start": a, "model_end": b, **sn,
-                            "selection": sl["verdict"], "publication_priority": sl["publication_priority"],
-                            "context_missing": bool(o.get("context_missing")) if isinstance(o, dict) else False}
         if isinstance(o, dict) and o.get("context_missing"):
             ctx.flag("UNIT", u["id"], "CONTEXT_MISSING", "REVIEW", f"「{u['title']}」片段可能缺少上下文",
                      o.get("start_reason", ""))
+        return u["id"], {"label": u["label"], "model": o, "source": src, "model_start": a, "model_end": b, **sn,
+                         "selection": sl["verdict"], "publication_priority": sl["publication_priority"],
+                         "context_missing": bool(o.get("context_missing")) if isinstance(o, dict) else False}
+
+    # boundary calls read short 2 fps windows (~0.3–0.5 GB agy RSS) → safe to run a few at once
+    from concurrent.futures import ThreadPoolExecutor
+    todo = [sl for sl in sel if sl["verdict"] != "REJECT"]
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=BOUNDARY_PARALLEL) as pool:
+        for r in pool.map(one, todo):
+            if r:
+                results[r[0]] = r[1]
+    stats = {"model": sum(v["source"] == "model" for v in results.values()),
+             "fallback": sum(v["source"] == "fallback" for v in results.values()),
+             "snapped": sum(bool(v.get("start_snapped") and v.get("end_snapped")) for v in results.values())}
     ctx.save("machine/boundaries.json", results)
     return stats
 
