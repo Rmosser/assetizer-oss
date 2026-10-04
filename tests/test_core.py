@@ -113,3 +113,12 @@ def test_effort_maps_to_model_variant():
     assert model_for("gemini-3.8-flash-high", "medium") == "gemini-3.8-flash-medium"
     assert model_for("gemini-3.8-flash-high", None) == "gemini-3.8-flash-high"
     assert model_for("claude-opus-5-5-high", "low") == "claude-opus-5-5-low"
+
+
+def test_benign_tools_only_readonly_listings():
+    from assetizer.providers.agy import _benign
+    assert _benign("run_command", {"CommandLine": "ls -la .."})
+    assert _benign("list_dir", {"DirectoryPath": "."})
+    assert not _benign("run_command", {"CommandLine": "ls; rm -rf /"})
+    assert not _benign("run_command", {"CommandLine": "ffmpeg -i x.mp4 out.wav"})
+    assert not _benign("view_file", {"AbsolutePath": "/etc/passwd"})
