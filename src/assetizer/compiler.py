@@ -85,7 +85,8 @@ AUDIT_SCHEMA = P.obj({"grades": P.arr(P.obj({"rule_id": P.STR, "status": {"type"
 
 
 def _compile_prompt(identity: dict, clauses: list[dict]) -> str:
-    return f"""你是频道 Playbook 编译器。禁止工具与媒体。把用户为某个频道写下的长期学习偏好（已由系统切成编号条款）编译成可执行规则。
+    return f"""{P.TOOL_RULE}
+你是频道 Playbook 编译器。禁止工具与媒体。把用户为某个频道写下的长期学习偏好（已由系统切成编号条款）编译成可执行规则。
 
 全局政策（不可违反，冲突时以此为准）：
 {P.POLICY}
@@ -109,7 +110,8 @@ CLAUSES
 
 
 def _audit_prompt(pairs: list[dict]) -> str:
-    return f"""你是独立审计员。禁止工具与媒体。逐条检查每个规则是否完整保留了它所声称来源条款的具体意图。
+    return f"""{P.TOOL_RULE}
+你是独立审计员。禁止工具与媒体。逐条检查每个规则是否完整保留了它所声称来源条款的具体意图。
 - PRESERVED：条款里的具体要求（目录项、条件、步骤、限制）都在规则里；PARTIAL：有具体项被压缩或遗漏（missing 写出遗漏了什么）；DROPPED：基本没有保留。
 - 只看给出的条款，不评价规则写得好不好。
 
@@ -197,7 +199,8 @@ DRAFT_SCHEMA = P.obj({"raw_prompt": P.STR})
 def draft_prompt(channel_name: str, why: str, sample_titles: list[str]) -> str:
     """Draft a raw channel prompt from the user's stated reason (user edits before compiling)."""
     root = config.get().home / "compile" / f"draft-{sha256_text(channel_name + why)[:10]}"
-    o = LLM().structured(root, "draft", f"""禁止工具与媒体。用户决定长期追踪频道「{channel_name}」。
+    o = LLM().structured(root, "draft", f"""{P.TOOL_RULE}
+禁止工具与媒体。用户决定长期追踪频道「{channel_name}」。
 用户说明的原因：{why}
 该频道近期标题（仅用于了解题材，不是事实来源）：{json.dumps(sample_titles[:10], ensure_ascii=False)}
 

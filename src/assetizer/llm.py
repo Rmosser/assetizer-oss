@@ -152,12 +152,16 @@ class LLM:
 
         last: ContractError | ProviderError | None = None
         r = None
-        for n in (1, 2):
+        deviations = 0
+        for n in (1, 2, 3, 4):
+            if n == 4 or (n == 3 and deviations == 0):
+                break
             try:
                 r = self._call(d / f"attempt-{n}", stage, full_prompt, **kw)
             except ProviderError as e:
-                if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT") or n == 2:
+                if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT"):
                     raise
+                deviations += 1
                 last = e
                 continue
             try:
@@ -169,6 +173,8 @@ class LLM:
                 last = e
                 if e.kind == "FORMAT_NONCOMPLIANCE" and len(r.text.strip().strip("}{[] \n")) >= 20:
                     break  # real content in a broken envelope → repair below
+        if r is None and isinstance(last, ProviderError):
+            raise last
         if r is None or not isinstance(last, ContractError) or last.kind != "FORMAT_NONCOMPLIANCE" \
                 or len(r.text.strip().strip("}{[] \n")) < 20:
             raise last if last else ContractError("CONTENT_FAILURE")

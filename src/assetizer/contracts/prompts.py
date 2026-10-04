@@ -26,10 +26,13 @@ def arr(item: dict, **kw) -> dict:
 
 
 # --------------------------------------------------------------- context
+TOOL_RULE = "【执行方式】所有输入都在本条消息中。除非下文明确要求用 view_file 读取指定视频，否则不要调用任何工具（不要 ls、不要读文件、不要运行命令），直接输出结果。"
+
+
 def context(playbook: dict, phase: str) -> str:
     ident = playbook.get("identity") or {}
     rules = [r for r in playbook.get("rules", []) if phase in r.get("phases", []) or phase == "article" and "article" in r.get("phases", [])]
-    lines = [POLICY, ""]
+    lines = [TOOL_RULE, POLICY, ""]
     if playbook.get("universal"):
         lines.append("模式：Universal（未建立频道专属学习目标）。不使用任何频道规则，只做中性、完整、可追溯的知识整理。")
     else:
@@ -281,7 +284,8 @@ CHECK_SCHEMA = obj({"checks": arr(obj({
 
 
 def check_prompt(items: list[dict]) -> str:
-    return f"""{POLICY}
+    return f"""{TOOL_RULE}
+{POLICY}
 
 你是只读质检员：禁止工具与媒体，不改写任何内容，只报告可能需要人工判断的问题；每个条目都必须返回一条 checks 记录；没有问题时 issues 给空数组，不要为了有输出而挑刺。
 对每个条目（一个 Clip 及其知识单元），依据所附 ASR 原文检查：

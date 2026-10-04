@@ -58,6 +58,18 @@ _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sig
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
 
 
+_BENIGN_CMD = re.compile(r"^\s*(ls(\s+-[a-zA-Z]+)*(\s+[./~\w-]+)?|pwd)\s*$")
+
+
+def _benign(name: str | None, params: dict) -> bool:
+    """Read-only directory listing in the empty workspace — no fidelity or safety impact."""
+    if name == "list_dir":
+        return True
+    if name == "run_command":
+        return bool(_BENIGN_CMD.match(params.get("CommandLine") or ""))
+    return False
+
+
 def model_for(base: str, effort: str | None) -> str:
     """agy encodes effort in the model id (gemini-3.8-flash-{low,medium,high}); --effort conflicts."""
     if not effort:
@@ -183,7 +195,9 @@ class AgyProvider:
         seen_tool_steps: set = set()
         last_error_text = ""
         with (call_dir / "stderr.log").open("w") as err, (call_dir / "raw-output.jsonl").open("w") as out:
-            proc = subprocess.Popen(cmd, cwd=call_dir, stdin=stdin_file or subprocess.DEVNULL,
+            ws = call_dir / "ws"  # empty workspace: nothing for an agentic model to explore
+            ws.mkdir(exist_ok=True)
+            proc = subprocess.Popen(cmd, cwd=ws, stdin=stdin_file or subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=err, text=True,
                                     start_new_session=True, env=env)
 
@@ -240,6 +254,9 @@ class AgyProvider:
                     params = (su.get("tool_info") or {}).get("parameters") or {}
                     path = params.get("AbsolutePath")
                     ok = name == "view_file" and path and str(Path(path).resolve()) in allowed
+                    if not ok and _benign(name, params):
+                        receipt.setdefault("benign_tools", []).append({"tool": name, "parameters": params})
+                        continue
                     if not ok:
                         receipt["deviation"] = {"label": "MODALITY_ROUTING_DEVIATION", "tool": name, "parameters": params}
                         os.killpg(proc.pid, signal.SIGTERM)
