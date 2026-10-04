@@ -8,6 +8,7 @@ from ..contracts import prompts as P
 from ..llm import ContractError
 from ..util import fmt_tc, parse_tc, ulid
 from .context import RunContext, StageWarning
+from .media_stages import main_span
 
 BATCH = 6
 FORBIDDEN = ["振聋发聩", "醍醐灌顶", "集大成", "深刻揭示", "极高价值", "极强价值", "极佳示范", "精准洞察", "重磅",
@@ -150,7 +151,8 @@ def knowledge(ctx: RunContext) -> dict:
     for u in skel["units"]:
         refs = [mtopics[r] for r in u["topic_refs"]]
         segs = sorted(({"start": r["start_s"], "end": r["end_s"]} for r in refs), key=lambda x: x["start"])
-        units.append({**u, "start": segs[0]["start"], "end": max(s["end"] for s in segs), "segments": segs,
+        a, b = main_span({"segments": segs, "start": segs[0]["start"], "end": segs[-1]["end"]})
+        units.append({**u, "start": a, "end": b, "segments": segs,
                       "chunk_topic_refs": [c for r in refs for c in r["chunk_topic_refs"]]})
     units.sort(key=lambda u: u["start"])
 
