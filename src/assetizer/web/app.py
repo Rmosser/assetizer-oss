@@ -122,6 +122,13 @@ def source(sid: str, run: str | None = None):
     assets = db.q("SELECT id, unit_id, kind, status, start, end, selection, publication_priority, embed, standalone, decision, meta, bytes FROM assets WHERE run_id=?", rid)
     for a in assets:
         a["meta"] = db.unj(a["meta"], {})
+    # several units can come from one topic; once a clip exists, its refined span is the unit's precise location
+    clip_span = {a["unit_id"]: (a["start"], a["end"]) for a in assets if a["kind"] == "clip" and a["status"] == "GENERATED"}
+    for u in units:
+        if u["id"] in clip_span:
+            u["topic_start"], u["topic_end"] = u["start"], u["end"]
+            u["start"], u["end"] = clip_span[u["id"]]
+    units.sort(key=lambda u: u["start"])
     playbook = db.one("SELECT id, channel_id, version, status, data FROM playbooks WHERE id=?", r["playbook_id"]) if r and r.get("playbook_id") else None
     if playbook:
         playbook["facets"] = db.unj(playbook.pop("data"), {}).get("facets", [])
