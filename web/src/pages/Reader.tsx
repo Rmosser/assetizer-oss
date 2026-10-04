@@ -21,6 +21,10 @@ const FLAG_KIND: Record<string, string> = {
   ATTRIBUTION_OR_CONDITION_REVIEW_REQUIRED: "条件与归属", CLIP_CONTEXT_REVIEW_REQUIRED: "上下文依赖",
   PROVIDER_OUTPUT_LIMIT: "模型输出上限", PARSER_FAILURE: "解析恢复", STRUCTURED_CONTRACT_FAILURE: "结构化失败",
   ORCHESTRATION_FAILURE: "编排", SOURCE_TIMESTAMP_OVERRUN: "时间越界", EDITORIAL_REVIEW_CANDIDATE: "措辞",
+  ANCHOR_OUT_OF_RANGE: "截图锚点", HALF_SENTENCE_START: "片段起点", NEXT_TOPIC_BLEED: "片段终点", ENDS_BEFORE_CONCLUSION: "片段终点",
+  DANGLING_REFERENCE: "指代", ATTRIBUTION_RISK: "归属", OVERSTATEMENT: "程度", CLIP_SHARED: "共用片段", UNIT_SPLIT_SPAN: "单元区间",
+  CLIP_TOO_LONG: "片段过长", SELECTION_FALLBACK: "选片兜底", MERGE_UNREFERENCED_TOPIC: "合并", SCREENSHOT_FAILED: "截图",
+  BAD_TIMECODE: "时间码", CLIP_RENDER_FAILED: "剪辑失败", EDITORIAL_TERM: "措辞",
 };
 const flagKind = (k: string) => FLAG_KIND[k] || FLAG_KIND[k.replace(/^AI_/, "")] || k.replace(/^AI_/, "").toLowerCase();
 
@@ -343,7 +347,13 @@ function UnitSection({ u, section, assets, flags, facets, active, setActive, rel
         {nudging && clip && <Nudge sourceId={sourceId} clip={clip} onDone={() => { setNudging(false); reload(); }} />}
       </article>
       <aside className="margin">
-        {flags.map((f: Flag) => <Zhupi key={f.id} f={f} onChange={reload} />)}
+        {flags.filter((f: Flag) => f.severity !== "INFO").map((f: Flag) => <Zhupi key={f.id} f={f} onChange={reload} />)}
+        {flags.some((f: Flag) => f.severity === "INFO") && (
+          <details className="notes">
+            <summary>注记 {flags.filter((f: Flag) => f.severity === "INFO").length} 条</summary>
+            {flags.filter((f: Flag) => f.severity === "INFO").map((f: Flag) => <Zhupi key={f.id} f={f} onChange={reload} />)}
+          </details>
+        )}
       </aside>
     </>
   );
