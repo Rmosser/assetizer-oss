@@ -191,6 +191,10 @@ def main_span(u: dict, gap: float = 60.0) -> tuple[float, float]:
             clusters[-1][1] = max(clusters[-1][1], sg["end"])
         else:
             clusters.append([sg["start"], sg["end"]])
+    # the first substantial cluster is where the unit is taught; later clusters are usually re-mentions
+    for a, b in clusters:
+        if b - a >= 30:
+            return a, b
     a, b = max(clusters, key=lambda c: c[1] - c[0])
     return a, b
 

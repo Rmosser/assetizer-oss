@@ -126,7 +126,7 @@ KNOWLEDGE_TYPES = ["CHART_READING", "TRADING_PRINCIPLE", "TRADE_MANAGEMENT", "RI
 SKELETON_SCHEMA = obj({
     "units": arr(obj({
         "label": {"type": "string", "pattern": r"^[a-z0-9_]{3,64}$"},
-        "title": STR, "topic_refs": arr(STR, minItems=1),
+        "title": STR, "topic_refs": arr(STR, minItems=1), "focus": STR,
         "knowledge_type": {"type": "string", "enum": KNOWLEDGE_TYPES},
         "learning_priority": {"type": "integer", "minimum": 1, "maximum": 3},
         "tickers": STRS, "depends_on": STRS, "clip_candidate": {"type": "boolean"}, "why": STR,
@@ -139,11 +139,14 @@ def skeleton_prompt(playbook: dict, topics: list[dict]) -> str:
     return f"""{context(playbook, 'knowledge')}
 
 禁止工具与媒体。根据下面合并后的主题，规划本期的 Knowledge Units（知识单元）**清单**——本次只出骨架，不写详细内容。
-- 学习价值优先：不要把每只股票都展开；简单报涨跌、行情浏览可合成一个 GENERAL_CONTEXT 单元；不固定数量凑点，也不要漏掉真正值得学习的判断。
+- 粒度：**一个知识单元 = 一个可以独立学习的判断或案例**（例如一只标的的一次读图判断、一条交易规则、一个风控决定）。一个主题里如果包含多个独立的读图判断或标的案例，要拆成多个单元；不要把一组候选股合成一个单元。
+- 学习价值优先：简单报涨跌、纯行情浏览可合成一个 GENERAL_CONTEXT 单元；不固定数量凑点，也不要漏掉真正值得学习的判断。
+- 单元的主要讲解应集中在一处：topic_refs 先列出主要讲解所在的主题；后面零散提及同一标的的主题只有在补充了新判断时才引用。
 - label：小写英文+数字+下划线的稳定标识（如 unit_07_tsla_gap_breakout），本期内唯一。
 - topic_refs 引用输入主题 id（必须存在）；一个单元可以引用多个主题，时间由系统按引用推算。
 - learning_priority：3=优先学习，2=值得学习，1=补充理解。depends_on：理解本单元需要先看的其他单元 label。
 - clip_candidate：是否可能成为一段独立可看的视频片段。why：一句话说明为什么值得学（描述内容，不赞美）。
+- focus：若单元只占所引用主题中的一部分，写出主讲人讲解这部分时出现的关键词或标的（用于定位），否则留空。
 
 INPUT TOPICS
 {json.dumps(topics, ensure_ascii=False)}"""
