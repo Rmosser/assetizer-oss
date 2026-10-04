@@ -110,7 +110,9 @@ def source(sid: str, run: str | None = None):
     assets = db.q("SELECT id, unit_id, kind, status, start, end, selection, publication_priority, embed, standalone, decision, meta, bytes FROM assets WHERE run_id=?", rid)
     for a in assets:
         a["meta"] = db.unj(a["meta"], {})
-    playbook = db.one("SELECT id, channel_id, version, status FROM playbooks WHERE id=?", r["playbook_id"]) if r and r.get("playbook_id") else None
+    playbook = db.one("SELECT id, channel_id, version, status, data FROM playbooks WHERE id=?", r["playbook_id"]) if r and r.get("playbook_id") else None
+    if playbook:
+        playbook["facets"] = db.unj(playbook.pop("data"), {}).get("facets", [])
     return {
         "source": {k: v for k, v in s.items() if k not in ("info",)} | {"info": db.unj(s.get("info"), {})},
         "run": _run_view(r), "units": units, "assets": assets, "playbook": playbook,
