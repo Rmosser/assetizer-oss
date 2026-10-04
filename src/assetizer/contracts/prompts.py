@@ -259,7 +259,7 @@ BOUNDARY_SCHEMA = obj({
 })
 
 
-def boundary_prompt(playbook: dict, media_path: str, unit: dict, window_len: float) -> str:
+def boundary_prompt(playbook: dict, media_path: str, unit: dict, window_len: float, siblings: list[str] | None = None) -> str:
     return f"""{context(playbook, 'selection')}
 
 你是视频 Clip Boundary Worker，不是总结器。唯一任务：在当前窗口视频中选择一段连续、可独立观看的完整内容，给出自然开始与完整结束。
@@ -267,6 +267,7 @@ def boundary_prompt(playbook: dict, media_path: str, unit: dict, window_len: flo
 - 没有固定时长目标，短不是更好；不得切掉必要条件、代词主体或结论；不得为去掉内部跑题而拼接。
 - start / end 使用**本窗口视频播放器内的时间码**（从 00:00 开始，MM:SS），窗口时长约 {window_len:.0f} 秒；end 必须大于 start。
 - 无法获得完整上下文时 context_missing=true、standalone_confidence=LOW，不要假装可发布。
+- 同一窗口里还讲了其他知识单元（另有片段），只选**本单元**对应的那一段，不要把它们一起包进来：{json.dumps(siblings or [], ensure_ascii=False)}
 
 INPUT
 {json.dumps({"window_video": media_path, "unit": unit}, ensure_ascii=False)}"""

@@ -133,6 +133,9 @@ function Film({ unit, clip, sub, posterId, active, setActive }: {
   }, [isActive, active?.docked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!clip) return null;
+  if (clip.status === "NOT_SELECTED" && clip.meta?.shared_with) {
+    return <div className="film-missing">这一段与「{clip.meta.shared_title}」落在同一段视频里，片段见该单元。</div>;
+  }
   if (clip.status !== "GENERATED") {
     return <div className="film-missing">这一段的视频片段没有生成：{clip.meta?.error || "原因见朱批"}。文字与截图照常保留。</div>;
   }

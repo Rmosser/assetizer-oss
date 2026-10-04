@@ -238,7 +238,9 @@ def boundary(ctx: RunContext) -> dict:
             o = llm.structured(ctx.calls, f"boundary-{u['label']}",
                                P.boundary_prompt(ctx.playbook, str(win), {k: u[k] for k in ("label", "title", "summary", "required_context")}
                                                  | {"unit_start_in_window": fmt_tc(span_a - w0), "unit_end_in_window": fmt_tc(span_b - w0)},
-                                                 w1 - w0),
+                                                 w1 - w0,
+                                                 [x["title"] for x in units.values() if x["id"] != u["id"]
+                                                  and x["start"] < w1 and x["end"] > w0]),
                                P.BOUNDARY_SCHEMA, media=[str(win)], check=check, enforce=True)
             a, b = w0 + parse_tc(o["start"]), min(w1, w0 + parse_tc(o["end"]))
         except ProviderError as e:
@@ -281,13 +283,40 @@ def boundary(ctx: RunContext) -> dict:
 
 
 # ------------------------------------------------------------------ clips
+def dedupe_clips(bnd: dict, units: dict, iou_min: float = 0.85) -> dict[str, str]:
+    """Map secondary unit → primary unit for near-identical clip spans (keep the higher learning priority)."""
+    ids = sorted(bnd, key=lambda k: (-units[k]["learning_priority"], bnd[k]["start"]))
+    shared: dict[str, str] = {}
+    kept: list[str] = []
+    for k in ids:
+        a, b = bnd[k]["start"], bnd[k]["end"]
+        for p in kept:
+            pa, pb = bnd[p]["start"], bnd[p]["end"]
+            inter = max(0.0, min(b, pb) - max(a, pa))
+            union = max(b, pb) - min(a, pa)
+            if union > 0 and inter / union >= iou_min:
+                shared[k] = p
+                break
+        else:
+            kept.append(k)
+    return shared
+
 def clips(ctx: RunContext) -> dict:
     bnd = ctx.load("machine/boundaries.json", {})
     units = {u["id"]: u for u in _units(ctx)}
     tr = _transcript(ctx)
     words = tr["words"] if tr else []
     ok = failed = 0
+    shared = dedupe_clips(bnd, units)
+    for uid, primary in shared.items():
+        u, pu = units[uid], units[primary]
+        b = bnd[uid]
+        _asset(ctx, uid, "clip", "NOT_SELECTED", None, b["start"], b["end"], {"shared_with": primary, "shared_title": pu["title"]},
+               selection=b["selection"], publication_priority=b["publication_priority"])
+        ctx.flag("UNIT", uid, "CLIP_SHARED", "INFO", f"「{u['title']}」与「{pu['title']}」落在同一段视频，只保留一个片段")
     for uid, b in bnd.items():
+        if uid in shared:
+            continue
         u = units[uid]
         a, e = b["start"], b["end"]
         if words:  # trim only real leading/trailing dead air (>1.5 s before first / after last word)

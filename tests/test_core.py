@@ -122,3 +122,10 @@ def test_benign_tools_only_readonly_listings():
     assert not _benign("run_command", {"CommandLine": "ls; rm -rf /"})
     assert not _benign("run_command", {"CommandLine": "ffmpeg -i x.mp4 out.wav"})
     assert not _benign("view_file", {"AbsolutePath": "/etc/passwd"})
+
+
+def test_dedupe_clips_keeps_higher_priority():
+    from assetizer.pipeline.media_stages import dedupe_clips
+    units = {"a": {"learning_priority": 2}, "b": {"learning_priority": 3}, "c": {"learning_priority": 2}}
+    bnd = {"a": {"start": 448, "end": 702}, "b": {"start": 449, "end": 701}, "c": {"start": 600, "end": 900}}
+    assert dedupe_clips(bnd, units) == {"a": "b"}
