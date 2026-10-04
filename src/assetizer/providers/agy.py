@@ -247,6 +247,8 @@ class AgyProvider:
                 su = e.get("step_update") or {}
                 if su.get("conversation_id") and not receipt.get("conversation_id"):
                     receipt["conversation_id"] = su["conversation_id"]
+                if receipt.get("conversation_id") and not (call_dir / "conversation.txt").exists():
+                    (call_dir / "conversation.txt").write_text(receipt["conversation_id"])  # survives a kill
                 if su.get("step_type") == "tool" and su.get("tool_name") == "finish":
                     pass  # structured output is delivered through the finish tool
                 elif su.get("step_type") == "tool":

@@ -289,6 +289,7 @@ class Worker:
             db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status='RUNNING'", r["id"])
             db.event("run", "Worker 重启，从断点继续", r["id"], "warn")
         db.exec("UPDATE sources SET delivery='NOT_STARTED' WHERE delivery='DELIVERING'")
+        finish.sweep_agy_state()
         if n:
             db.event("worker", f"清理了 {n} 个遗留 agy 进程", level="warn")
 

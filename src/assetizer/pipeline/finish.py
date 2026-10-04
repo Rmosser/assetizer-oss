@@ -175,6 +175,10 @@ def sweep_agy_state(max_age_s: int = 3600) -> int:
     """Delete leftover agy state for conversations *this app* created (recorded in model_calls).
     Never touches the user's own interactive agy sessions."""
     from ..providers.agy import AgyProvider
-    ids = [r["conversation_id"] for r in db.q("SELECT DISTINCT conversation_id FROM model_calls WHERE conversation_id IS NOT NULL")]
+    ids = {r["conversation_id"] for r in db.q("SELECT DISTINCT conversation_id FROM model_calls WHERE conversation_id IS NOT NULL")}
+    for f in config.get().runs_dir.glob("*/calls/**/conversation.txt"):  # includes calls killed mid-flight
+        ids.add(f.read_text().strip())
+    for f in config.get().home.glob("compile/**/conversation.txt"):
+        ids.add(f.read_text().strip())
     p = AgyProvider()
     return sum(p.purge_conversation(c) for c in ids)
