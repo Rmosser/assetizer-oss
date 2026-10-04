@@ -281,7 +281,11 @@ class Worker:
     def recover(self) -> None:
         n = kill_orphans()
         for r in db.q("SELECT id, attempts FROM runs WHERE production='RUNNING'"):
-            db.exec("UPDATE runs SET production=? WHERE id=?", "QUEUED" if r["attempts"] < 3 else "FAILED", r["id"])
+            if r["attempts"] < 5:
+                db.exec("UPDATE runs SET production='QUEUED' WHERE id=?", r["id"])
+            else:
+                db.exec("UPDATE runs SET production='FAILED', error_class='TOO_MANY_RESTARTS', error=? WHERE id=?",
+                        "Worker 多次在该期生产中重启，已停止自动续跑；请在机房重试。", r["id"])
             db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status='RUNNING'", r["id"])
             db.event("run", "Worker 重启，从断点继续", r["id"], "warn")
         db.exec("UPDATE sources SET delivery='NOT_STARTED' WHERE delivery='DELIVERING'")

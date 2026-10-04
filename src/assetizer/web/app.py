@@ -325,7 +325,7 @@ def retry(rid: str):
     if first is not None:  # everything downstream of the first problem is rebuilt
         db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND ord>=? AND name NOT IN ('TRANSCRIBE')", rid, first)
         db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND name='TRANSCRIBE' AND status!='DONE'", rid)
-    db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL, error=NULL, error_class=NULL WHERE id=?", rid)
+    db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL, error=NULL, error_class=NULL, attempts=0 WHERE id=?", rid)
     return {"ok": True}
 
 
