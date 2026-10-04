@@ -347,6 +347,25 @@ function UnitSection({ u, section, assets, flags, facets, active, setActive, rel
 }
 
 /* ───────────────────────────── page ───────────────────────────── */
+function Progress() {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let raf = 0;
+    const on = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const h = document.documentElement.scrollHeight - innerHeight;
+        if (ref.current) ref.current.style.width = `${h > 0 ? (scrollY / h) * 100 : 0}%`;
+      });
+    };
+    on();
+    addEventListener("scroll", on, { passive: true });
+    addEventListener("resize", on);
+    return () => { removeEventListener("scroll", on); removeEventListener("resize", on); cancelAnimationFrame(raf); };
+  }, []);
+  return <div className="progress" ref={ref} aria-hidden />;
+}
+
 export default function Reader({ id }: { id: string }) {
   const { data, reload } = usePoll<any>(`/api/sources/${encodeURIComponent(id)}`, 0);
   const [active, setActiveState] = useState<Active>(null);
@@ -398,6 +417,7 @@ export default function Reader({ id }: { id: string }) {
 
   return (
     <main className="page">
+      <Progress />
       <header className="reader-head">
         <a className="crumb" {...linkProps("/")}>← 目录</a>
         <div className="chan">{channel?.name || source.channel_title || "未识别频道"}</div>

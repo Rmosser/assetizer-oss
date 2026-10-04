@@ -573,3 +573,13 @@ details.notes .zhupi { margin-left: -16px; }
 .strip .w.caret-start::before, .strip .w.caret-end::after { content: ""; position: absolute; top: 2px; bottom: 2px; width: 2px; background: var(--zhu); }
 .strip .w.caret-start::before { left: -2px; }
 .strip .w.caret-end::after { right: -2px; }
+
+/* reading progress — a vermilion hairline under the masthead */
+.progress { position: fixed; top: 63px; left: 0; height: 2px; background: var(--zhu); z-index: 31; transform-origin: 0 50%; pointer-events: none; }
+@media (max-width: 900px) { .progress { top: 0; } }
+
+/* staggered entrance for lists */
+.stagger > * { animation: fade 0.6s var(--ease) both; }
+.stagger > *:nth-child(2) { animation-delay: 40ms; } .stagger > *:nth-child(3) { animation-delay: 80ms; }
+.stagger > *:nth-child(4) { animation-delay: 120ms; } .stagger > *:nth-child(5) { animation-delay: 160ms; }
+.stagger > *:nth-child(6) { animation-delay: 200ms; } .stagger > *:nth-child(n+7) { animation-delay: 240ms; }

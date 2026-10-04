@@ -37,7 +37,7 @@ export function PressLine({ run }: { run: any }) {
 
 function Toc({ issues }: { issues: any[] }) {
   return (
-    <ol className="toc">
+    <ol className="toc stagger">
       {issues.map((it) => {
         const producing = ["QUEUED", "RUNNING", "WAITING", "INTERRUPTED"].includes(it.production) && !it.units;
         return (

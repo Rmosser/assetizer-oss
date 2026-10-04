@@ -25,6 +25,9 @@
 14. 导航收为 3 个：**刊**（期刊目录 + 粘贴框 + 印刷线）/ **频道** / **机房**。视觉概念「刊 + 朱批」：纸墨双色 + 唯一强调色朱红；中文衬线 Noto Serif SC；Reader 三栏（纵向 Source Timeline 脊柱 / 文章 + 单一悬浮播放器 / 朱批边注）。
 15. agy 调用记录 agy 版本；Web 只走 SSH 隧道 → 今晚不做移动端 QA。
 
+16. **模型输入一律为 Proxy**（2026-10-05 实测后裁决）：agy 自动升级到 1.2.16 后 `view_file` 拒绝 >100 MB 文件，Run-014 式 619 MB 流复制 Chunk 不再可读。CHUNK 改为从原片精确起点重编码 1 fps、原分辨率、GOP 60 s、CRF 32 的 Proxy（50 min ≈ 92 MB，Ticker/价格清晰可读），超限按 CRF 36 → 720p 阶梯降级；Boundary 窗口 2 fps。副作用：offset 精确等于起点（不再依赖关键帧），agy 峰值内存显著下降。
+17. **`--json-schema` 只用于小输出**（同日实测）：整段理解在 schema 模式下把输出预算耗在 thinking、返回空 topics；contract repair 随后编造了占位主题。裁决：大输出阶段把 Schema 写进 Prompt 并本地校验（Run-014 路径）；内容为空 / 不合规 / 工具偏航 → 重新生成一次；repair 仅限无法解析的文本，且不得编造。
+
 **推迟：** Playbook 编译器与 Onboarding UI、轻量 Discovery（transcript-based）、RSS 自动收录、PromptAmendment、M lane 并行、媒体 proxy A/B、systemd-run scope（先确认 user systemd 可用）。
 
 ## 0. 设计约束（来自用户与证据）
