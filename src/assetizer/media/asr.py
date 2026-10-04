@@ -24,8 +24,20 @@ def _load():
 
         s = config.get()
         _model = WhisperModel(s.whisper_model, device="cpu", compute_type="int8",
-                              download_root=str(s.whisper_root), cpu_threads=4)
+                              download_root=str(s.whisper_root), cpu_threads=6)
     return _model
+
+
+def _read_wav(path: Path):
+    """16 kHz mono PCM wav (as produced by ffmpeg.extract_wav) → float32 numpy array."""
+    import wave
+
+    import numpy as np
+
+    with wave.open(str(path), "rb") as w:
+        assert w.getframerate() == 16000 and w.getnchannels() == 1 and w.getsampwidth() == 2, "expect 16k mono s16"
+        data = w.readframes(w.getnframes())
+    return np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def release() -> None:
@@ -40,9 +52,10 @@ def transcribe(wav: Path, offset: float = 0.0, language: str | None = "zh",
     """Return {'segments': [{start,end,text}], 'words': [{start,end,word}]} in offset-shifted seconds."""
     with _lock:
         m = _load()
-        segs, info = m.transcribe(str(wav), language=language, word_timestamps=True, temperature=0,
+        audio = _read_wav(wav)  # bypass PyAV (API drift: open(metadata_errors=...) broke on the server)
+        segs, info = m.transcribe(audio, language=language, word_timestamps=True, temperature=0,
                                   condition_on_previous_text=False, vad_filter=False,
-                                  initial_prompt=initial_prompt, beam_size=5)
+                                  initial_prompt=initial_prompt, beam_size=1)
         segments, words = [], []
         for s in segs:
             segments.append({"start": offset + s.start, "end": offset + s.end, "text": s.text})
