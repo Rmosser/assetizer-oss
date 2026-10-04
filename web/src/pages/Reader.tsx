@@ -215,8 +215,61 @@ function Zhupi({ f, onChange }: { f: Flag; onChange: () => void }) {
   );
 }
 
+/* ───────────────────────────── minor edit: boundary nudge ───────────────────────────── */
+function Nudge({ sourceId, clip, onDone }: { sourceId: string; clip: Asset; onDone: () => void }) {
+  const [start, setStart] = useState<number>(clip.start);
+  const [end, setEnd] = useState<number>(clip.end);
+  const [words, setWords] = useState<{ head: any[]; tail: any[] } | null>(null);
+  const [state, setState] = useState<string | null>(null);
+  useEffect(() => {
+    const q = (a: number, b: number) => fetch(`/api/sources/${encodeURIComponent(sourceId)}/words?start=${a}&end=${b}`).then((r) => r.json());
+    Promise.all([q(clip.start - 8, clip.start + 6), q(clip.end - 6, clip.end + 8)]).then(([h, t]) => setWords({ head: h.words, tail: t.words }));
+  }, [sourceId, clip.start, clip.end]);
+  const submit = async () => {
+    try { await post(`/api/assets/${clip.id}/nudge`, { start, end }); setState("已提交，机房空闲时重剪（约 1 分钟）"); setTimeout(onDone, 1500); }
+    catch (e) { setState(String((e as Error).message)); }
+  };
+  const strip = (ws: any[], kind: "start" | "end") => (
+    <div className="strip">
+      {ws.length === 0 && <span className="muted">（这一期没有全片转写，只能按秒微调）</span>}
+      {ws.map((w, i) => {
+        const at = kind === "start" ? w.start - 0.15 : w.end + 0.3;
+        const cur = kind === "start" ? start : end;
+        const inside = kind === "start" ? w.start >= start : w.end <= end;
+        const caret = kind === "start" ? Math.abs(w.start - 0.15 - cur) < 0.2 : Math.abs(w.end + 0.3 - cur) < 0.2;
+        return (
+          <button key={i} className={`w ${inside ? "in" : ""} ${caret ? "caret-" + kind : ""}`} title={tc(w.start)}
+            onClick={() => (kind === "start" ? setStart(at) : setEnd(at))}>{w.word}</button>
+        );
+      })}
+    </div>
+  );
+  return (
+    <div className="nudge" role="group" aria-label="微调片段边界">
+      <div className="nudge-row">
+        <span className="caps">起点</span>
+        <span className="mono">{tc(start)}</span>
+        <div className="step"><button onClick={() => setStart(start - 1)}>−1s</button><button onClick={() => setStart(start + 1)}>+1s</button></div>
+      </div>
+      {words && strip(words.head, "start")}
+      <div className="nudge-row">
+        <span className="caps">终点</span>
+        <span className="mono">{tc(end)}</span>
+        <div className="step"><button onClick={() => setEnd(end - 1)}>−1s</button><button onClick={() => setEnd(end + 1)}>+1s</button></div>
+      </div>
+      {words && strip(words.tail, "end")}
+      <div className="nudge-row" style={{ marginTop: 12 }}>
+        <span className="muted" style={{ fontSize: 12.5 }}>点选词语把边界吸附到词边；确定性重剪，不调用模型。时长 {Math.round(end - start)} 秒。</span>
+        <button className="btn solid sm" style={{ marginLeft: "auto" }} onClick={submit} disabled={end - start < 3}>按此重剪</button>
+      </div>
+      {state && <p className="zhu" style={{ margin: "8px 0 0", fontSize: 13 }}>{state}</p>}
+    </div>
+  );
+}
+
 /* ───────────────────────────── unit ───────────────────────────── */
-function UnitSection({ u, section, assets, flags, facets, active, setActive, reload, onShot }: any) {
+function UnitSection({ u, section, assets, flags, facets, active, setActive, reload, onShot, sourceId }: any) {
+  const [nudging, setNudging] = useState(false);
   const clip = assets.find((a: Asset) => a.kind === "clip" && a.unit_id === u.id);
   const sub = assets.find((a: Asset) => a.kind === "clip_subtitled" && a.unit_id === u.id);
   const poster = assets.find((a: Asset) => a.kind === "poster" && a.unit_id === u.id);
@@ -280,9 +333,11 @@ function UnitSection({ u, section, assets, flags, facets, active, setActive, rel
               <label className={`switch ${clip.embed ? "on" : ""}`} onClick={() => setEmbed(!clip.embed)}>
                 <i /> 进入 Notion 正文
               </label>
+              <button className="btn ghost sm" onClick={() => setNudging(!nudging)}>{nudging ? "收起微调" : "微调边界"}</button>
             </>
           )}
         </div>
+        {nudging && clip && <Nudge sourceId={sourceId} clip={clip} onDone={() => { setNudging(false); reload(); }} />}
       </article>
       <aside className="margin">
         {flags.map((f: Flag) => <Zhupi key={f.id} f={f} onChange={reload} />)}
@@ -362,7 +417,10 @@ export default function Reader({ id }: { id: string }) {
         {openFlags > 0 ? (
           <button className="flagsum" onClick={() => firstOpen && jump(firstOpen.target_id)}>朱批 {openFlags} 处待判断 →</button>
         ) : <span className="muted" style={{ fontSize: 13 }}>无待判断事项</span>}
-        <span className="muted" style={{ fontSize: 12.5 }}>· {DELIVERY[source.delivery] || source.delivery}</span>
+        <span className="muted" style={{ fontSize: 12.5 }} title={source.delivery_reason || ""}>· {DELIVERY[source.delivery] || source.delivery}</span>
+        {["FAILED", "STALE"].includes(source.delivery) && (
+          <button className="btn ghost sm" onClick={async () => { await post(`/api/sources/${source.id}/deliver`); reload(); }}>重新交付</button>
+        )}
         <div className="right">
           <button className={`btn sm ${source.review === "APPROVED" ? "solid" : ""}`} onClick={() => setReview("APPROVED")}>通过</button>
           <button className={`btn sm ${source.review === "CHANGES_REQUESTED" ? "solid" : ""}`} onClick={() => setReview("CHANGES_REQUESTED")}>需修改</button>
@@ -391,7 +449,7 @@ export default function Reader({ id }: { id: string }) {
             )}
           </aside>
           {units.map((u) => (
-            <UnitSection key={u.id} u={u} section={secByUnit[u.id]} assets={assets} facets={playbook?.facets}
+            <UnitSection key={u.id} sourceId={source.id} u={u} section={secByUnit[u.id]} assets={assets} facets={playbook?.facets}
               flags={flags.filter((f: Flag) => f.target_id === u.id)} active={active} setActive={setActive} reload={reload} onShot={setShot} />
           ))}
           {outro.map((s: any) => (

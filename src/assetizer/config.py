@@ -36,7 +36,7 @@ class Settings:
     boundary_pad_seconds: int = 30
     disk_high_watermark: float = 0.85
     source_retention_days: int = 7
-    agy_print_timeout: str = "25m"
+    agy_print_timeout: str = "35m"
     extra: dict = field(default_factory=dict)
 
     @property

@@ -176,6 +176,22 @@ def _seg_end_indices(t: dict) -> set[int]:
     return ends
 
 
+MAX_CLIP = 15 * 60
+
+
+def main_span(u: dict, gap: float = 60.0) -> tuple[float, float]:
+    """Longest cluster of a unit's segments (segments closer than ``gap`` merge)."""
+    segs = sorted(u.get("segments") or [{"start": u["start"], "end": u["end"]}], key=lambda x: x["start"])
+    clusters = [[segs[0]["start"], segs[0]["end"]]]
+    for sg in segs[1:]:
+        if sg["start"] - clusters[-1][1] <= gap:
+            clusters[-1][1] = max(clusters[-1][1], sg["end"])
+        else:
+            clusters.append([sg["start"], sg["end"]])
+    a, b = max(clusters, key=lambda c: c[1] - c[0])
+    return a, b
+
+
 def boundary(ctx: RunContext) -> dict:
     s = config.get()
     units = {u["id"]: u for u in _units(ctx)}
@@ -193,8 +209,15 @@ def boundary(ctx: RunContext) -> dict:
         u = units.get(sl["unit_id"])
         if not u:
             continue
-        w0 = max(0.0, u["start"] - s.boundary_pad_seconds)
-        w1 = min(ctx.duration, u["end"] + s.boundary_pad_seconds)
+        span_a, span_b = main_span(u)
+        if (span_a, span_b) != (u["start"], u["end"]):
+            ctx.flag("UNIT", u["id"], "UNIT_SPLIT_SPAN", "INFO", f"「{u['title']}」引用了不相邻的段落，片段只取主要部分",
+                     evidence={"segments": u.get("segments")})
+        if span_b - span_a > MAX_CLIP:
+            ctx.flag("UNIT", u["id"], "CLIP_TOO_LONG", "REVIEW", f"「{u['title']}」超过 {MAX_CLIP // 60} 分钟，片段截取前 {MAX_CLIP // 60} 分钟")
+            span_b = span_a + MAX_CLIP
+        w0 = max(0.0, span_a - s.boundary_pad_seconds)
+        w1 = min(ctx.duration, span_b + s.boundary_pad_seconds)
         src = "model"
         try:
             win = ctx.dir / "work" / "windows" / f"{u['label']}.mp4"
@@ -208,7 +231,7 @@ def boundary(ctx: RunContext) -> dict:
 
             o = llm.structured(ctx.calls, f"boundary-{u['label']}",
                                P.boundary_prompt(ctx.playbook, str(win), {k: u[k] for k in ("label", "title", "summary", "required_context")}
-                                                 | {"unit_start_in_window": fmt_tc(u["start"] - w0), "unit_end_in_window": fmt_tc(u["end"] - w0)},
+                                                 | {"unit_start_in_window": fmt_tc(span_a - w0), "unit_end_in_window": fmt_tc(span_b - w0)},
                                                  w1 - w0),
                                P.BOUNDARY_SCHEMA, media=[str(win)], check=check, enforce=True)
             a, b = w0 + parse_tc(o["start"]), min(w1, w0 + parse_tc(o["end"]))
@@ -220,7 +243,7 @@ def boundary(ctx: RunContext) -> dict:
         except (ContractError, ffmpeg.MediaError) as e:
             o, src = {"error": str(e)[:200]}, "fallback"
         if src == "fallback":
-            a, b = u["start"], u["end"]
+            a, b = span_a, span_b
             stats["fallback"] += 1
             ctx.flag("UNIT", u["id"], "BOUNDARY_FALLBACK", "REVIEW", f"「{u['title']}」边界模型失败，已按单元区间确定性剪辑",
                      evidence={"error": o.get("error")})
@@ -266,8 +289,13 @@ def clips(ctx: RunContext) -> dict:
                 "start_snapped": b.get("start_snapped"), "end_snapped": b.get("end_snapped")}
         standalone = 0 if b["selection"] == "CONTEXT_DEPENDENT" or b.get("context_missing") else 1
         try:
-            if not clean.exists():
+            params = d / "clip-params.json"
+            want = {"start": round(a, 3), "end": round(e, 3)}
+            if not clean.exists() or not params.exists() or read_json(params) != want:
+                for stale in ("clip-subtitled.mp4", "subtitle.srt", "subtitle.ass"):
+                    (d / stale).unlink(missing_ok=True)
                 ffmpeg.render_clip(ctx.media, a, e, clean)
+                write_json(params, want)
             ffmpeg.frame(clean, min(3.0, (e - a) / 2), d / "poster.jpg", width=1280)
             _asset(ctx, uid, "clip", "GENERATED", clean, a, e, meta, selection=b["selection"],
                    publication_priority=b["publication_priority"], standalone=standalone)
@@ -286,7 +314,7 @@ def clips(ctx: RunContext) -> dict:
 
 
 # ------------------------------------------------------------------ subtitles
-def subtitle_stage(ctx: RunContext) -> dict:
+def subtitle_stage(ctx: RunContext, only_unit: str | None = None) -> dict:
     tr = _transcript(ctx)
     if not tr:
         raise StageWarning("no transcript; subtitles skipped")
@@ -295,6 +323,8 @@ def subtitle_stage(ctx: RunContext) -> dict:
     units = {u["id"]: u for u in _units(ctx)}
     res = {"SUCCESS": 0, "SUCCESS_WITH_WARNINGS": 0, "FAILED_NON_BLOCKING": 0}
     for c in db.q("SELECT * FROM assets WHERE run_id=? AND kind='clip' AND status='GENERATED'", ctx.id):
+        if only_unit and c["unit_id"] != only_unit:
+            continue
         u = units[c["unit_id"]]
         clip = Path(c["path"])
         d = clip.parent

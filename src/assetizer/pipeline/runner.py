@@ -173,6 +173,10 @@ def execute(run_id: str) -> str:
             try:
                 st, _ = _exec_stage(ctx, name, fn)
                 warned |= st == "WARN"
+                if name in ("RESOLVE", "ACQUIRE") and st == "DONE":
+                    db.resolve_alert("YOUTUBE_AUTH")
+                    if name == "ACQUIRE":
+                        db.resolve_alert("DISK_LOW")
             except (Waiting, ProviderError) as e:
                 if isinstance(e, ProviderError) and e.kind not in PAUSE_KINDS:
                     if blocking:
@@ -189,6 +193,9 @@ def execute(run_id: str) -> str:
                 warned = True
         if bg is not None:
             bg.join()
+            bg = None
+        if bg_err:
+            warned = True
     except Waiting as w:
         _wait(run_id, w.reason, str(w))
         return "WAITING"
@@ -202,6 +209,9 @@ def execute(run_id: str) -> str:
     except Exception as e:  # noqa: BLE001
         _fail(run_id, e)
         return "FAILED"
+    finally:
+        if bg is not None:  # never let whisper overlap the next run's agy call
+            bg.join()
     state = "COMPLETE_PARTIAL" if warned else "COMPLETE"
     summary = _summary(run_id)
     db.exec("UPDATE runs SET production=?, stage=NULL, finished_at=?, summary=? WHERE id=?", state, now(), db.j(summary), run_id)
@@ -283,6 +293,8 @@ class Worker:
 
     def tick(self) -> bool:
         self.housekeeping()
+        if apply_nudges():
+            return True
         if db.setting("queue_paused"):
             return False
         from ..delivery import deliver_pending
@@ -330,3 +342,43 @@ def retention() -> dict:
             purged += 1
     finish.sweep_agy_state()
     return {"purged": purged}
+
+
+def apply_nudges() -> bool:
+    """Re-cut clips whose boundaries the reviewer nudged (deterministic, no model)."""
+    rows = [r for r in db.q("SELECT * FROM assets WHERE kind='clip' AND meta LIKE '%pending_nudge%'")
+            if (db.unj(r["meta"], {}) or {}).get("pending_nudge")]
+    if not rows:
+        return False
+    from ..media import ffmpeg
+    for r in rows:
+        meta = db.unj(r["meta"], {})
+        req = meta.pop("pending_nudge")
+        run = db.one("SELECT * FROM runs WHERE id=?", r["run_id"])
+        src = db.one("SELECT * FROM sources WHERE id=?", r["source_id"])
+        ctx = RunContext(run=run, source=src)
+        unit = db.one("SELECT label FROM units WHERE id=?", r["unit_id"])
+        rev = (r["rev"] or 1) + 1
+        d = ctx.dir / "assets" / "clips" / unit["label"] / f"rev{rev}"
+        try:
+            clean = ffmpeg.render_clip(Path(src["media_path"]), req["start"], req["end"], d / "clip-clean.mp4")
+            ffmpeg.frame(clean, min(3.0, (req["end"] - req["start"]) / 2), d / "poster.jpg", width=1280)
+            meta.update(nudged_from={"start": r["start"], "end": r["end"]}, nudged_at=now(), boundary_source="USER_NUDGE")
+            db.exec("UPDATE assets SET path=?, start=?, end=?, rev=?, meta=?, bytes=? WHERE id=?",
+                    str(clean), req["start"], req["end"], rev, db.j(meta), clean.stat().st_size, r["id"])
+            db.exec("UPDATE assets SET path=?, start=?, end=? WHERE run_id=? AND unit_id=? AND kind='poster'",
+                    str(d / "poster.jpg"), req["start"], req["start"], r["run_id"], r["unit_id"])
+            # subtitles regenerate from the shared transcript if available
+            db.exec("DELETE FROM assets WHERE run_id=? AND unit_id=? AND kind IN ('clip_subtitled','srt','ass')", r["run_id"], r["unit_id"])
+            try:
+                media_stages.subtitle_stage(ctx, only_unit=r["unit_id"])
+            except StageWarning:
+                pass
+            finish.compose(ctx)
+            finish.package(ctx)
+            db.exec("UPDATE sources SET delivery=CASE WHEN delivery='DELIVERED' THEN 'STALE' ELSE delivery END WHERE id=?", src["id"])
+            db.event("review", f"片段已按微调重剪（rev {rev}）", r["run_id"])
+        except Exception as e:  # noqa: BLE001
+            db.exec("UPDATE assets SET meta=? WHERE id=?", db.j(meta | {"nudge_error": str(e)[:300]}), r["id"])
+            db.event("review", f"微调重剪失败：{e}", r["run_id"], "error")
+    return True

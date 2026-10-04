@@ -14,7 +14,19 @@ from .. import config, db
 from ..util import now
 
 app = FastAPI(title="Assetizer", docs_url="/api/docs")
-STATIC = Path(__file__).with_name("static")
+STATIC = Path(__file__).with_name("static").resolve()
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    """Loopback app behind an SSH tunnel: block DNS rebinding and cross-site form posts."""
+    host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
+    if host not in ALLOWED_HOSTS:
+        return JSONResponse({"error": "host not allowed"}, status_code=403)
+    if request.method == "POST" and not (request.headers.get("content-type") or "").startswith("application/json"):
+        return JSONResponse({"error": "json required"}, status_code=415)
+    return await call_next(request)
 
 STAGE_LABELS = {
     "RESOLVE": "解析来源", "PLAYBOOK": "绑定频道规则", "ACQUIRE": "获取媒体", "CHUNK": "切分", "UNDERSTAND": "多模态理解",
@@ -260,6 +272,27 @@ def asset_update(aid: int, body: AssetUpdate):
     return {"ok": True}
 
 
+class Nudge(BaseModel):
+    start: float
+    end: float
+
+
+@app.post("/api/assets/{aid}/nudge")
+def nudge(aid: int, body: Nudge):
+    """Minor Edit: request a deterministic re-cut of one clip (no model call). The worker applies it."""
+    a = db.one("SELECT a.*, s.duration, s.media_state FROM assets a JOIN sources s ON s.id=a.source_id WHERE a.id=? AND a.kind='clip'", aid)
+    if not a:
+        raise HTTPException(404)
+    if a["media_state"] != "CACHED":
+        raise HTTPException(409, "原始媒体已清理，无法重剪")
+    if not (0 <= body.start < body.end <= (a["duration"] or 1e9)) or body.end - body.start < 3:
+        raise HTTPException(400, "边界无效")
+    meta = db.unj(a["meta"], {}) | {"pending_nudge": {"start": body.start, "end": body.end, "requested_at": now()}}
+    db.exec("UPDATE assets SET meta=? WHERE id=?", db.j(meta), aid)
+    db.event("review", f"请求微调片段边界 {body.start:.1f}–{body.end:.1f}", a["run_id"])
+    return {"ok": True}
+
+
 class Review(BaseModel):
     review: str
     notes: str | None = None
@@ -278,7 +311,7 @@ def review(sid: str, body: Review):
 
 @app.post("/api/sources/{sid}/deliver")
 def redeliver(sid: str):
-    db.exec("UPDATE sources SET delivery='NOT_STARTED', delivery_reason=NULL WHERE id=?", sid)
+    db.exec("UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL WHERE id=?", sid)
     return {"ok": True, "note": "Worker 会在空闲时交付"}
 
 
@@ -287,7 +320,10 @@ def retry(rid: str):
     r = db.one("SELECT * FROM runs WHERE id=?", rid)
     if not r or r["production"] not in ("FAILED", "WAITING", "INTERRUPTED", "COMPLETE_PARTIAL"):
         raise HTTPException(400, "run not retryable")
-    db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status IN ('FAILED','WARN','RUNNING')", rid)
+    first = db.one("SELECT MIN(ord) o FROM stages WHERE run_id=? AND status IN ('FAILED','WARN','RUNNING')", rid)["o"]
+    if first is not None:  # everything downstream of the first problem is rebuilt
+        db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND ord>=? AND name NOT IN ('TRANSCRIBE')", rid, first)
+        db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND name='TRANSCRIBE' AND status!='DONE'", rid)
     db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL, error=NULL, error_class=NULL WHERE id=?", rid)
     return {"ok": True}
 
@@ -305,10 +341,28 @@ def confirm_playbook(pid: int):
     return {"ok": True}
 
 
+@app.post("/api/youtube/remote-browser")
+def remote_browser():
+    """Start the server-side Chromium + noVNC used for interactive YouTube login (loopback only)."""
+    import os
+    import subprocess
+    script = os.environ.get("ASSETIZER_REMOTE_BROWSER", "/home/debian/video-jobs/start-browser.sh")
+    if not Path(script).exists():
+        raise HTTPException(404, "remote browser script not found")
+    r = subprocess.run(["bash", script], capture_output=True, text=True, timeout=60)
+    return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-500:],
+            "tunnel": "ssh -N -L 6080:127.0.0.1:6080 ovh-investment", "url": "http://localhost:6080/vnc.html"}
+
+
 @app.post("/api/queue/resume")
 def resume():
+    paused = db.setting("queue_paused")
     db.set_setting("queue_paused", None)
-    return {"ok": True}
+    reasons = ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA")
+    db.exec(f"UPDATE runs SET production='QUEUED', wait_reason=NULL WHERE production='WAITING' AND wait_reason IN {reasons}")
+    for r in reasons:
+        db.resolve_alert(r)
+    return {"ok": True, "was": paused}
 
 
 # ------------------------------------------------------------------ SPA
@@ -320,8 +374,8 @@ if (STATIC / "assets").exists():
 def spa(path: str, request: Request):
     if path.startswith(("api/", "media/")):
         raise HTTPException(404)
-    f = STATIC / path
-    if path and f.is_file():
+    f = (STATIC / path).resolve()
+    if path and f.is_relative_to(STATIC) and f.is_file():
         return FileResponse(f)
     idx = STATIC / "index.html"
     if idx.exists():

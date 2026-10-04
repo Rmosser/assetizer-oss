@@ -55,6 +55,12 @@ _TRANSIENT_MARKERS = ("429", "503", "500", "502", "504", "unavailable",
 _AUTH_MARKERS = ("unauthenticated", "401", "login", "sign in", "oauth", "credential", "not logged")
 
 
+def _seconds(spec: str) -> float:
+    spec = spec.strip()
+    mult = {"s": 1, "m": 60, "h": 3600}.get(spec[-1:], 1)
+    return float(spec[:-1] if spec[-1:] in "smh" else spec) * mult
+
+
 def gemini_schema(node: Any) -> Any:
     """Down-convert JSON Schema to the subset Gemini function declarations accept.
 
@@ -183,8 +189,27 @@ class AgyProvider:
                     time.sleep(0.25)
 
             threading.Thread(target=monitor, daemon=True).start()
+            limit = _seconds(timeout or self.s.agy_print_timeout) + 300
+            last_line = [time.monotonic()]
+            killed = [None]
+
+            def watchdog() -> None:
+                while not done.is_set():
+                    idle = time.monotonic() - last_line[0]
+                    total = time.monotonic() - t0
+                    if idle > 300 or total > limit:
+                        killed[0] = "NO_STREAM_EVENTS_5MIN" if idle > 300 else "WALL_TIMEOUT"
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        return
+                    time.sleep(5)
+
+            threading.Thread(target=watchdog, daemon=True).start()
             assert proc.stdout is not None
             for line in proc.stdout:
+                last_line[0] = time.monotonic()
                 out.write(line)
                 out.flush()
                 try:
@@ -243,6 +268,8 @@ class AgyProvider:
         status = (result or {}).get("status")
         stderr_tail = (call_dir / "stderr.log").read_text()[-4000:]
 
+        if killed[0]:
+            receipt["watchdog"] = killed[0]
         if receipt["deviation"]:
             receipt["status"] = "DEVIATION"
             kind_err = "MODALITY_ROUTING_DEVIATION"
@@ -252,7 +279,7 @@ class AgyProvider:
         else:
             blob = " ".join([str((result or {}).get("error", "")), last_error_text, stderr_tail])
             kind_err = classify_error(blob)
-            if result is None and proc.returncode not in (0, None) and "timeout" in blob.lower():
+            if killed[0] or (result is None and proc.returncode not in (0, None) and "timeout" in blob.lower()):
                 kind_err = "PROVIDER_TIMEOUT"
             receipt["status"] = "FAILED"
             receipt["error_class"] = kind_err

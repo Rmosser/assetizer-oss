@@ -12,10 +12,16 @@ class MediaError(RuntimeError):
 
 
 def run(args: list[str], **kw) -> subprocess.CompletedProcess:
-    r = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-y", *args],
+    """Run ffmpeg; the last arg is the output, written to a temp name and renamed on success
+    so a killed encode never leaves a truncated file that later stages would reuse."""
+    out = Path(args[-1])
+    tmp = out.with_name(f".{out.stem}.part{out.suffix}")
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-y", *args[:-1], str(tmp)],
                        capture_output=True, text=True, **kw)
     if r.returncode != 0:
+        tmp.unlink(missing_ok=True)
         raise MediaError(r.stderr[-2000:])
+    tmp.replace(out)
     return r
 
 
@@ -131,6 +137,8 @@ def render_window(src: Path, start: float, length: float, out: Path) -> Path:
          "-map", "0:v:0", "-map", "0:a:0?", "-vf", "fps=2,scale=-2:'min(1080,ih)'",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-g", "20", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "64k", "-ac", "1", "-movflags", "+faststart", str(out)])
+    if out.stat().st_size > VIEW_FILE_LIMIT:  # very long unit: trade resolution for the 100 MB limit
+        model_proxy(src, start, length, out, fps=1, crf=34, max_height=720)
     return out
 
 

@@ -160,6 +160,19 @@ def deliver(source_id: str) -> dict:
             db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
         plan = build_plan(source, run_id)
         done = {r["block_key"]: r for r in db.q("SELECT * FROM notion_blocks WHERE source_id=?", source_id)}
+        changed = [it["key"] for it in plan if it["key"] in done and done[it["key"]]["hash"] != it["hash"]]
+        orphaned = set(done) - {it["key"] for it in plan}
+        if changed or orphaned:  # content edited in place (nudge, overlay) → rebuild the page cleanly
+            try:
+                n.archive_page(page_id)
+            except NotionError:
+                pass
+            db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
+            pg = n._req("POST", "/pages", json={"parent": {"database_id": database}, "icon": {"type": "emoji", "emoji": "📘"},
+                                                 "properties": _props(source, run_id)})
+            page_id = pg["id"]
+            db.exec("UPDATE sources SET notion_page_id=?, notion_url=? WHERE id=?", page_id, pg["url"], source_id)
+            done = {}
         # reconcile: read back, adopt untracked tail blocks that match the plan, delete strays
         actual = n.children(page_id)
         known_ids = {r["block_id"] for r in done.values()}
@@ -211,7 +224,7 @@ def deliver(source_id: str) -> dict:
         if "NOTION_NOT_CONFIGURED" in reason:
             db.exec("UPDATE sources SET delivery='BLOCKED', delivery_reason='NOTION_NOT_CONFIGURED' WHERE id=?", source_id)
             return {"status": "BLOCKED"}
-        db.exec("UPDATE sources SET delivery='FAILED', delivery_reason=? WHERE id=?", reason[:500], source_id)
+        db.exec("UPDATE sources SET delivery='FAILED', delivery_reason=?, updated_at=? WHERE id=?", reason[:500], now(), source_id)
         db.event("delivery", f"Notion 交付失败：{reason[:200]}", run_id, "error", {"tb": traceback.format_exc()[-1500:]})
         return {"status": "FAILED", "error": reason}
 
@@ -232,7 +245,9 @@ def deliver_pending() -> bool:
     if not client():
         return False
     r = db.one("""SELECT s.id FROM sources s LEFT JOIN channels c ON c.id=s.channel_id
-                  WHERE s.current_run_id IS NOT NULL AND s.delivery IN ('NOT_STARTED','STALE','BLOCKED')
+                  WHERE s.current_run_id IS NOT NULL
+                  AND (s.delivery IN ('NOT_STARTED','STALE','BLOCKED')
+                       OR (s.delivery='FAILED' AND s.updated_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 minutes')))
                   AND (c.delivery_policy IS NULL OR c.delivery_policy='auto' OR s.review='APPROVED')
                   ORDER BY s.updated_at LIMIT 1""")
     if not r:

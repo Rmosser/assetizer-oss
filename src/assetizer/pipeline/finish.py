@@ -44,8 +44,14 @@ def review_check(ctx: RunContext) -> dict:
     found = 0
     for bi in range(0, len(items), 8):
         try:
+            want = {x["label"] for x in items[bi:bi + 8]}
+
+            def cover(o, want=want):
+                if len({c["label"] for c in o["checks"]} & want) < 0.8 * len(want):
+                    raise ContractError("MISSING_UNITS", "review check did not cover the batch")
+
             o = llm.structured(ctx.calls, f"review-check-{bi // 8 + 1:02}", P.check_prompt(items[bi:bi + 8]),
-                               P.CHECK_SCHEMA, effort="medium", enforce=True)
+                               P.CHECK_SCHEMA, effort="medium", enforce=True, check=cover)
         except ContractError as e:
             ctx.event(f"review check batch failed: {e}", "warn")
             continue

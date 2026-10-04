@@ -42,7 +42,10 @@ export default function Engine() {
         <div className="inst">
           <Lamp state={yt ? "bad" : data.youtube.profile_ok ? "ok" : "idle"} label="YouTube 会话" />
           <div className="big">{yt ? "需要登录" : data.youtube.profile_ok ? "已就绪" : "未配置"}</div>
-          <div className="sub">远程屏幕登录：<code style={{ fontFamily: "var(--mono)", fontSize: 11.5 }}>ssh -L 6080:127.0.0.1:6080 ovh-investment</code></div>
+          <div className="sub">远程屏幕登录：先建隧道 <code style={{ fontFamily: "var(--mono)", fontSize: 11.5 }}>ssh -N -L 6080:127.0.0.1:6080 ovh-investment</code></div>
+          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn sm" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
+          </div>
         </div>
         <div className="inst">
           <Lamp state={data.notion.token && (data.notion.database || data.notion.parent) ? "ok" : "idle"} label="Notion 交付" />

@@ -31,30 +31,38 @@ class ContractError(RuntimeError):
         self.kind = kind
 
 
-def extract_json(text: str) -> Any:
+def extract_json(text: str, required: list[str] | None = None) -> Any:
+    """Parse a JSON object; tolerate prose and schema echoes (Run-009/011/014).
+
+    Falls back to scanning every top-level object and accepts exactly one that has
+    all ``required`` keys (port of Run-014 ``runtime.parse``).
+    """
     s = text.strip()
     s = re.sub(r"^```(?:json)?\s*", "", s)
     s = re.sub(r"\s*```$", "", s)
     try:
-        return json.loads(s)
+        o = json.loads(s)
+        if not required or (isinstance(o, dict) and all(k in o for k in required)):
+            return o
     except ValueError:
         pass
-    # tolerate prose around exactly one complete object (Run-014 I001)
     dec = json.JSONDecoder(strict=False)
-    found = []
-    for i, c in enumerate(s):
-        if c != "{":
+    found, i = [], 0
+    while i < len(s):
+        if s[i] != "{":
+            i += 1
             continue
         try:
-            v, _ = dec.raw_decode(s[i:])
+            v, end = dec.raw_decode(s[i:])
         except ValueError:
+            i += 1
             continue
-        if isinstance(v, dict):
+        if isinstance(v, dict) and (not required or all(k in v for k in required)):
             found.append(v)
-            break
+        i += end
     if len(found) == 1:
         return found[0]
-    raise ContractError("FORMAT_NONCOMPLIANCE", "no parseable JSON object")
+    raise ContractError("FORMAT_NONCOMPLIANCE", f"{len(found)} candidate objects with required keys")
 
 
 def _strip_extras(obj: Any, schema: dict) -> Any:
@@ -136,7 +144,7 @@ class LLM:
         kw = dict(kind=stage, schema=schema if enforce else None, media=media, effort=effort)
 
         def parse(text: str) -> Any:
-            o = _strip_extras(extract_json(text), schema)
+            o = _strip_extras(extract_json(text, schema.get("required")), schema)
             validate(o, schema)
             if check:
                 check(o)

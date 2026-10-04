@@ -83,9 +83,9 @@ class RunContext:
 
     def flag(self, target_kind: str, target_id: str | None, kind: str, severity: str, title: str,
              body: str = "", evidence: Any = None, origin: str = "MACHINE_QA") -> None:
-        # one open flag per (target, kind) per run
-        if db.one("SELECT id FROM flags WHERE run_id=? AND target_id IS ? AND kind=? AND resolution='OPEN'",
-                  self.id, target_id, kind):
+        # one open flag per (target, kind, title) per run
+        if db.one("SELECT id FROM flags WHERE run_id=? AND target_id IS ? AND kind=? AND title=? AND resolution='OPEN'",
+                  self.id, target_id, kind, title):
             return
         db.flag(self.source["id"], self.id, target_kind, target_id, kind, severity, title, body, evidence, origin)
 

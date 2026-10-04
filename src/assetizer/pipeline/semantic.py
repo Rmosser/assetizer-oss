@@ -282,9 +282,11 @@ def select(ctx: RunContext) -> dict:
     labels = {u["label"] for u in units}
 
     def check(o):
-        got = [s["label"] for s in o["selections"]]
-        if set(got) - labels:
+        got = {s["label"] for s in o["selections"]}
+        if got - labels:
             raise ContractError("SCHEMA_VIOLATION", "unknown labels")
+        if len(got & labels) < 0.9 * len(labels):
+            raise ContractError("MISSING_UNITS", f"{len(got & labels)}/{len(labels)} selections")
 
     try:
         o = ctx.llm().structured(ctx.calls, "selection",
@@ -296,6 +298,9 @@ def select(ctx: RunContext) -> dict:
     except ContractError as e:
         raise StageWarning(f"selection contract failed: {e}")
     sel = {s["label"]: s for s in o["selections"]}
+    missing = [u["label"] for u in units if u["label"] not in sel]
+    if missing:
+        ctx.flag("RUN", None, "SELECTION_FALLBACK", "INFO", f"{len(missing)} 个单元未返回选片结果，按骨架兜底", ", ".join(missing))
     result = []
     for u in units:
         s = sel.get(u["label"]) or {"label": u["label"], "verdict": "SELECT" if u["clip_candidate"] else "REJECT",

@@ -280,7 +280,7 @@ CHECK_SCHEMA = obj({"checks": arr(obj({
 def check_prompt(items: list[dict]) -> str:
     return f"""{POLICY}
 
-你是只读质检员：禁止工具与媒体，不改写任何内容，只报告可能需要人工判断的问题；没有问题就给空数组，不要为了有输出而挑刺。
+你是只读质检员：禁止工具与媒体，不改写任何内容，只报告可能需要人工判断的问题；每个条目都必须返回一条 checks 记录；没有问题时 issues 给空数组，不要为了有输出而挑刺。
 对每个条目（一个 Clip 及其知识单元），依据所附 ASR 原文检查：
 - HALF_SENTENCE_START：开头是否从半句开始；DANGLING_REFERENCE：开头的"这个/它/他"是否缺少指代对象；
 - ENDS_BEFORE_CONCLUSION：结尾是否在结论前结束；NEXT_TOPIC_BLEED：结尾是否混入下一主题；

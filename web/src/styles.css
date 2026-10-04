@@ -558,3 +558,18 @@ details.notes summary { cursor: pointer; list-style: none; font: 500 12.5px var(
 details.notes summary::-webkit-details-marker { display: none; }
 details.notes[open] summary { margin-bottom: 12px; }
 details.notes .zhupi { margin-left: -16px; }
+
+/* minor edit — boundary nudge */
+.nudge { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--rule-2); border-radius: 3px; background: color-mix(in srgb, var(--paper) 70%, var(--paper-2)); animation: rise 0.3s var(--ease); }
+.nudge-row { display: flex; align-items: center; gap: 14px; }
+.nudge-row .mono { font-size: 14px; color: var(--ink); }
+.nudge .step { display: inline-flex; gap: 4px; }
+.nudge .step button { height: 24px; padding: 0 8px; border-radius: 4px; border: 1px solid var(--rule-2); font: 500 11.5px var(--mono); color: var(--ink-2); }
+.nudge .step button:hover { border-color: var(--ink); color: var(--ink); }
+.strip { margin: 8px 0 14px; line-height: 2.1; font: 15px var(--serif); }
+.strip .w { padding: 1px 1px; border-radius: 2px; color: var(--ink-3); transition: color 0.15s, background 0.15s; position: relative; }
+.strip .w.in { color: var(--ink); }
+.strip .w:hover { background: var(--zhu-wash); color: var(--zhu-ink); }
+.strip .w.caret-start::before, .strip .w.caret-end::after { content: ""; position: absolute; top: 2px; bottom: 2px; width: 2px; background: var(--zhu); }
+.strip .w.caret-start::before { left: -2px; }
+.strip .w.caret-end::after { right: -2px; }

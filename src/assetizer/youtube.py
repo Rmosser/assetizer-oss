@@ -82,11 +82,17 @@ def download(url: str, dest_dir: Path) -> Path:
     out = dest_dir / "source.mkv"
     if out.exists() and out.stat().st_size > 0:
         return out
-    cmd = _base(s) + ["-f", "bv*[height<=1080]+ba/b[height<=1080]", "--merge-output-format", "mkv",
+    # §R6: prefer h264/aac ≤1080p (avoids CPU-heavy AV1/VP9 decode and 10-bit sources)
+    cmd = _base(s) + ["-S", "res:1080,vcodec:h264,acodec:aac", "-f", "bv*+ba/b",
+                      "--merge-output-format", "mkv", "--remux-video", "mkv",
                       "--retries", "5", "--fragment-retries", "5", "--no-part",
                       "-o", str(dest_dir / "source.%(ext)s"), "--", url]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=6 * 3600)
     (dest_dir / "yt-dlp.log").write_text(r.stdout[-20000:] + "\n--- stderr ---\n" + r.stderr[-20000:])
+    if not out.exists():
+        alt = sorted(p for p in dest_dir.glob("source.*") if p.suffix in (".mp4", ".webm", ".mkv") and p.stat().st_size > 0)
+        if r.returncode == 0 and alt:
+            alt[0].rename(out)
     if r.returncode != 0 or not out.exists():
         raise AcquireError(classify(r.stderr), r.stderr.strip().splitlines()[-1][:300] if r.stderr.strip() else "")
     return out
