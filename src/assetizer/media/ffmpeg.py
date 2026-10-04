@@ -126,10 +126,11 @@ def keyframe_before(src: Path, t: float) -> float:
 def render_window(src: Path, start: float, length: float, out: Path) -> Path:
     """Re-encoded 720p window with an exact zero point (boundary model input)."""
     out.parent.mkdir(parents=True, exist_ok=True)
+    # 2 fps keeps second-level boundary precision; full resolution keeps tickers legible
     run(["-ss", f"{max(0, start):.3f}", "-i", str(src), "-t", f"{length:.3f}",
-         "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:720", "-r", "30",
-         "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out)])
+         "-map", "0:v:0", "-map", "0:a:0?", "-vf", "fps=2,scale=-2:'min(1080,ih)'",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-g", "20", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "64k", "-ac", "1", "-movflags", "+faststart", str(out)])
     return out
 
 
@@ -179,3 +180,29 @@ def moov_first(p: Path) -> bool:
                 return False
             pos += size
     return False
+
+
+VIEW_FILE_LIMIT = 95 * 1024 * 1024  # agy >= 1.2.16 refuses view_file above 100 MB
+
+
+def model_proxy(src: Path, start: float, length: float, out: Path, fps: float = 1.0, crf: int = 30,
+                max_height: int = 1080) -> Path:
+    """Low-frame-rate model input. Gemini samples video at ~1 fps, so resolution (chart text)
+    matters and frame rate does not. Frame-accurate start: offset == ``start`` exactly."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    run(["-ss", f"{max(0, start):.3f}", "-i", str(src), "-t", f"{length:.3f}",
+         "-map", "0:v:0", "-map", "0:a:0?",
+         "-vf", f"fps={fps},scale=-2:'min({max_height},ih)'", "-c:v", "libx264", "-preset", "veryfast",
+         "-crf", str(crf), "-g", str(int(max(1, fps * 60))), "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", str(out)])
+    return out
+
+
+def fit_proxy(src: Path, start: float, length: float, out: Path, fps: float = 1.0) -> tuple[Path, dict]:
+    """Encode a proxy under the view_file limit, raising CRF before giving up resolution."""
+    # measured 2026-10-05: 50 min @1 fps CRF30 GOP10 = 131 MB (keyframes dominate) → long GOP first
+    for crf, h in ((32, 1080), (36, 1080), (34, 720)):
+        model_proxy(src, start, length, out, fps=fps, crf=crf, max_height=h)
+        if out.stat().st_size <= VIEW_FILE_LIMIT:
+            return out, {"fps": fps, "crf": crf, "height": h, "bytes": out.stat().st_size}
+    raise MediaError(f"proxy over view_file limit: {out.stat().st_size} bytes")

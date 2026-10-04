@@ -104,12 +104,16 @@ def chunk(ctx: RunContext) -> dict:
     chunks = []
     for i, st in enumerate(starts):
         pid = f"CH{i + 1:02}"
-        # always remux to mp4: the validated model input container (mkv was never tested)
-        offset = ffmpeg.keyframe_before(ctx.media, st)
-        length = dur - offset if len(starts) == 1 else min(size + (st - offset), dur - offset)
-        path = ffmpeg.cut_copy(ctx.media, offset, length, ctx.path("work", "chunks", f"{pid}.mp4"))
+        # model proxy: 1 fps, full resolution, re-encoded → exact offset and < view_file limit
+        offset = st
+        length = dur - offset if len(starts) == 1 else min(size, dur - offset)
+        out = ctx.path("work", "chunks", f"{pid}.mp4")
+        try:
+            path, enc = ffmpeg.fit_proxy(ctx.media, offset, length, out)
+        except ffmpeg.MediaError:
+            raise
         length = ffmpeg.duration(path)
-        chunks.append({"part_id": pid, "path": str(path), "offset": offset, "length": length,
+        chunks.append({"part_id": pid, "path": str(path), "offset": offset, "length": length, "encoding": enc,
                        "source_start": fmt_tc(offset), "source_end": fmt_tc(offset + length)})
     ctx.save("machine/chunk-plan.json", {"chunks": chunks, "duration": dur})
     return {"chunks": len(chunks), "offsets": [c["offset"] for c in chunks]}
