@@ -219,7 +219,7 @@ def sections_prompt(playbook: dict, units: list[dict], topics: list[dict]) -> st
     return f"""{context(playbook, 'article')}
 
 禁止工具与媒体。为下面每个 Knowledge Unit 各写一节 Markdown 正文（每个 label 恰好一节）。
-- 以 "## " 开头的小节标题（可含 Ticker），正文自然、克制、信息密集，保留条件与归属；主讲人观点写"认为/指出/强调"。
+- 以 "## " 开头的小节标题（可含 Ticker，**不要编号**，系统会统一编号），正文自然、克制、信息密集，保留条件与归属；主讲人观点写"认为/指出/强调"。
 - 帮助理解的解释写成"（推断）"或"帮助理解："，不得包装成原话。
 - 不要写时间码列表、运行信息或素材索引；不要编造单元里没有的事实；不要在节内重复导航表。
 

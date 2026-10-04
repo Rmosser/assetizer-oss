@@ -258,12 +258,12 @@ def article(ctx: RunContext) -> dict:
             sections.setdefault(s["label"], s["markdown"])
     db.exec("DELETE FROM sections WHERE run_id=?", ctx.id)
     rows = [("INTRO", [], outline["intro_markdown"])]
-    for u in units:
+    for n, u in enumerate(units, 1):
         md = sections.get(u["label"])
         if not md:
             ctx.flag("UNIT", u["id"], "SECTION_MISSING", "REVIEW", f"「{u['title']}」正文未生成，已用摘要代替")
             md = f"## {u['title']}\n\n{u['summary']}"
-        rows.append(("UNIT", [u["id"]], md.strip()))
+        rows.append(("UNIT", [u["id"]], renumber(md.strip(), n)))
     if outline.get("outro_markdown", "").strip():
         rows.append(("OUTRO", [], outline["outro_markdown"]))
     full = [f"# {outline['title']}"]
@@ -313,6 +313,18 @@ def select(ctx: RunContext) -> dict:
     ctx.save("machine/selection.json", {"selections": result})
     from collections import Counter
     return dict(Counter(s["verdict"] for s in result))
+
+
+def renumber(md: str, n: int) -> str:
+    """Batch-written sections number themselves from 01; strip that and number in Source order."""
+    lines = md.splitlines()
+    if lines and lines[0].startswith("#"):
+        title = re.sub(r"^#+\s*", "", lines[0])
+        title = re.sub(r"^(第?\s*\d+\s*[.、:：）)]|\d+\s+)\s*", "", title).strip()
+        lines[0] = f"## {n:02d}. {title}"
+    else:
+        lines.insert(0, f"## {n:02d}.")
+    return "\n".join(lines)
 
 
 def unit_by_label(units: list[dict]) -> dict:
