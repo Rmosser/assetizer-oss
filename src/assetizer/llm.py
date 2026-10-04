@@ -120,6 +120,9 @@ class LLM:
         if accepted.exists():
             return read_json(accepted)
         r = self._call(d / "attempt-1", stage, prompt, kind=stage, schema=schema, media=media, effort=effort)
+        if len(r.text.strip().strip("}{[] \n")) < 2:
+            # empty / bare-brace responses (Run-011 S02, Run-014 unit_14): regenerate once, repair cannot help
+            r = self._call(d / "attempt-2", stage, prompt, kind=stage, schema=schema, media=media, effort=effort)
         try:
             obj = _strip_extras(extract_json(r.text), schema)
             validate(obj, schema)

@@ -1,0 +1,332 @@
+"""Serial worker: one Source in production at a time (ADR-1).
+
+Lifecycle per run: QUEUED → RUNNING → COMPLETE | COMPLETE_PARTIAL | FAILED,
+or WAITING(reason) when an external condition blocks it. Stages checkpoint in
+the ``stages`` table and are idempotent, so a crash resumes where it stopped.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import threading
+import time
+import traceback
+from pathlib import Path
+
+from .. import config, db, youtube
+from ..llm import ContractError
+from ..providers.agy import AgyProvider, ProviderError
+from ..util import now
+from . import acquire, finish, media_stages, semantic
+from .context import RunContext, StageWarning, Waiting
+
+# name, fn, blocking
+STAGES: list[tuple[str, object, bool]] = [
+    ("RESOLVE", acquire.resolve, True),
+    ("PLAYBOOK", acquire.playbook, True),
+    ("ACQUIRE", acquire.acquire, True),
+    ("CHUNK", acquire.chunk, True),
+    ("UNDERSTAND", semantic.understand, True),
+    ("TRANSCRIBE", media_stages.transcribe, False),   # runs in background from MERGE until BOUNDARY
+    ("MERGE", semantic.merge, True),
+    ("KNOWLEDGE", semantic.knowledge, True),
+    ("ARTICLE", semantic.article, True),
+    ("SELECT", semantic.select, False),
+    ("SCREENSHOTS", media_stages.screenshots, False),
+    ("BOUNDARY", media_stages.boundary, False),
+    ("CLIPS", media_stages.clips, False),
+    ("SUBTITLES", media_stages.subtitle_stage, False),
+    ("MEDIA_QA", media_stages.media_qa, False),
+    ("REVIEW_CHECK", finish.review_check, False),
+    ("COMPOSE", finish.compose, True),
+    ("PACKAGE", finish.package, True),
+    ("CLEANUP", finish.cleanup, False),
+]
+STAGE_NAMES = [s[0] for s in STAGES]
+ALWAYS_RERUN = {"PLAYBOOK"}
+PAUSE_KINDS = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"}
+
+ALERT_TEXT = {
+    "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
+                          "在本机终端执行 `ssh -t ovh-investment /home/debian/.local/bin/agy`，按提示完成 Google 登录。恢复后队列自动继续。"),
+    "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
+    "YOUTUBE_AUTH": ("YouTube 需要重新登录",
+                     "建立隧道 `ssh -L 6080:127.0.0.1:6080 ovh-investment`，浏览器打开 http://localhost:6080/vnc.html ，在远程 Chromium 中登录 YouTube。系统每 30 分钟自动重试。"),
+    "DISK_LOW": ("磁盘空间不足，暂停下载", "系统会先清理过期原始媒体；仍不足时请在「机房」查看占用。"),
+}
+
+
+# ---------------------------------------------------------------- submission
+def submit(url: str, priority: int = 0, playbook_id: int | None = None) -> dict:
+    vid = youtube.video_id(url)
+    if not vid:
+        raise ValueError("无法识别的 YouTube 链接")
+    if not db.one("SELECT id FROM sources WHERE id=?", vid):
+        db.exec("INSERT INTO sources(id, url, created_at, updated_at) VALUES (?,?,?,?)",
+                vid, f"https://www.youtube.com/watch?v={vid}", now(), now())
+    active = db.one("SELECT id FROM runs WHERE source_id=? AND production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')", vid)
+    if active:
+        return {"source_id": vid, "run_id": active["id"], "existing": True}
+    n = (db.one("SELECT COUNT(*) n FROM runs WHERE source_id=?", vid) or {"n": 0})["n"]
+    rid = f"{vid}-r{n + 1}"
+    prev = db.one("SELECT current_run_id FROM sources WHERE id=?", vid)
+    db.exec("INSERT INTO runs(id, source_id, kind, playbook_id, production, priority, revision_of, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            rid, vid, "PRODUCTION", playbook_id, "QUEUED", priority, prev and prev["current_run_id"], now())
+    for i, name in enumerate(STAGE_NAMES):
+        db.exec("INSERT OR IGNORE INTO stages(run_id, name, ord, status) VALUES (?,?,?,'PENDING')", rid, name, i)
+    db.event("submit", f"已加入队列：{url}", rid)
+    return {"source_id": vid, "run_id": rid, "existing": False}
+
+
+# ---------------------------------------------------------------- orphans
+def kill_orphans() -> int:
+    """Kill agy processes left behind by a previous worker (they run in their own session)."""
+    runs_dir = str(config.get().runs_dir)
+    killed = 0
+    proc = Path("/proc")
+    if not proc.exists():
+        return 0
+    for p in proc.iterdir():
+        if not p.name.isdigit() or int(p.name) == os.getpid():
+            continue
+        try:
+            cmd = (p / "cmdline").read_bytes().split(b"\0")
+            if not cmd or not cmd[0].endswith(b"agy"):
+                continue
+            cwd = os.readlink(p / "cwd")
+            if cwd.startswith(runs_dir):
+                os.killpg(os.getpgid(int(p.name)), signal.SIGKILL)
+                killed += 1
+        except (OSError, ProcessLookupError):
+            continue
+    return killed
+
+
+# ---------------------------------------------------------------- execution
+def _set_stage(run_id: str, name: str, **kw) -> None:
+    sets = ", ".join(f"{k}=?" for k in kw)
+    db.exec(f"UPDATE stages SET {sets} WHERE run_id=? AND name=?", *kw.values(), run_id, name)
+
+
+def _exec_stage(ctx: RunContext, name: str, fn) -> tuple[str, dict | str]:
+    t0 = time.monotonic()
+    _set_stage(ctx.id, name, status="RUNNING", started_at=now())
+    db.exec("UPDATE runs SET stage=? WHERE id=?", name, ctx.id)
+    try:
+        detail = fn(ctx) or {}
+        _set_stage(ctx.id, name, status="DONE", finished_at=now(), wall_seconds=round(time.monotonic() - t0, 1), detail=db.j(detail))
+        ctx.event(f"{name} 完成", data=detail)
+        return "DONE", detail
+    except StageWarning as w:
+        _set_stage(ctx.id, name, status="WARN", finished_at=now(), wall_seconds=round(time.monotonic() - t0, 1), detail=db.j({"warning": str(w)}))
+        ctx.event(f"{name} 警告：{w}", "warn")
+        return "WARN", str(w)
+    except Exception:
+        _set_stage(ctx.id, name, status="FAILED", finished_at=now(), wall_seconds=round(time.monotonic() - t0, 1),
+                   detail=db.j({"error": traceback.format_exc()[-2000:]}))
+        raise
+
+
+def _classify(e: BaseException) -> str:
+    for attr in ("kind", "reason"):
+        if getattr(e, attr, None):
+            return getattr(e, attr)
+    msg = str(e)
+    if ":" in msg and msg.split(":", 1)[0].isupper():
+        return msg.split(":", 1)[0]
+    return type(e).__name__
+
+
+def execute(run_id: str) -> str:
+    run = db.one("SELECT * FROM runs WHERE id=?", run_id)
+    source = db.one("SELECT * FROM sources WHERE id=?", run["source_id"])
+    ctx = RunContext(run=run, source=source)
+    db.exec("UPDATE runs SET production='RUNNING', wait_reason=NULL, error=NULL, error_class=NULL, attempts=attempts+1, "
+            "started_at=COALESCE(started_at, ?) WHERE id=?", now(), run_id)
+    done = {r["name"]: r["status"] for r in db.q("SELECT name, status FROM stages WHERE run_id=?", run_id)}
+    bg: threading.Thread | None = None
+    bg_err: list = []
+    warned = False
+
+    def run_bg():
+        try:
+            st, _ = _exec_stage(ctx, "TRANSCRIBE", media_stages.transcribe)
+        except Exception as e:  # noqa: BLE001 — transcript is non-blocking
+            bg_err.append(e)
+            _set_stage(ctx.id, "TRANSCRIBE", status="WARN", detail=db.j({"warning": str(e)[:500]}))
+
+    try:
+        for name, fn, blocking in STAGES:
+            if name == "TRANSCRIBE":
+                continue
+            if name == "MERGE" and done.get("TRANSCRIBE") not in ("DONE", "WARN"):
+                bg = threading.Thread(target=run_bg, daemon=True)
+                bg.start()
+            if name == "BOUNDARY" and bg is not None:
+                db.exec("UPDATE runs SET stage='TRANSCRIBE' WHERE id=?", run_id)
+                bg.join()
+                bg = None
+            if done.get(name) in ("DONE", "WARN", "SKIPPED") and name not in ALWAYS_RERUN:
+                warned |= done.get(name) == "WARN"
+                continue
+            try:
+                st, _ = _exec_stage(ctx, name, fn)
+                warned |= st == "WARN"
+            except (Waiting, ProviderError) as e:
+                if isinstance(e, ProviderError) and e.kind not in PAUSE_KINDS:
+                    if blocking:
+                        raise
+                    _set_stage(run_id, name, status="WARN", detail=db.j({"warning": str(e)[:500]}))
+                    warned = True
+                    continue
+                raise
+            except Exception as e:  # noqa: BLE001
+                if blocking:
+                    raise
+                _set_stage(run_id, name, status="WARN", detail=db.j({"warning": f"{_classify(e)}: {str(e)[:400]}"}))
+                ctx.event(f"{name} 非阻塞失败：{e}", "warn")
+                warned = True
+        if bg is not None:
+            bg.join()
+    except Waiting as w:
+        _wait(run_id, w.reason, str(w))
+        return "WAITING"
+    except ProviderError as e:
+        if e.kind in PAUSE_KINDS:
+            _wait(run_id, e.kind, str(e))
+            pause_queue(e.kind)
+            return "WAITING"
+        _fail(run_id, e)
+        return "FAILED"
+    except Exception as e:  # noqa: BLE001
+        _fail(run_id, e)
+        return "FAILED"
+    state = "COMPLETE_PARTIAL" if warned else "COMPLETE"
+    summary = _summary(run_id)
+    db.exec("UPDATE runs SET production=?, stage=NULL, finished_at=?, summary=? WHERE id=?", state, now(), db.j(summary), run_id)
+    token = config.get().secret("notion-token")
+    target = db.setting("notion_database_id") or db.setting("notion_parent_page_id")
+    delivery = "NOT_STARTED" if token and target else "BLOCKED"
+    db.exec("""UPDATE sources SET current_run_id=?, delivery=CASE WHEN ? = 'BLOCKED' THEN 'BLOCKED'
+               WHEN notion_page_id IS NOT NULL THEN 'STALE' ELSE 'NOT_STARTED' END,
+               delivery_reason=?, review=CASE WHEN review='APPROVED' THEN 'UNREVIEWED' ELSE review END, updated_at=? WHERE id=?""",
+            run_id, delivery, None if delivery != "BLOCKED" else "NOTION_NOT_CONFIGURED", now(), source["id"])
+    db.event("run", f"生产完成（{state}）", run_id, data=summary)
+    return state
+
+
+def _summary(run_id: str) -> dict:
+    a = db.q("SELECT kind, status, COUNT(*) n FROM assets WHERE run_id=? GROUP BY kind, status", run_id)
+    m = db.one("""SELECT COUNT(*) calls, SUM(wall_seconds) wall, SUM(input_tokens) inp, SUM(output_tokens) outp,
+                  SUM(thinking_tokens) think, MAX(peak_rss_kib) rss FROM model_calls WHERE run_id=?""", run_id)
+    return {"units": db.one("SELECT COUNT(*) n FROM units WHERE run_id=?", run_id)["n"],
+            "assets": {f"{r['kind']}:{r['status']}": r["n"] for r in a},
+            "flags_open": db.one("SELECT COUNT(*) n FROM flags WHERE run_id=? AND resolution='OPEN' AND severity!='INFO'", run_id)["n"],
+            "model": m}
+
+
+def _wait(run_id: str, reason: str, message: str) -> None:
+    db.exec("UPDATE runs SET production='WAITING', wait_reason=?, error=? WHERE id=?", reason, message[:1000], run_id)
+    title, body = ALERT_TEXT.get(reason, (f"生产等待：{reason}", message))
+    if reason in ALERT_TEXT:
+        db.raise_alert(reason, "critical" if reason in ("AGY_AUTH_REQUIRED", "YOUTUBE_AUTH") else "warning", title, body)
+    db.event("run", f"等待：{reason}", run_id, "warn")
+
+
+def _fail(run_id: str, e: BaseException) -> None:
+    kind = _classify(e)
+    db.exec("UPDATE runs SET production='FAILED', error_class=?, error=?, finished_at=? WHERE id=?",
+            kind, f"{e}\n{traceback.format_exc()[-1500:]}", now(), run_id)
+    db.event("run", f"生产失败：{kind}", run_id, "error")
+
+
+def pause_queue(reason: str) -> None:
+    db.set_setting("queue_paused", {"reason": reason, "since": now()})
+
+
+# ---------------------------------------------------------------- worker loop
+class Worker:
+    def __init__(self, poll: float = 5.0):
+        self.poll = poll
+        self.stop = False
+        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0}
+
+    def recover(self) -> None:
+        n = kill_orphans()
+        for r in db.q("SELECT id, attempts FROM runs WHERE production='RUNNING'"):
+            db.exec("UPDATE runs SET production=? WHERE id=?", "QUEUED" if r["attempts"] < 3 else "FAILED", r["id"])
+            db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status='RUNNING'", r["id"])
+            db.event("run", "Worker 重启，从断点继续", r["id"], "warn")
+        db.exec("UPDATE sources SET delivery='NOT_STARTED' WHERE delivery='DELIVERING'")
+        if n:
+            db.event("worker", f"清理了 {n} 个遗留 agy 进程", level="warn")
+
+    def housekeeping(self) -> None:
+        t = time.monotonic()
+        paused = db.setting("queue_paused")
+        if paused and t - self.last["health"] > 600:
+            self.last["health"] = t
+            h = AgyProvider().health()
+            db.set_setting("agy_health", h)
+            if h.get("ok"):
+                db.set_setting("queue_paused", None)
+                db.resolve_alert(paused["reason"])
+                db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason=?", paused["reason"])
+                db.event("worker", "模型恢复，队列继续")
+        if t - self.last["retry"] > 1800:
+            self.last["retry"] = t
+            db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','DISK_LOW','LIVE_IN_PROGRESS')")
+        if t - self.last["retention"] > 3600:
+            self.last["retention"] = t
+            retention()
+
+    def tick(self) -> bool:
+        self.housekeeping()
+        if db.setting("queue_paused"):
+            return False
+        from ..delivery import deliver_pending
+        r = db.one("SELECT id FROM runs WHERE production='QUEUED' ORDER BY priority DESC, created_at LIMIT 1")
+        if r:
+            state = execute(r["id"])
+            if state.startswith("COMPLETE"):
+                deliver_pending()
+            return True
+        return deliver_pending()
+
+    def loop(self) -> None:
+        self.recover()
+        signal.signal(signal.SIGTERM, lambda *_: setattr(self, "stop", True))
+        db.event("worker", "Worker 已启动")
+        while not self.stop:
+            try:
+                busy = self.tick()
+            except Exception as e:  # noqa: BLE001
+                db.event("worker", f"Worker 异常：{e}", level="error", data={"tb": traceback.format_exc()[-1500:]})
+                busy = False
+            if not busy:
+                time.sleep(self.poll)
+
+
+def retention() -> dict:
+    """Purge original media past retention; never touch a source with an active run."""
+    s = config.get()
+    purged = 0
+    rows = db.q("""SELECT s.* FROM sources s WHERE s.media_state='CACHED' AND NOT EXISTS
+                   (SELECT 1 FROM runs r WHERE r.source_id=s.id AND r.production IN ('QUEUED','RUNNING','WAITING'))""")
+    import datetime as dt
+    for r in rows:
+        ref = r["review_at"] if r["review"] in ("APPROVED", "REJECTED") else r["updated_at"]
+        days = s.source_retention_days if r["review"] not in ("APPROVED", "REJECTED") else 2
+        try:
+            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(ref)).days
+        except (TypeError, ValueError):
+            continue
+        if age >= days and r["media_path"]:
+            d = Path(r["media_path"]).parent
+            if d.is_relative_to(s.media_dir):
+                shutil.rmtree(d, ignore_errors=True)
+            db.exec("UPDATE sources SET media_state='PURGED', purged_at=? WHERE id=?", now(), r["id"])
+            purged += 1
+    finish.sweep_agy_state()
+    return {"purged": purged}

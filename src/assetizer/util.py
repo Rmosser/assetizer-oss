@@ -88,3 +88,19 @@ def disk_usage_ratio(path: Path) -> float:
     total = st.f_blocks * st.f_frsize
     free = st.f_bavail * st.f_frsize
     return 1 - free / total if total else 0.0
+
+
+_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def ulid() -> str:
+    """Sortable 26-char id (ms timestamp + 80 random bits)."""
+    import secrets
+    import time as _t
+
+    n = (int(_t.time() * 1000) << 80) | secrets.randbits(80)
+    out = []
+    for _ in range(26):
+        out.append(_CROCKFORD[n & 31])
+        n >>= 5
+    return "".join(reversed(out))

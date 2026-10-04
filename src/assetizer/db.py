@@ -17,11 +17,10 @@ CREATE TABLE IF NOT EXISTS channels (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   youtube_channel_id TEXT UNIQUE,
-  mode TEXT NOT NULL DEFAULT 'DISCOVERY',          -- TRACKED | DISCOVERY
-  delivery_policy TEXT NOT NULL DEFAULT 'auto',     -- auto | after_approval
-  playbook_approval TEXT NOT NULL DEFAULT 'auto_if_clean', -- auto_if_clean | manual
+  mode TEXT NOT NULL DEFAULT 'DISCOVERY',            -- TRACKED | DISCOVERY
+  delivery_policy TEXT NOT NULL DEFAULT 'auto',       -- auto | after_approval
   notion_parent_id TEXT,
-  why TEXT,                                         -- user's stated reason for tracking
+  why TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -32,25 +31,25 @@ CREATE TABLE IF NOT EXISTS channel_prompts (
   text TEXT NOT NULL,
   sha256 TEXT NOT NULL,
   origin TEXT,
+  origin_edited_at TEXT,
   note TEXT,
   created_at TEXT NOT NULL,
   UNIQUE(channel_id, version)
 );
 CREATE TABLE IF NOT EXISTS playbooks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  channel_id TEXT NOT NULL REFERENCES channels(id),
-  prompt_id INTEGER NOT NULL REFERENCES channel_prompts(id),
+  channel_id TEXT REFERENCES channels(id),          -- NULL = universal
+  prompt_id INTEGER REFERENCES channel_prompts(id),
   version INTEGER NOT NULL,
-  status TEXT NOT NULL,              -- COMPILING | NEEDS_CONFIRMATION | ACTIVE | SUPERSEDED | FAILED
-  data TEXT,                          -- JSON: requirements, rules, article_style, orchestration_notes
-  audit TEXT,                         -- JSON: fidelity matrix + provenance checks
-  error TEXT,
+  status TEXT NOT NULL,                               -- NEEDS_CONFIRMATION | ACTIVE | SUPERSEDED | FAILED
+  data TEXT NOT NULL,                                 -- JSON playbook (identity, rules, facets, article_style)
+  audit TEXT,
+  origin TEXT,
   created_at TEXT NOT NULL,
-  activated_at TEXT,
-  UNIQUE(channel_id, version)
+  activated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sources (
-  id TEXT PRIMARY KEY,                -- youtube video id or local:<sha12>
+  id TEXT PRIMARY KEY,                                -- youtube video id
   url TEXT,
   channel_id TEXT REFERENCES channels(id),
   youtube_channel_id TEXT,
@@ -58,45 +57,53 @@ CREATE TABLE IF NOT EXISTS sources (
   title TEXT,
   published_at TEXT,
   duration REAL,
+  info TEXT,
   media_path TEXT,
   media_sha256 TEXT,
   media_bytes INTEGER,
-  media_state TEXT NOT NULL DEFAULT 'ABSENT',   -- ABSENT | CACHED | PURGED
-  info TEXT,
+  media_height INTEGER,
+  media_state TEXT NOT NULL DEFAULT 'ABSENT',         -- ABSENT | CACHED | PURGED
+  transcript_path TEXT,
+  current_run_id TEXT,
+  delivery TEXT NOT NULL DEFAULT 'NOT_STARTED',      -- NOT_STARTED | BLOCKED | DELIVERING | DELIVERED | STALE | FAILED
+  delivery_reason TEXT,
+  notion_page_id TEXT,
+  notion_url TEXT,
+  notion_synced_run TEXT,
+  package_path TEXT,
+  review TEXT NOT NULL DEFAULT 'UNREVIEWED',          -- UNREVIEWED | IN_REVIEW | APPROVED | CHANGES_REQUESTED | REJECTED
+  review_notes TEXT,
+  review_at TEXT,
   created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
   purged_at TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   source_id TEXT NOT NULL REFERENCES sources(id),
-  channel_id TEXT REFERENCES channels(id),
-  kind TEXT NOT NULL,                 -- PRODUCTION | DISCOVERY
+  kind TEXT NOT NULL DEFAULT 'PRODUCTION',             -- PRODUCTION | DISCOVERY | IMPORT
   playbook_id INTEGER REFERENCES playbooks(id),
-  status TEXT NOT NULL,               -- QUEUED RUNNING BLOCKED FAILED READY DISCOVERED APPROVED REJECTED CANCELLED
+  production TEXT NOT NULL,                            -- QUEUED RUNNING WAITING INTERRUPTED FAILED COMPLETE COMPLETE_PARTIAL CANCELLED
+  wait_reason TEXT,
   stage TEXT,
-  block_reason TEXT,
   error_class TEXT,
   error TEXT,
   priority INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
+  pgid INTEGER,
+  pins TEXT,                                           -- JSON: playbook, policy, pipeline, model, agy version
+  summary TEXT,                                        -- JSON stats
+  revision_of TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
-  finished_at TEXT,
-  notion_url TEXT,
-  notion_page_id TEXT,
-  package_path TEXT,
-  review_status TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING APPROVED CHANGES_REQUESTED REJECTED
-  review_notes TEXT,
-  review_at TEXT,
-  summary TEXT,                       -- JSON quick stats for list views
-  supersedes TEXT                     -- run id this one regenerates
+  finished_at TEXT
 );
-CREATE INDEX IF NOT EXISTS runs_status ON runs(status, priority DESC, created_at);
+CREATE INDEX IF NOT EXISTS runs_queue ON runs(production, priority DESC, created_at);
 CREATE TABLE IF NOT EXISTS stages (
   run_id TEXT NOT NULL REFERENCES runs(id),
   name TEXT NOT NULL,
   ord INTEGER NOT NULL,
-  status TEXT NOT NULL,               -- PENDING RUNNING DONE SKIPPED WARN FAILED
+  status TEXT NOT NULL,                                -- PENDING RUNNING DONE SKIPPED WARN FAILED
   started_at TEXT,
   finished_at TEXT,
   wall_seconds REAL,
@@ -110,6 +117,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
   attempt TEXT,
   conversation_id TEXT,
   model TEXT,
+  agy_version TEXT,
   status TEXT,
   error_class TEXT,
   wall_seconds REAL,
@@ -120,28 +128,107 @@ CREATE TABLE IF NOT EXISTS model_calls (
   view_files INTEGER,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS speakers (
+  source_id TEXT NOT NULL REFERENCES sources(id),
+  run_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  display_name TEXT,
+  role TEXT,
+  confidence TEXT,
+  evidence TEXT,
+  PRIMARY KEY (run_id, key)
+);
 CREATE TABLE IF NOT EXISTS units (
+  id TEXT PRIMARY KEY,                                 -- ULID
   run_id TEXT NOT NULL REFERENCES runs(id),
-  unit_id TEXT NOT NULL,
+  source_id TEXT NOT NULL REFERENCES sources(id),
+  label TEXT NOT NULL,
   ord INTEGER NOT NULL,
-  data TEXT NOT NULL,
-  decision TEXT,                      -- null | APPROVED | REJECTED
-  publication_override TEXT,
+  title TEXT NOT NULL,
+  start REAL NOT NULL,
+  end REAL NOT NULL,
+  learning_priority INTEGER NOT NULL DEFAULT 2,
+  knowledge_type TEXT,
+  data TEXT NOT NULL,                                  -- full KU JSON (frozen)
+  overlay TEXT,                                        -- user minor edits
+  decision TEXT,                                       -- NULL | APPROVED | REJECTED
   note TEXT,
-  PRIMARY KEY (run_id, unit_id)
+  UNIQUE(run_id, label)
+);
+CREATE TABLE IF NOT EXISTS sections (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  ord INTEGER NOT NULL,
+  kind TEXT NOT NULL,                                  -- INTRO | UNIT | OUTRO
+  unit_ids TEXT,                                       -- JSON array of unit ULIDs
+  markdown TEXT NOT NULL,
+  overlay TEXT,
+  rev INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS assets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL REFERENCES runs(id),
+  source_id TEXT NOT NULL,
   unit_id TEXT,
-  kind TEXT NOT NULL,                 -- screenshot clip clip_subtitled srt ass article package notion
-  status TEXT NOT NULL,               -- GENERATED WARNING FAILED NOT_SELECTED
+  kind TEXT NOT NULL,                                  -- screenshot clip clip_subtitled srt ass poster
+  rev INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL,                                -- GENERATED WARNING FAILED NOT_SELECTED
   path TEXT,
   sha256 TEXT,
   bytes INTEGER,
+  start REAL,
+  end REAL,
+  selection TEXT,                                      -- SELECT REJECT CONTEXT_DEPENDENT
+  publication_priority TEXT,                           -- P1 P2 P3 ARCHIVE
+  embed INTEGER NOT NULL DEFAULT 1,
+  standalone INTEGER NOT NULL DEFAULT 1,
+  decision TEXT,
   meta TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS assets_run ON assets(run_id, unit_id, kind);
+CREATE TABLE IF NOT EXISTS flags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  target_kind TEXT NOT NULL,                           -- RUN UNIT ASSET SECTION
+  target_id TEXT,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL,                              -- BLOCKER REVIEW INFO
+  title TEXT NOT NULL,
+  body TEXT,
+  evidence TEXT,                                       -- JSON {t, quote, asr}
+  origin TEXT NOT NULL,                                -- MACHINE_QA PROVIDER AI_CHECK USER
+  resolution TEXT NOT NULL DEFAULT 'OPEN',             -- OPEN ACCEPTED FIXED DISMISSED
+  resolution_note TEXT,
   created_at TEXT NOT NULL,
-  UNIQUE(run_id, unit_id, kind, path)
+  resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS alerts (
+  key TEXT PRIMARY KEY,
+  severity TEXT NOT NULL,                              -- critical | warning | info
+  title TEXT NOT NULL,
+  body TEXT,
+  action TEXT,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,                                  -- CONFIRM_PLAYBOOK | TRACK_CHANNEL
+  ref TEXT,
+  title TEXT NOT NULL,
+  body TEXT,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  outcome TEXT
+);
+CREATE TABLE IF NOT EXISTS notion_blocks (
+  source_id TEXT NOT NULL,
+  block_key TEXT NOT NULL,
+  block_id TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  PRIMARY KEY (source_id, block_key)
 );
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,15 +238,6 @@ CREATE TABLE IF NOT EXISTS events (
   kind TEXT NOT NULL,
   message TEXT NOT NULL,
   data TEXT
-);
-CREATE TABLE IF NOT EXISTS attention (
-  key TEXT PRIMARY KEY,
-  severity TEXT NOT NULL,             -- critical | warning | info
-  title TEXT NOT NULL,
-  body TEXT,
-  action TEXT,                        -- JSON: {label, href | api}
-  created_at TEXT NOT NULL,
-  resolved_at TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -225,15 +303,15 @@ def event(kind: str, message: str, run_id: str | None = None, level: str = "info
          now(), run_id, level, kind, message, j(data) if data is not None else None)
 
 
-def raise_attention(key: str, severity: str, title: str, body: str = "", action: dict | None = None) -> None:
-    exec("""INSERT INTO attention(key, severity, title, body, action, created_at) VALUES (?,?,?,?,?,?)
+def raise_alert(key: str, severity: str, title: str, body: str = "", action: dict | None = None) -> None:
+    exec("""INSERT INTO alerts(key, severity, title, body, action, created_at) VALUES (?,?,?,?,?,?)
             ON CONFLICT(key) DO UPDATE SET severity=excluded.severity, title=excluded.title, body=excluded.body,
             action=excluded.action, resolved_at=NULL""",
          key, severity, title, body, j(action) if action else None, now())
 
 
-def resolve_attention(key: str) -> None:
-    exec("UPDATE attention SET resolved_at=? WHERE key=? AND resolved_at IS NULL", now(), key)
+def resolve_alert(key: str) -> None:
+    exec("UPDATE alerts SET resolved_at=? WHERE key=? AND resolved_at IS NULL", now(), key)
 
 
 def setting(key: str, default: Any = None) -> Any:
@@ -243,3 +321,17 @@ def setting(key: str, default: Any = None) -> Any:
 
 def set_setting(key: str, value: Any) -> None:
     exec("INSERT INTO settings(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, j(value))
+
+
+def flag(source_id: str, run_id: str, target_kind: str, target_id: str | None, kind: str, severity: str,
+         title: str, body: str = "", evidence: Any = None, origin: str = "MACHINE_QA") -> int:
+    return exec("""INSERT INTO flags(source_id, run_id, target_kind, target_id, kind, severity, title, body, evidence,
+                   origin, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                source_id, run_id, target_kind, target_id, kind, severity, title, body,
+                j(evidence) if evidence is not None else None, origin, now())
+
+
+def decision(kind: str, ref: str, title: str, body: str = "") -> None:
+    if one("SELECT id FROM decisions WHERE kind=? AND ref=? AND resolved_at IS NULL", kind, ref):
+        return
+    exec("INSERT INTO decisions(kind, ref, title, body, created_at) VALUES (?,?,?,?,?)", kind, ref, title, body, now())

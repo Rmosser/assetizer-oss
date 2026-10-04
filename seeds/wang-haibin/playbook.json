@@ -1,0 +1,78 @@
+{
+  "channel": {
+    "name": "王海滨的财经闲谈",
+    "id": "UCZv9RhYScgYU_PqGVbhZ2lw"
+  },
+  "speaker_context": [
+    {
+      "rule_id": "rule_speaker_identity_correction",
+      "rule": "主讲人公开称呼为王海滨，所属频道为“王海滨的财经闲谈”；若语音转文字（ASR）姓名或称呼识别有误，均以此为准进行校正，并保留主讲人的原风格与语气。"
+    }
+  ],
+  "article_structure": [
+    {
+      "rule_id": "rule_publish_date_header",
+      "rule": "文稿顶部必须标注视频发布时间，采用固定格式：「视频发布于xxxx年xx月xx日」。"
+    },
+    {
+      "rule_id": "rule_markdown_hierarchy_partition",
+      "rule": "必须使用 Markdown 的层级标题（#、##、###）清晰划分文稿章节与论述要点。"
+    },
+    {
+      "rule_id": "rule_point_by_point_structuring",
+      "rule": "若原文包含多个阶段或论述要点，需在标题后分条列出，采用有序或无序列表排版。"
+    },
+    {
+      "rule_id": "rule_summary_list_knowledge_and_experience",
+      "rule": "文稿末尾必须单独设立清单，系统整理列出本次讲解涉及的主要知识点（可快速学习）与经验认知点（需长期积累）。"
+    },
+    {
+      "rule_id": "rule_extended_reading_recommendations",
+      "rule": "若视频中提及或可联想到更深入学习的书籍、报告、文章、视频等资料，必须在文末推荐延伸学习资源。"
+    }
+  ],
+  "visual_attention": [
+    {
+      "rule_id": "rule_visual_multimodal_enrichment",
+      "rule": "综合结合视频画面与字幕进行分析，对画面中出现的演示文稿文字、图表、示意图、人物关键动作、场景切换、演讲者肢体语言及演示PPT或板书内容等关键细节，在字幕文字基础上补充描述出来。"
+    },
+    {
+      "rule_id": "rule_visual_subtitle_cross_referencing",
+      "rule": "视频画面中呈现的重要视觉要素必须与字幕分析内容严格对应；当字幕提及特定概念且画面展示相关图表时，必须指明图表的具体细节。"
+    }
+  ],
+  "extraction_schema": [
+    {
+      "rule_id": "rule_terminology_and_framework_identification",
+      "rule": "明确识别并列出主讲人使用的关键专业术语、专有名词并简要释义，同时提炼分析论证时所运用的方法论、理论框架或分析工具。"
+    }
+  ],
+  "semantic_priorities": [
+    {
+      "rule_id": "rule_underlying_logic_and_cognition_distinction",
+      "rule": "对主讲人观点进行底层逻辑推导分析，厘清背后的逻辑链条；并在分析中明确区分哪些属于可直接学习掌握的知识点，哪些属于基于个人长期经验积累的主观认知。"
+    },
+    {
+      "rule_id": "rule_callback_logic_retention",
+      "rule": "文稿中必须完整保留上下文呼应关系（Call back）、前后逻辑关联与承接点。"
+    },
+    {
+      "rule_id": "rule_oral_to_written_tone_preservation",
+      "rule": "将原始口语表述转化为更易读、规范的书面表达，同时忠实保留主讲人的授课风格与原文意思。"
+    },
+    {
+      "rule_id": "rule_emphasis_formatting_markup",
+      "rule": "运用加粗、斜体、列表、引用块等 Markdown 语法标记重点概念、术语、定义、案例及反复强调的核心信息，便于快速定位与复习。"
+    }
+  ],
+  "fidelity_risks": [
+    {
+      "rule_id": "rule_strict_content_preservation",
+      "rule": "保留全部内容信息，尽量不删减任何段落或信息点，确保文稿能与原视频对照学习。"
+    },
+    {
+      "rule_id": "rule_prerequisite_and_review_retention",
+      "rule": "严禁省略后文需引用的前置背景信息，主讲人在后文授课过程中的回顾总结部分必须明确保留。"
+    }
+  ]
+}

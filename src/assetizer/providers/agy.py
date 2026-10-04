@@ -50,7 +50,7 @@ class CallResult:
     meta: dict = field(default_factory=dict)
 
 
-_TRANSIENT_MARKERS = ("429", "503", "500", "502", "504", "resource_exhausted", "unavailable",
+_TRANSIENT_MARKERS = ("429", "503", "500", "502", "504", "unavailable",
                       "deadline", "timed out", "timeout", "temporarily", "overloaded", "rate limit")
 _AUTH_MARKERS = ("unauthenticated", "401", "login", "sign in", "oauth", "credential", "not logged")
 
@@ -59,6 +59,8 @@ def classify_error(text: str) -> str:
     t = (text or "").lower()
     if "output token limit" in t or "max_tokens" in t or "output limit" in t:
         return "PROVIDER_OUTPUT_LIMIT"
+    if "quota" in t or "exceeded your" in t or "billing" in t:
+        return "PROVIDER_QUOTA"
     if any(m in t for m in _AUTH_MARKERS):
         return "AGY_AUTH_REQUIRED"
     if any(m in t for m in _TRANSIENT_MARKERS):
@@ -69,8 +71,19 @@ def classify_error(text: str) -> str:
 class AgyProvider:
     name = "agy"
 
+    _version: str | None = None
+
     def __init__(self, settings: config.Settings | None = None):
         self.s = settings or config.get()
+
+    def version(self) -> str:
+        if AgyProvider._version is None:
+            try:
+                AgyProvider._version = subprocess.run([self.s.agy_bin, "--version"], capture_output=True, text=True,
+                                                      timeout=30).stdout.strip() or "unknown"
+            except (OSError, subprocess.TimeoutExpired):
+                AgyProvider._version = "unknown"
+        return AgyProvider._version
 
     # ------------------------------------------------------------------ call
     def call(
@@ -117,7 +130,7 @@ class AgyProvider:
 
         env = dict(os.environ, GOGC="20", GOMEMLIMIT="6GiB")
         receipt: dict[str, Any] = {
-            "provider": self.name, "kind": kind, "model_requested": self.s.agy_model,
+            "provider": self.name, "kind": kind, "model_requested": self.s.agy_model, "agy_version": self.version(),
             "started_utc": now(), "allowed_view_files": allowed, "deviation": None,
             "schema": schema is not None, "prompt_bytes": len(prompt.encode()),
         }

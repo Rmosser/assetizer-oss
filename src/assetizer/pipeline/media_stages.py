@@ -1,0 +1,356 @@
+"""TRANSCRIBE → SCREENSHOTS → BOUNDARY → CLIPS → SUBTITLES → MEDIA_QA.
+
+Everything here is non-blocking at the asset level: one failed clip never
+stops the article, Notion or the package.
+"""
+from __future__ import annotations
+
+import re
+from bisect import bisect_left
+from pathlib import Path
+
+from .. import config, db
+from ..contracts import prompts as P
+from ..llm import ContractError
+from ..media import ffmpeg, subtitles
+from ..providers.agy import ProviderError
+from ..util import fmt_tc, now, parse_tc, read_json, sha256_file, write_json, write_text
+from .context import RunContext, StageWarning
+
+
+def _asset(ctx: RunContext, unit_id: str | None, kind: str, status: str, path: Path | None = None,
+           start: float | None = None, end: float | None = None, meta: dict | None = None, **cols) -> int:
+    if kind != "screenshot":  # one row per (unit, kind); screenshots are cleared per stage run
+        db.exec("DELETE FROM assets WHERE run_id=? AND unit_id IS ? AND kind=?", ctx.id, unit_id, kind)
+    sha = sha256_file(path) if path and path.exists() else None
+    size = path.stat().st_size if path and path.exists() else None
+    keys = ["run_id", "source_id", "unit_id", "kind", "status", "path", "sha256", "bytes", "start", "end", "meta", "created_at", *cols]
+    vals = [ctx.id, ctx.source["id"], unit_id, kind, status, str(path) if path else None, sha, size, start, end,
+            db.j(meta or {}), now(), *cols.values()]
+    return db.exec(f"INSERT INTO assets({','.join(keys)}) VALUES ({','.join('?' * len(vals))})", *vals)
+
+
+def _units(ctx: RunContext) -> list[dict]:
+    return ctx.load("machine/knowledge-units.json")["units"]
+
+
+# ------------------------------------------------------------------ transcribe
+def transcribe(ctx: RunContext) -> dict:
+    out = ctx.dir / "machine" / "transcript.json"
+    if out.exists():
+        t = read_json(out)
+        return {"words": len(t["words"]), "cached": True}
+    from ..media import asr
+
+    tickers = []
+    for c in ctx.load("machine/chunks.json", []):
+        for t in c["topics"]:
+            tickers += t.get("tickers", [])
+    top = sorted(set(tickers), key=tickers.count, reverse=True)[:40]
+    prompt = "以下是中文投资交易视频，涉及 " + "、".join(top) + "。" if top else None
+    wav = ffmpeg.extract_wav(ctx.media, ctx.path("work", "source.wav"))
+    try:
+        r = asr.transcribe(wav, initial_prompt=prompt)
+    finally:
+        wav.unlink(missing_ok=True)
+        asr.release()
+    try:
+        import opencc
+        cc = opencc.OpenCC("t2s")
+        for s in r["segments"]:
+            s["text"] = cc.convert(s["text"])
+        for w in r["words"]:
+            w["word"] = cc.convert(w["word"])
+    except ImportError:
+        pass
+    write_json(out, r)
+    db.exec("UPDATE sources SET transcript_path=? WHERE id=?", str(out), ctx.source["id"])
+    return {"words": len(r["words"]), "segments": len(r["segments"])}
+
+
+def _transcript(ctx: RunContext) -> dict | None:
+    p = ctx.dir / "machine" / "transcript.json"
+    return read_json(p) if p.exists() else None
+
+
+# ------------------------------------------------------------------ screenshots
+def screenshots(ctx: RunContext) -> dict:
+    n = 0
+    db.exec("DELETE FROM assets WHERE run_id=? AND kind='screenshot'", ctx.id)
+    for u in _units(ctx):
+        for i, a in enumerate(u.get("screenshot_anchors", [])[:2]):
+            p = ctx.path("assets", "screenshots", u["label"], f"{i + 1}.jpg")
+            try:
+                if p.exists():
+                    t = read_json(p.with_suffix(".json"))["t_actual"]
+                else:
+                    _, t = ffmpeg.sharpest_frame(ctx.media, a["t"], p)
+                    write_json(p.with_suffix(".json"), {"anchor": a, "t_actual": t})
+                _asset(ctx, u["id"], "screenshot", "GENERATED", p, start=t, end=t,
+                       meta={"reason": a.get("reason"), "timeframe": a.get("timeframe"),
+                             "visible_structure": a.get("visible_structure"), "anchor_t": a["t"]})
+                n += 1
+            except Exception as e:  # noqa: BLE001
+                ctx.flag("UNIT", u["id"], "SCREENSHOT_FAILED", "INFO", f"截图失败：{u['title']}", str(e)[:300])
+    return {"screenshots": n}
+
+
+# ------------------------------------------------------------------ boundary snapping
+PROTECTED_END = re.compile(r"(的|把|被|不|没|别|很|我|你|他|它|在|和|与|这个|那个|就是)$")
+
+
+def _boundaries(words: list[dict], seg_ends: set[int]) -> list[tuple[float, float, int, int]]:
+    """Candidate cut points between words: (cut_start_time, prev_end_time, strength, index)."""
+    out = []
+    for k in range(1, len(words)):
+        prev, cur = words[k - 1], words[k]
+        gap = cur["start"] - prev["end"]
+        s = 0
+        pw = prev["word"].strip()
+        if re.search(r"[。？！!?]$", pw):
+            s = 8
+        elif re.search(r"[，,：:；;]$", pw):
+            s = 5
+        elif gap >= 0.65:
+            s = 7
+        elif gap >= 0.28:
+            s = 4
+        if k - 1 in seg_ends:
+            s = max(s, 5) + 1
+        if PROTECTED_END.search(pw):
+            s = -8
+        out.append((cur["start"], prev["end"], s, k))
+    return out
+
+
+def snap(start: float, end: float, words: list[dict], seg_ends: set[int], next_start: float | None,
+         dur: float) -> dict:
+    cands = _boundaries(words, seg_ends)
+    times = [c[0] for c in cands]
+    res = {"start": start, "end": end, "start_snapped": False, "end_snapped": False}
+    # start: prefer earlier, window [-6, +2]
+    lo, hi = bisect_left(times, start - 6), bisect_left(times, start + 2)
+    best = None
+    for c in cands[lo:hi]:
+        if c[2] < 4:
+            continue
+        delta = c[0] - start
+        score = c[2] - abs(delta) * 0.4 - (1.5 if delta > 0 else 0)
+        if best is None or score > best[0]:
+            best = (score, c)
+    if best:
+        res["start"] = max(0.0, best[1][0] - 0.15)
+        res["start_snapped"] = True
+        res["start_strength"] = best[1][2]
+    # end: prefer later, window [-1, +6], never beyond next unit start (unless already beyond)
+    cap = dur
+    if next_start is not None and next_start > end:
+        cap = min(cap, next_start + 0.3)
+    lo, hi = bisect_left(times, end - 1), bisect_left(times, end + 6)
+    best = None
+    for c in cands[lo:hi]:
+        if c[2] < 4 or c[1] + 0.3 > cap:
+            continue
+        delta = c[1] - end
+        score = c[2] - abs(delta) * 0.4 - (1.5 if delta < 0 else 0)
+        if best is None or score > best[0]:
+            best = (score, c)
+    if best:
+        res["end"] = min(dur, best[1][1] + 0.3)
+        res["end_snapped"] = True
+        res["end_strength"] = best[1][2]
+    if res["end"] - res["start"] < 5:
+        res["start"], res["end"] = start, end
+        res["start_snapped"] = res["end_snapped"] = False
+    return res
+
+
+def _seg_end_indices(t: dict) -> set[int]:
+    ends, wi = set(), 0
+    words = t["words"]
+    for s in t["segments"]:
+        while wi < len(words) and words[wi]["end"] <= s["end"] + 0.01:
+            wi += 1
+        if wi:
+            ends.add(wi - 1)
+    return ends
+
+
+def boundary(ctx: RunContext) -> dict:
+    s = config.get()
+    units = {u["id"]: u for u in _units(ctx)}
+    ordered = sorted(units.values(), key=lambda u: u["start"])
+    nxt = {u["id"]: (ordered[i + 1]["start"] if i + 1 < len(ordered) else None) for i, u in enumerate(ordered)}
+    sel = ctx.load("machine/selection.json", {"selections": []})["selections"]
+    tr = _transcript(ctx)
+    words = tr["words"] if tr else []
+    seg_ends = _seg_end_indices(tr) if tr else set()
+    llm = ctx.llm()
+    results, stats = {}, {"model": 0, "fallback": 0, "snapped": 0}
+    for sl in sel:
+        if sl["verdict"] == "REJECT":
+            continue
+        u = units.get(sl["unit_id"])
+        if not u:
+            continue
+        w0 = max(0.0, u["start"] - s.boundary_pad_seconds)
+        w1 = min(ctx.duration, u["end"] + s.boundary_pad_seconds)
+        src = "model"
+        try:
+            win = ctx.dir / "work" / "windows" / f"{u['label']}.mp4"
+            if not (ctx.calls / f"boundary-{u['label']}" / "accepted.json").exists() and not win.exists():
+                ffmpeg.render_window(ctx.media, w0, w1 - w0, win)
+
+            def check(o, L=w1 - w0):
+                a, b = parse_tc(o["start"]), parse_tc(o["end"])
+                if not (0 <= a < b <= L + 2):
+                    raise ContractError("SCHEMA_VIOLATION", f"boundary outside window {a}-{b}/{L}")
+
+            o = llm.structured(ctx.calls, f"boundary-{u['label']}",
+                               P.boundary_prompt(ctx.playbook, str(win), {k: u[k] for k in ("label", "title", "summary", "required_context")}
+                                                 | {"unit_start_in_window": fmt_tc(u["start"] - w0), "unit_end_in_window": fmt_tc(u["end"] - w0)},
+                                                 w1 - w0),
+                               P.BOUNDARY_SCHEMA, media=[str(win)], check=check)
+            a, b = w0 + parse_tc(o["start"]), min(w1, w0 + parse_tc(o["end"]))
+            stats["model"] += 1
+        except ProviderError as e:
+            if e.kind in ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"):
+                raise
+            o, src = {"error": e.kind}, "fallback"
+        except (ContractError, ffmpeg.MediaError) as e:
+            o, src = {"error": str(e)[:200]}, "fallback"
+        if src == "fallback":
+            a, b = u["start"], u["end"]
+            stats["fallback"] += 1
+            ctx.flag("UNIT", u["id"], "BOUNDARY_FALLBACK", "REVIEW", f"「{u['title']}」边界模型失败，已按单元区间确定性剪辑",
+                     evidence={"error": o.get("error")})
+        if words:
+            sn = snap(a, b, words, seg_ends, nxt.get(u["id"]), ctx.duration)
+            if not (sn["start_snapped"] and sn["end_snapped"]):
+                ctx.flag("UNIT", u["id"], "BOUNDARY_UNCERTAIN", "INFO", f"「{u['title']}」边界附近没有找到清晰句界",
+                         evidence={"start": fmt_tc(a), "end": fmt_tc(b)})
+            else:
+                stats["snapped"] += 1
+        else:
+            sn = {"start": a, "end": b, "start_snapped": False, "end_snapped": False}
+        results[u["id"]] = {"label": u["label"], "model": o, "source": src, "model_start": a, "model_end": b, **sn,
+                            "selection": sl["verdict"], "publication_priority": sl["publication_priority"],
+                            "context_missing": bool(o.get("context_missing")) if isinstance(o, dict) else False}
+        if isinstance(o, dict) and o.get("context_missing"):
+            ctx.flag("UNIT", u["id"], "CONTEXT_MISSING", "REVIEW", f"「{u['title']}」片段可能缺少上下文",
+                     o.get("start_reason", ""))
+    ctx.save("machine/boundaries.json", results)
+    return stats
+
+
+# ------------------------------------------------------------------ clips
+def clips(ctx: RunContext) -> dict:
+    bnd = ctx.load("machine/boundaries.json", {})
+    units = {u["id"]: u for u in _units(ctx)}
+    tr = _transcript(ctx)
+    words = tr["words"] if tr else []
+    ok = failed = 0
+    for uid, b in bnd.items():
+        u = units[uid]
+        a, e = b["start"], b["end"]
+        if words:  # trim only real leading/trailing dead air (>1.5 s before first / after last word)
+            inside = [w for w in words if w["start"] >= a and w["end"] <= e]
+            if inside:
+                if inside[0]["start"] - a > 1.5:
+                    a = inside[0]["start"] - 0.3
+                if e - inside[-1]["end"] > 1.5:
+                    e = inside[-1]["end"] + 0.5
+        d = ctx.path("assets", "clips", u["label"], "x").parent
+        clean = d / "clip-clean.mp4"
+        meta = {"model_start": b["model_start"], "model_end": b["model_end"], "boundary_source": b["source"],
+                "start_snapped": b.get("start_snapped"), "end_snapped": b.get("end_snapped")}
+        standalone = 0 if b["selection"] == "CONTEXT_DEPENDENT" or b.get("context_missing") else 1
+        try:
+            if not clean.exists():
+                ffmpeg.render_clip(ctx.media, a, e, clean)
+            ffmpeg.frame(clean, min(3.0, (e - a) / 2), d / "poster.jpg", width=1280)
+            _asset(ctx, uid, "clip", "GENERATED", clean, a, e, meta, selection=b["selection"],
+                   publication_priority=b["publication_priority"], standalone=standalone)
+            _asset(ctx, uid, "poster", "GENERATED", d / "poster.jpg", a, a)
+            ok += 1
+            if e - a < 8:
+                ctx.flag("ASSET", uid, "CLIP_TOO_SHORT", "REVIEW", f"「{u['title']}」片段只有 {e - a:.0f} 秒")
+        except ffmpeg.MediaError as err:
+            failed += 1
+            _asset(ctx, uid, "clip", "FAILED", None, a, e, {**meta, "error": str(err)[:500]}, selection=b["selection"],
+                   publication_priority=b["publication_priority"], standalone=standalone)
+            ctx.flag("ASSET", uid, "CLIP_RENDER_FAILED", "REVIEW", f"「{u['title']}」剪辑失败", str(err)[:300])
+    if failed and not ok:
+        raise StageWarning(f"all {failed} clips failed")
+    return {"clips": ok, "failed": failed}
+
+
+# ------------------------------------------------------------------ subtitles
+def subtitle_stage(ctx: RunContext) -> dict:
+    tr = _transcript(ctx)
+    if not tr:
+        raise StageWarning("no transcript; subtitles skipped")
+    s = config.get()
+    fonts = s.font_dir or Path(__file__).resolve().parents[3] / "assets" / "subtitle"
+    units = {u["id"]: u for u in _units(ctx)}
+    res = {"SUCCESS": 0, "SUCCESS_WITH_WARNINGS": 0, "FAILED_NON_BLOCKING": 0}
+    for c in db.q("SELECT * FROM assets WHERE run_id=? AND kind='clip' AND status='GENERATED'", ctx.id):
+        u = units[c["unit_id"]]
+        clip = Path(c["path"])
+        d = clip.parent
+        a, e = c["start"], c["end"]
+        try:
+            words = [{**w, "start": max(0.0, w["start"] - a), "end": min(e - a, w["end"] - a)}
+                     for w in tr["words"] if w["start"] >= a - 0.05 and w["end"] <= e + 0.05]
+            segs = [{"text": sg["text"], "start": max(0.0, sg["start"] - a), "end": min(e - a, sg["end"] - a)}
+                    for sg in tr["segments"] if sg["end"] > a and sg["start"] < e]
+            if not words:
+                raise ValueError("no speech in clip")
+            # rebuild segment text from in-range words so lexical content matches exactly
+            text_words = "".join(w["word"] for w in words)
+            frozen = [{"text": text_words, "start": 0.0, "end": e - a}] if not segs else \
+                [{"text": "".join(w["word"] for w in words if w["start"] >= sg["start"] - 0.05 and w["end"] <= sg["end"] + 0.05),
+                  "start": sg["start"], "end": sg["end"]} for sg in segs]
+            frozen = [f for f in frozen if f["text"].strip()]
+            cues, _, _ = subtitles.segment(frozen, words, u.get("tickers", []), e - a, u["label"])
+            write_text(d / "subtitle.srt", subtitles.to_srt(cues))
+            write_text(d / "subtitle.ass", subtitles.to_ass(cues))
+            out = d / "clip-subtitled.mp4"
+            if not out.exists():
+                ffmpeg.burn_subtitles(clip, d / "subtitle.ass", out, fonts)
+            warns = subtitles.warnings(cues)
+            status = "SUCCESS_WITH_WARNINGS" if warns else "SUCCESS"
+            res[status] += 1
+            _asset(ctx, c["unit_id"], "clip_subtitled", "WARNING" if warns else "GENERATED", out, a, e,
+                   {"subtitle_result": status, "warnings": warns[:20], "cues": len(cues)})
+            _asset(ctx, c["unit_id"], "srt", "GENERATED", d / "subtitle.srt", a, e)
+            _asset(ctx, c["unit_id"], "ass", "GENERATED", d / "subtitle.ass", a, e)
+        except Exception as err:  # noqa: BLE001 — subtitles are best-effort
+            res["FAILED_NON_BLOCKING"] += 1
+            _asset(ctx, c["unit_id"], "clip_subtitled", "FAILED", None, a, e, {"error": str(err)[:300]})
+    return res
+
+
+# ------------------------------------------------------------------ media qa
+def media_qa(ctx: RunContext) -> dict:
+    bad = 0
+    rows = db.q("SELECT * FROM assets WHERE run_id=? AND kind IN ('clip','clip_subtitled') AND status IN ('GENERATED','WARNING')", ctx.id)
+    for r in rows:
+        p = Path(r["path"])
+        try:
+            q = ffmpeg.qa(p)
+            pr = ffmpeg.probe(p)
+            v = next(s for s in pr["streams"] if s["codec_type"] == "video")
+            q.update(profile=v.get("profile"), pix_fmt=v.get("pix_fmt"), moov_first=ffmpeg.moov_first(p))
+            problems = [k for k, okv in (("decode", q["ok"]), ("h264", q["video_codec"] == "h264"),
+                                         ("yuv420p", q["pix_fmt"] == "yuv420p"), ("aac", q["audio_codec"] == "aac"),
+                                         ("faststart", q["moov_first"])) if not okv]
+        except Exception as e:  # noqa: BLE001
+            q, problems = {"error": str(e)[:300]}, ["probe"]
+        meta = db.unj(r["meta"], {}) | {"qa": q, "qa_problems": problems}
+        status = r["status"] if not problems else "FAILED"
+        db.exec("UPDATE assets SET meta=?, status=? WHERE id=?", db.j(meta), status, r["id"])
+        if problems:
+            bad += 1
+            ctx.flag("ASSET", r["unit_id"], "MEDIA_QA_FAILED", "REVIEW", "视频文件可能无法播放：" + ",".join(problems))
+    return {"checked": len(rows), "failed": bad}

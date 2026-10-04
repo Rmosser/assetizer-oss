@@ -1,0 +1,212 @@
+{
+  "channel": {
+    "name": "交易员汤姆"
+  },
+  "rules": [
+    {
+      "id": "goal_reading_chart_navigation",
+      "rule": "将整段视频处理成读图学习导航，核心目标是提取视频中最具学习价值的图表判断，提炼发生时间、主讲人视线所及与识别逻辑，以及截图重温的价值，避免遗漏关键读图知识点。",
+      "quote": "你的任务是先把整段视频处理成一份 **读图学习导航**：\n\n> 找出视频里最值得停下来学习的图表判断，并告诉我大概发生在什么时候、老师在看什么、他是怎么看出来的，以及为什么这个片段值得我回到原视频截图学习。",
+      "phase": [
+        "understanding",
+        "knowledge",
+        "selection"
+      ]
+    },
+    {
+      "id": "selection_no_fixed_count",
+      "rule": "从完整视频中找出所有具备明显学习价值的读图片段，不要按固定数量硬凑，根据实际值得学习的片段数量实事求是输出。",
+      "quote": "从完整视频中找出所有具有明显学习价值的“读图片段”。\n\n不要按照固定数量硬凑。\n\n如果视频中有 8 个真正值得学习的片段，就输出 8 个；如果有 20 个，就输出 20 个。",
+      "phase": [
+        "understanding",
+        "merge",
+        "selection"
+      ]
+    },
+    {
+      "id": "selection_filter_chitchat",
+      "rule": "优先寻找主讲人真正进行图表判断的部分，简单报涨跌幅、闲聊与重复内容均予以忽略。",
+      "quote": "简单报涨跌幅、闲聊、重复内容可以忽略。",
+      "phase": [
+        "understanding",
+        "selection"
+      ]
+    },
+    {
+      "id": "accuracy_ticker_and_visual",
+      "rule": "确保股票代码（Ticker）与大致画面识别准确，严禁出现代码弄错或画面混淆。",
+      "quote": "2. Ticker 和大致画面不要搞错；",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "accuracy_video_time_navigation",
+      "rule": "视频时间段需足够准确，能够让学习者快速跳回并定位原视频，不要求绝对精确到某一秒。",
+      "quote": "时间不需要精确到某一秒，只要能够让我快速定位回原视频即可。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "evidence_screenshot_anchors",
+      "rule": "推荐截图位置应选择最能看清老师正在讲解该结构的画面；若单一截图无法看清全貌可提供截图 A 与截图 B，单个片段截图推荐一般不超过 2 个。",
+      "quote": "选择一个最能看到老师正在讲解该结构的画面。\n\n如果一个截图无法看清整个逻辑，可以给：\n\n> 建议截图 A：00:43\n> 建议截图 B：00:51\n\n一般不要超过 2 个。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "structure_catalog_basic",
+      "rule": "重点识别主讲人的核心图表结构，涵盖 Gap / Gap Fill、Tight Base / Consolidation、Previous High / Previous Low、Undercut、Support / Resistance、Overhead Supply、EMA Support / EMA Reclaim、Previous Day High Breakout、High Volume Close、Volatility Contraction 以及阻力转支撑。",
+      "quote": "* Gap / Gap Fill\n* Tight Base / Consolidation\n* Previous High / Previous Low\n* Undercut\n* Support / Resistance\n* Overhead Supply\n* EMA Support / EMA Reclaim\n* Previous Day High Breakout\n* High Volume Close\n* Volatility Contraction\n* 阻力转支撑",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "structure_catalog_multi_timeframe",
+      "rule": "重点识别复合关键区域与多周期配合逻辑，包括多个技术位置重叠形成的关键区域、日线与 1H / 15m / 5m 级别配合、从大周期 Setup 下沉到小周期寻找 Trigger，以及买入、等待、减仓或不追的操作原因。",
+      "quote": "* 多个技术位置重叠形成的关键区域\n* 日线与 1H / 15m / 5m 配合\n* 从大周期 Setup 下沉到小周期寻找 Trigger\n* 为什么某个位置适合买、等待、减仓或不追",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "explanation_teacher_summary_terms",
+      "rule": "用 2～4 句话概括片段内容，并尽量保留主讲人自己的术语表达。",
+      "quote": "用 2～4 句话概括这一段。\n\n尽量保留老师自己的术语。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "explanation_how_teacher_sees_it",
+      "rule": "重点解释老师大概是怎么看出来的，不得只重复形态名称，必须为读图学习者指明视线应该往哪里看。",
+      "quote": "这一部分是整个任务最重要的内容。\n\n不要只重复：\n\n> “这里有一个缺口。”\n\n而要告诉一个正在学习读图的人：\n\n> **视线应该往哪里看。**",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "visual_patterns_gaze_guide",
+      "rule": "针对具体形态提供视觉线索引导：缺口观察两根日 K 之间无连续价格覆盖区域与回踩回补；缩量盘整观察右侧最近几根 K 线实体与高低区间明显缩小，并同步观察成交量是否下降。",
+      "quote": "老师主要在看右侧最近几根 K 线。和前面的大幅波动相比，这几根 K 的实体和高低区间明显变小，同时成交量下降，所以他把这里理解成缩量窄幅盘整。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "visual_patterns_undercut_flip",
+      "rule": "针对破位与角色转换提供读图引导：Undercut 向左找前低并观察跌破后是否迅速收回而非向下扩张；阻力转支撑先找先前多次未破的高点，再看跳过高点后回踩是否仍能守住。",
+      "quote": "如果是 Undercut：\n\n> 先向左找到老师关注的前低，再看当前 K 线是否短暂跌破这个低点。老师关注的不是单纯“跌破”，而是跌破以后有没有继续向下扩张，还是很快重新收回来。\n\n如果是阻力转支撑：\n\n> 先找此前价格多次无法突破的高点，再看当前价格是否已经跳到这个高点上方，并在回踩时仍然守住它。老师因此开始观察原来的阻力有没有转化成支撑。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "accuracy_no_false_precision",
+      "rule": "杜绝虚假精度，严禁为显精确而胡乱猜测数字；易于读取的价格或日期方可写出，无法可靠确认时使用“约在……”、“大致是……”、“画面右侧最近几根 K 线……”、“左侧前一个明显波段低点……”等相对视觉定位描述。",
+      "quote": "不要求给出绝对精确的价格数字。\n\n如果价格或日期很容易从画面读取，可以写；如果不能可靠确认，使用：\n\n> 约在……\n> 大致是……\n> 画面右侧最近几根 K 线……\n> 左侧前一个明显波段低点……\n\n不要为了显得精确而猜数字。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "framework_restore_teacher_logic",
+      "rule": "解释形态重要性时，优先还原主讲人交易框架内的特有逻辑，严禁喧宾夺主补充整套通用技术分析教材。",
+      "quote": "在主讲人的交易框架里，这个视觉结构为什么值得关注？\n\n这里优先还原 **主讲人的逻辑**，而不是补充一整套通用技术分析教材。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "framework_multi_location_confluence",
+      "rule": "识别与还原多位置共振逻辑，关注缺口、前低与关键均线（如 EMA20）等多个位置重叠于同一区域所形成的更高观察价值与赔率优势。",
+      "quote": "老师不是因为“出现 Gap”就直接买，而是因为 Gap、前低和 EMA20 集中在同一片区域，所以他认为这里比普通位置更值得观察。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "framework_multi_timeframe_setup_trigger",
+      "rule": "识别与还原大周期找机会、小周期找执行点的跨周期框架，例如日线方向看多不直接追高，而是切换到 5 分钟级别等待均线（如 EMA10）跟上及局部高点突破作为入场触发信号（Trigger）。",
+      "quote": "老师虽然日线方向看多，但没有直接追，而是切到 5 分钟等待 EMA10 跟上和局部高点突破，所以这里体现的是“大周期找机会，小周期找执行点”。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "checklist_observation_tasks",
+      "rule": "为每个片段列出 2～4 个明确的观察任务清单，使学习者回到截图后清楚视线落点，涵盖振幅对比、实体大小、成交量是否同步下降、均线位置以及触发突破的 K 线。",
+      "quote": "列出 **2～4 个观察任务**。\n\n例如：\n\n* [ ] 找到形成 Gap 的前后两根 K 线\n* [ ] 看当前价格是从哪个方向重新进入 Gap\n* [ ] 找到老师所说的前低\n* [ ] 看 EMA20 是否正好经过同一区域\n\n或者：\n\n* [ ] 对比盘整前后的 K 线振幅\n* [ ] 看最近几根 K 线实体是否明显变小\n* [ ] 看成交量是否同步下降\n* [ ] 找到最后真正触发突破的那根 K 线",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "priority_single_clip_rating",
+      "rule": "对每个片段评定学习优先级（★★★ 强烈建议截图学习、★★ 值得学习、★ 了解即可），并用一句话说明判定理由。",
+      "quote": "学习优先级：\n\n* ★★★ 强烈建议截图学习\n* ★★ 值得学习\n* ★ 了解即可\n\n并用一句话解释原因。",
+      "phase": [
+        "knowledge",
+        "selection"
+      ]
+    },
+    {
+      "id": "distinguish_three_types_of_info",
+      "rule": "严格区分主讲人明确说的、视频画面直接看到的与辅助初学者理解的合理解释三类信息；对主力吸筹、获取流动性、机构成本、洗盘、供应、筹码沉淀等机制术语，若为主讲人解释可保留，但不得仅凭 K 线画面将其描述为已证实的客观事实。",
+      "quote": "分析过程中尽量区分：\n\n**【主讲人明确说的】**\n\n**【视频画面能够直接看到的】**\n\n**【为了帮助初学者理解而进行的合理解释】**\n\n尤其是类似：\n\n* 主力吸筹\n* 获取流动性\n* 机构成本\n* 洗盘\n* 供应\n* 筹码沉淀\n\n如果这是主讲人的解释，可以保留他的说法。\n\n但不要仅凭 K 线画面把这些机制自动描述成已经被证明的客观事实。",
+      "phase": [
+        "understanding",
+        "knowledge"
+      ]
+    },
+    {
+      "id": "selection_top_priority_list",
+      "rule": "整段视频分析完毕后，从所有片段中挑出最值得优先回看和截图的 5～10 个片段生成优先清单。",
+      "quote": "从所有片段中挑出 **最值得我优先回看和截图的 5～10 个片段**。",
+      "phase": [
+        "selection"
+      ]
+    },
+    {
+      "id": "selection_priority_ranking_standard",
+      "rule": "优先学习清单的排序标准严禁以单笔交易盈利大小为准，必须以案例对学习者理解读 K 线、识别关键位置及形成判断的帮助程度为评价标准。",
+      "quote": "排序标准不是“这笔交易赚得最多”，而是：\n\n> **这个案例有多适合帮助学习者理解主讲人究竟是怎样读 K 线、识别关键位置并形成判断的。**",
+      "phase": [
+        "selection"
+      ]
+    },
+    {
+      "id": "article_style_segment_block",
+      "rule": "文章各学习片段按标准化结构排版输出，包含知识点名称（## 01. 知识点名称）、Ticker（### Ticker）、视频时间（### 视频时间）、推荐截图位置（### 推荐截图位置）、老师在讲什么（### 老师在讲什么？）、怎么看出来、重要性说明与观察任务清单等固定层级。",
+      "quote": "## 01. 知识点名称\n\n给这个片段取一个简洁、容易理解的名字。\n\n例如：\n\n> **缺口回补 + 前低 + EMA20 的共振支撑**\n\n### Ticker\n\nQQQ\n\n### 视频时间\n\n`00:29 → 00:59`",
+      "phase": [
+        "article"
+      ]
+    },
+    {
+      "id": "article_style_priority_table",
+      "rule": "文末优先学习清单必须采用 Markdown 表格形式呈现，包含“优先级”、“时间”、“Ticker”、“主要知识点”、“为什么优先学”五列。",
+      "quote": "| 优先级 | 时间          | Ticker | 主要知识点                   | 为什么优先学                     |\n| --- | ----------- | ------ | ----------------------- | -------------------------- |\n| 1   | 28:03–28:55 | TEM    | 日线突破 → 5m EMA10 → 小平台突破 | 非常适合学习大周期 Setup 如何转化成小周期入场 |\n| 2   | …           | …      | …                       | …                          |",
+      "phase": [
+        "article"
+      ]
+    }
+  ]
+}

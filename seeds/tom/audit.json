@@ -1,0 +1,178 @@
+{
+  "auditor": "Codex independent raw-versus-compiled review",
+  "audited_at": "2026-09-10T07:12:29.847631+00:00",
+  "requirements": [
+    {
+      "requirement": "读图学习目标",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "goal_reading_chart_navigation"
+      ]
+    },
+    {
+      "requirement": "不固定知识点数量",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "selection_no_fixed_count"
+      ]
+    },
+    {
+      "requirement": "Ticker准确性",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "accuracy_ticker_and_visual"
+      ]
+    },
+    {
+      "requirement": "Source time",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "accuracy_video_time_navigation"
+      ]
+    },
+    {
+      "requirement": "Screenshot anchors",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "evidence_screenshot_anchors"
+      ]
+    },
+    {
+      "requirement": "老师怎么看出来",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "explanation_how_teacher_sees_it"
+      ]
+    },
+    {
+      "requirement": "visual evidence",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "explanation_how_teacher_sees_it",
+        "visual_patterns_gaze_guide",
+        "distinguish_three_types_of_info"
+      ]
+    },
+    {
+      "requirement": "Gap",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_basic",
+        "framework_multi_location_confluence"
+      ]
+    },
+    {
+      "requirement": "Consolidation",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_basic",
+        "visual_patterns_gaze_guide"
+      ]
+    },
+    {
+      "requirement": "Previous High / Low",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_basic",
+        "visual_patterns_undercut_flip"
+      ]
+    },
+    {
+      "requirement": "Undercut",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_basic",
+        "visual_patterns_undercut_flip"
+      ]
+    },
+    {
+      "requirement": "Support / Resistance",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_basic",
+        "visual_patterns_undercut_flip"
+      ]
+    },
+    {
+      "requirement": "Overhead Supply",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_basic",
+        "distinguish_three_types_of_info"
+      ]
+    },
+    {
+      "requirement": "EMA Support / Reclaim",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_basic",
+        "framework_multi_timeframe_setup_trigger"
+      ]
+    },
+    {
+      "requirement": "Volume Contraction",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "visual_patterns_gaze_guide",
+        "checklist_observation_tasks"
+      ]
+    },
+    {
+      "requirement": "multi-location confluence",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_multi_timeframe",
+        "framework_multi_location_confluence"
+      ]
+    },
+    {
+      "requirement": "higher timeframe Setup",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_multi_timeframe",
+        "framework_multi_timeframe_setup_trigger"
+      ]
+    },
+    {
+      "requirement": "lower timeframe Trigger",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "structure_catalog_multi_timeframe",
+        "framework_multi_timeframe_setup_trigger"
+      ]
+    },
+    {
+      "requirement": "no false precision",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "accuracy_no_false_precision"
+      ]
+    },
+    {
+      "requirement": "observation checklist",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "checklist_observation_tasks"
+      ]
+    },
+    {
+      "requirement": "learning priority",
+      "status": "PRESERVED",
+      "rule_ids": [
+        "priority_single_clip_rating",
+        "selection_top_priority_list",
+        "selection_priority_ranking_standard"
+      ]
+    }
+  ],
+  "core_dropped": 0,
+  "core_partial": 0,
+  "approved_for_production": true,
+  "notes": [
+    "21 mandatory items independently compared against rule text, not only compiler self-rating",
+    "specific structure catalog and Setup to Trigger explicitly preserved",
+    "gaze-guide quote alone covers consolidation; Gap explanation separately supported by raw preceding example",
+    "examples are illustrative preference only, not current Source facts",
+    "phase routing is orchestrator-owned: article-only rules excluded from machine phases; semantic rules supplied to all semantic phases; quotations never injected as current facts"
+  ]
+}

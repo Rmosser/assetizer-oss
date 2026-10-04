@@ -1,0 +1,292 @@
+"""Stage prompts and JSON Schemas (the Machine Contracts).
+
+Time contract (ADR-7 / review §1.1): the model only ever reports times it can
+see — the playback position inside the media it was given, as ``MM:SS`` or
+``H:MM:SS``. Code adds the measured offset. Text-only stages reference topic
+ids instead of inventing times.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+POLICY = (Path(__file__).with_name("policy.md")).read_text().strip()
+TC = {"type": "string", "pattern": r"^\d{1,2}:\d{2}(:\d{2})?(\.\d+)?$"}
+STR = {"type": "string"}
+STRS = {"type": "array", "items": STR}
+NSTR = {"type": ["string", "null"]}
+
+
+def obj(props: dict, required: list[str] | None = None) -> dict:
+    return {"type": "object", "properties": props, "required": required if required is not None else list(props)}
+
+
+def arr(item: dict, **kw) -> dict:
+    return {"type": "array", "items": item, **kw}
+
+
+# --------------------------------------------------------------- context
+def context(playbook: dict, phase: str) -> str:
+    ident = playbook.get("identity") or {}
+    rules = [r for r in playbook.get("rules", []) if phase in r.get("phases", []) or phase == "article" and "article" in r.get("phases", [])]
+    lines = [POLICY, ""]
+    if playbook.get("universal"):
+        lines.append("模式：Universal（未建立频道专属学习目标）。不使用任何频道规则，只做中性、完整、可追溯的知识整理。")
+    else:
+        lines.append(f"频道：{ident.get('channel', '未知')}。主讲人：{ident.get('speaker', '未确认')}（speaker_key={ident.get('speaker_key', 'host')}）。")
+        if ident.get("notes"):
+            lines.append(ident["notes"])
+    lines.append(f"阶段：{phase}。只使用本期证据。")
+    if rules:
+        lines.append("频道长期学习规则（用户意图，示例仅说明偏好，不是本期事实）：")
+        lines += [f"- [{r['id']}] {r['rule']}" for r in rules]
+    if phase == "article" and playbook.get("article_style"):
+        lines.append("文章风格：" + playbook["article_style"])
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------- understand
+CLAIM = obj({
+    "speaker_key": STR,
+    "kind": {"type": "string", "enum": ["STATEMENT", "OPINION", "VISUAL_FACT", "INTERPRETATION", "PLAN", "EXECUTED",
+                                         "HYPOTHETICAL", "PREDICTION", "THIRD_PARTY", "UNCERTAIN"]},
+    "modality": {"type": "string", "enum": ["SPOKEN", "ON_SCREEN", "BOTH"]},
+    "t": TC,
+    "text": STR,
+    "subject": NSTR,
+    "condition": NSTR,
+    "time_scope": {"type": ["string", "null"], "enum": ["NOW", "NEXT_SESSION", "WATCH", "PAST", None]},
+}, ["speaker_key", "kind", "modality", "t", "text"])
+
+UNDERSTAND_SCHEMA = obj({
+    "speakers": arr(obj({"key": STR, "name": NSTR, "role": STR, "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                         "evidence": STR})),
+    "topics": arr(obj({
+        "id": STR, "title": STR, "start": TC, "end": TC, "summary": STR,
+        "tickers": STRS, "claims": arr(CLAIM), "teacher_reasoning": STR,
+        "visual_evidence": STRS, "examples": STRS, "terminology": STRS,
+        "knowledge_candidates": STRS, "uncertainties": STRS,
+    }, ["id", "title", "start", "end", "summary", "tickers", "claims", "teacher_reasoning", "visual_evidence", "uncertainties"]),
+        minItems=1),
+    "uncertainties": STRS,
+})
+
+
+def understand_prompt(playbook: dict, media_path: str, chunk: dict, duration_hint: float) -> str:
+    return f"""{context(playbook, 'understanding')}
+
+你是多模态理解 Worker。第一且唯一的媒体动作：用 view_file 读取下面指定的完整视频，且只读取一次。禁止其他工具、ASR、搜索、截图或 ffmpeg 替代；无法读取就直接失败，不要改走间接路径。
+只输出机器 JSON，不写文章。把这段视频按内容拆成 topics（主题、案例、问题、标的或教学单元；不按固定时长）。
+- start / end / claims[].t 一律使用**本视频播放器内的时间码**（从 00:00 开始，格式 MM:SS 或 H:MM:SS）。不要换算成整场直播的时间，系统会自动换算。本段视频时长约 {duration_hint/60:.1f} 分钟，时间不得超过它。
+- claims 区分 kind 与 modality；有条件/观察范围时填写 condition 与 time_scope（NOW 当前操作 / NEXT_SESSION 下一交易日 / WATCH 继续观察 / PAST 已发生）。
+- speakers 给每位说话人一个稳定 key（如 host、guest_1），name 只在本期有明确证据时填写。
+- teacher_reasoning：主讲人是怎么看出来、怎么推理的；帮助理解的推断要写明"（推断）"。
+- 同一信息不要在多个字段重复抄写。
+
+INPUT MEDIA
+{json.dumps({"path": media_path, "part": chunk["part_id"]}, ensure_ascii=False)}"""
+
+
+# --------------------------------------------------------------- merge (index only)
+MERGE_SCHEMA = obj({
+    "topics": arr(obj({
+        "id": STR, "title": STR, "chunk_topic_refs": arr(STR, minItems=1),
+        "causal_links": STRS, "state_events": STRS, "uncertainties": STRS,
+    }), minItems=1),
+    "speakers": arr(obj({"key": STR, "name": NSTR, "role": STR, "confidence": STR, "evidence": STR})),
+    "conflicts": STRS,
+    "uncertainties": STRS,
+})
+
+
+def merge_prompt(playbook: dict, chunk_records: list[dict], overlap_pairs: list[list[str]]) -> str:
+    return f"""{context(playbook, 'merge')}
+
+只读下面冻结的分段理解记录，禁止工具与媒体。生成**合并索引**，不要复写 claim：
+- topics：按时间顺序给出合并后的主题，chunk_topic_refs 用 "CH01:topic_id" 引用输入主题；跨片的同一论证合成一个主题。
+- 重叠区里系统已预先算出时间相交的主题对（可能重复）：{json.dumps(overlap_pairs, ensure_ascii=False)}；判断是否为同一内容，是则合并引用。
+- 保留 Speaker 归属、计划/已执行/假设的区别与不确定性；不改状态，不补内容，不加强程度。
+- speakers：合并说话人注册表（key 稳定）。conflicts：分段间的矛盾。
+
+INPUT
+{json.dumps(chunk_records, ensure_ascii=False)}"""
+
+
+# --------------------------------------------------------------- knowledge
+def facet_schema(playbook: dict) -> dict:
+    props = {}
+    for f in playbook.get("facets", []):
+        props[f["key"]] = STRS if f.get("type") == "list" else NSTR
+    return {"type": "object", "properties": props, "required": list(props)}
+
+
+KNOWLEDGE_TYPES = ["CHART_READING", "TRADING_PRINCIPLE", "TRADE_MANAGEMENT", "RISK_CONTROL", "MARKET_CONTEXT",
+                   "TICKER_ANALYSIS", "CONCEPT", "CASE_STUDY", "ARGUMENT", "QA", "GENERAL_CONTEXT", "OTHER"]
+
+SKELETON_SCHEMA = obj({
+    "units": arr(obj({
+        "label": {"type": "string", "pattern": r"^[a-z0-9_]{3,64}$"},
+        "title": STR, "topic_refs": arr(STR, minItems=1),
+        "knowledge_type": {"type": "string", "enum": KNOWLEDGE_TYPES},
+        "learning_priority": {"type": "integer", "minimum": 1, "maximum": 3},
+        "tickers": STRS, "depends_on": STRS, "clip_candidate": {"type": "boolean"}, "why": STR,
+    }), minItems=1),
+    "uncertainties": STRS,
+})
+
+
+def skeleton_prompt(playbook: dict, topics: list[dict]) -> str:
+    return f"""{context(playbook, 'knowledge')}
+
+禁止工具与媒体。根据下面合并后的主题，规划本期的 Knowledge Units（知识单元）**清单**——本次只出骨架，不写详细内容。
+- 学习价值优先：不要把每只股票都展开；简单报涨跌、行情浏览可合成一个 GENERAL_CONTEXT 单元；不固定数量凑点，也不要漏掉真正值得学习的判断。
+- label：小写英文+数字+下划线的稳定标识（如 unit_07_tsla_gap_breakout），本期内唯一。
+- topic_refs 引用输入主题 id（必须存在）；一个单元可以引用多个主题，时间由系统按引用推算。
+- learning_priority：3=优先学习，2=值得学习，1=补充理解。depends_on：理解本单元需要先看的其他单元 label。
+- clip_candidate：是否可能成为一段独立可看的视频片段。why：一句话说明为什么值得学（描述内容，不赞美）。
+
+INPUT TOPICS
+{json.dumps(topics, ensure_ascii=False)}"""
+
+
+def detail_schema(playbook: dict) -> dict:
+    return obj({"units": arr(obj({
+        "label": STR, "summary": STR, "speaker_key": STR, "teacher_reasoning": STR,
+        "visual_evidence": STRS,
+        "screenshot_anchors": arr(obj({"topic_id": STR, "t": TC, "reason": STR, "timeframe": NSTR, "visible_structure": STR}), maxItems=2),
+        "required_context": STR,
+        "claims": arr(obj({"claim_ref": NSTR, "kind": CLAIM["properties"]["kind"], "text": STR, "subject": NSTR,
+                           "condition": NSTR, "time_scope": CLAIM["properties"]["time_scope"]},
+                          ["kind", "text", "subject", "condition", "time_scope"])),
+        "facets": facet_schema(playbook),
+        "uncertainties": STRS,
+    })), "uncertainties": STRS})
+
+
+def detail_prompt(playbook: dict, units: list[dict], topics: list[dict]) -> str:
+    facets = playbook.get("facets", [])
+    fdesc = "\n".join(f"  - {f['key']}（{f['label']}）：{f.get('description', '')}" for f in facets) or "  （无）"
+    return f"""{context(playbook, 'knowledge')}
+
+禁止工具与媒体。为下面这一批 Knowledge Units 补全详细内容，只使用所附主题记录中的证据。
+- summary：完整、具体；保留条件、程度、因果与归属。teacher_reasoning：主讲人怎么看出来（推断须标"（推断）"）。
+- screenshot_anchors：最多 2 个值得截图学习的时刻；t 必须**原样抄写所附主题记录或 claim 中出现过的时间码**（系统已换算为整场时间，不要自己计算），topic_id 指明来源主题。
+- required_context：独立观看这段内容所需的前提（中性描述，不加强）。
+- claims：本单元最关键的计划/已执行/条件/观点陈述；条件与观察范围必须准确（例如"当前不入场"与"继续观察"不能混为"剔除"）。
+- facets（频道专属字段，无证据就填 null 或空数组）：
+{fdesc}
+
+UNITS
+{json.dumps(units, ensure_ascii=False)}
+
+TOPIC RECORDS
+{json.dumps(topics, ensure_ascii=False)}"""
+
+
+# --------------------------------------------------------------- article
+OUTLINE_SCHEMA = obj({
+    "title": STR,
+    "intro_markdown": STR,
+    "outro_markdown": STR,
+})
+
+
+def outline_prompt(playbook: dict, meta: dict, units: list[dict]) -> str:
+    return f"""{context(playbook, 'article')}
+
+禁止工具与媒体。你在为本期写一篇结构化学习文章的**开头与结尾**；各单元正文由后续调用分别撰写，按 Source 时间顺序排列。
+- title：本期文章标题（克制、信息化，不标题党）。
+- intro_markdown：Markdown。包含一段 2–4 句的导语（本期主线），然后一个"学习导航"表格（列：单元｜看点｜优先级★），按时间顺序列出全部单元；优先级用 ★/★★/★★★。不要写运行元数据。
+- outro_markdown：Markdown。本期可带走的要点清单（按频道规则需要的清单形式），只用单元中的证据；没有就留空字符串。
+
+SOURCE
+{json.dumps(meta, ensure_ascii=False)}
+
+UNITS
+{json.dumps(units, ensure_ascii=False)}"""
+
+
+SECTIONS_SCHEMA = obj({"sections": arr(obj({"label": STR, "markdown": STR}), minItems=1)})
+
+
+def sections_prompt(playbook: dict, units: list[dict], topics: list[dict]) -> str:
+    return f"""{context(playbook, 'article')}
+
+禁止工具与媒体。为下面每个 Knowledge Unit 各写一节 Markdown 正文（每个 label 恰好一节）。
+- 以 "## " 开头的小节标题（可含 Ticker），正文自然、克制、信息密集，保留条件与归属；主讲人观点写"认为/指出/强调"。
+- 帮助理解的解释写成"（推断）"或"帮助理解："，不得包装成原话。
+- 不要写时间码列表、运行信息或素材索引；不要编造单元里没有的事实；不要在节内重复导航表。
+
+UNITS
+{json.dumps(units, ensure_ascii=False)}
+
+TOPIC RECORDS
+{json.dumps(topics, ensure_ascii=False)}"""
+
+
+# --------------------------------------------------------------- selection
+SELECT_SCHEMA = obj({"selections": arr(obj({
+    "label": STR,
+    "verdict": {"type": "string", "enum": ["SELECT", "REJECT", "CONTEXT_DEPENDENT"]},
+    "publication_priority": {"type": "string", "enum": ["P1", "P2", "P3", "ARCHIVE"]},
+    "reason": STR,
+})), "uncertainties": STRS})
+
+
+def select_prompt(playbook: dict, units: list[dict]) -> str:
+    return f"""{context(playbook, 'selection')}
+
+禁止工具与媒体。逐个判断每个 Knowledge Unit 是否值得生成一段视频 Clip（每个 label 恰好一条结果）。
+- SELECT：内容可独立完整观看、有学习或传播价值；CONTEXT_DEPENDENT：值得看但依赖前文（仍会生成，但不作为独立发布素材）；REJECT：不适合成片（纯行情浏览、碎片）。
+- publication_priority：作为独立外部发布素材的优先级 P1/P2/P3/ARCHIVE（与学习优先级不同）。
+- 不重写时间，不造新单元。reason 描述包含的解释、条件或证据。
+
+UNITS
+{json.dumps(units, ensure_ascii=False)}"""
+
+
+# --------------------------------------------------------------- boundary
+BOUNDARY_SCHEMA = obj({
+    "start": TC, "end": TC, "start_reason": STR, "end_reason": STR,
+    "standalone_confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+    "context_missing": {"type": "boolean"},
+})
+
+
+def boundary_prompt(playbook: dict, media_path: str, unit: dict, window_len: float) -> str:
+    return f"""{context(playbook, 'selection')}
+
+你是视频 Clip Boundary Worker，不是总结器。唯一任务：在当前窗口视频中选择一段连续、可独立观看的完整内容，给出自然开始与完整结束。
+第一且唯一媒体动作：用 view_file 读取下面指定的窗口视频，只读一次。禁止访问其他文件、ASR、截图、ffmpeg、网络。
+- 没有固定时长目标，短不是更好；不得切掉必要条件、代词主体或结论；不得为去掉内部跑题而拼接。
+- start / end 使用**本窗口视频播放器内的时间码**（从 00:00 开始，MM:SS），窗口时长约 {window_len:.0f} 秒；end 必须大于 start。
+- 无法获得完整上下文时 context_missing=true、standalone_confidence=LOW，不要假装可发布。
+
+INPUT
+{json.dumps({"window_video": media_path, "unit": unit}, ensure_ascii=False)}"""
+
+
+# --------------------------------------------------------------- review check (flags only)
+CHECK_KINDS = ["HALF_SENTENCE_START", "DANGLING_REFERENCE", "ENDS_BEFORE_CONCLUSION", "NEXT_TOPIC_BLEED",
+               "CLAIM_MISMATCH", "ATTRIBUTION_RISK", "OVERSTATEMENT"]
+CHECK_SCHEMA = obj({"checks": arr(obj({
+    "label": STR,
+    "issues": arr(obj({"kind": {"type": "string", "enum": CHECK_KINDS},
+                       "severity": {"type": "string", "enum": ["REVIEW", "INFO"]},
+                       "evidence": STR, "note": STR})),
+}))})
+
+
+def check_prompt(items: list[dict]) -> str:
+    return f"""{POLICY}
+
+你是只读质检员：禁止工具与媒体，不改写任何内容，只报告可能需要人工判断的问题；没有问题就给空数组，不要为了有输出而挑刺。
+对每个条目（一个 Clip 及其知识单元），依据所附 ASR 原文检查：
+- HALF_SENTENCE_START：开头是否从半句开始；DANGLING_REFERENCE：开头的"这个/它/他"是否缺少指代对象；
+- ENDS_BEFORE_CONCLUSION：结尾是否在结论前结束；NEXT_TOPIC_BLEED：结尾是否混入下一主题；
+- CLAIM_MISMATCH：单元的计划/已执行/条件陈述与该区间 ASR 是否不一致（例如 ASR 是"继续关注"，单元写成"剔除"）；
+- ATTRIBUTION_RISK / OVERSTATEMENT：归属错误或程度被加强。
+evidence 原样引用 ASR 片段。
+
+ITEMS
+{json.dumps(items, ensure_ascii=False)}"""
