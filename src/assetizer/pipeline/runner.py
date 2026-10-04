@@ -276,7 +276,7 @@ class Worker:
     def __init__(self, poll: float = 5.0):
         self.poll = poll
         self.stop = False
-        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0}
+        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0}
 
     def recover(self) -> None:
         n = kill_orphans()
@@ -304,6 +304,12 @@ class Worker:
                 db.resolve_alert(paused["reason"])
                 db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason=?", paused["reason"])
                 db.event("worker", "模型恢复，队列继续")
+        if not paused and t - self.last["probe"] > 3 * 3600 and not db.one("SELECT 1 FROM runs WHERE production='RUNNING'"):
+            self.last["probe"] = t  # idle-time login probe so the Engine lamp is current
+            h = AgyProvider().health()
+            db.set_setting("agy_health", h)
+            if not h.get("ok") and h.get("error") == "AGY_AUTH_REQUIRED":
+                db.raise_alert("AGY_AUTH_REQUIRED", "critical", *ALERT_TEXT["AGY_AUTH_REQUIRED"])
         if t - self.last["retry"] > 1800:
             self.last["retry"] = t
             db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','DISK_LOW','LIVE_IN_PROGRESS')")
