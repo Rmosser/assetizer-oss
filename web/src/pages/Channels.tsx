@@ -1,9 +1,63 @@
+import { useState } from "react";
 import { post } from "../api";
 import { usePoll } from "../hooks";
 import { ago } from "../util";
 
 const PHASE: Record<string, string> = { understanding: "理解", merge: "合并", knowledge: "知识", article: "文章", selection: "选片" };
 const STATUS: Record<string, string> = { ACTIVE: "生效", NEEDS_CONFIRMATION: "待确认", SUPERSEDED: "已替代", FAILED: "失败" };
+
+const DISP: Record<string, string> = { RULE: "规则", EXAMPLE: "示例", ORCHESTRATION: "系统承担", ARTICLE_STYLE: "文章写法", REDUNDANT: "重复", IGNORED: "未采用" };
+
+function Coverage({ audit }: { audit: any }) {
+  if (!audit?.clauses) return null;
+  const map: Record<string, any> = Object.fromEntries((audit.clause_map || []).map((m: any) => [m.clause_id, m]));
+  const grade: Record<string, any> = Object.fromEntries((audit.grades || []).map((g: any) => [g.rule_id, g]));
+  const unc = new Set(audit.uncovered || []);
+  return (
+    <details className="fold" open>
+      <summary>条款覆盖矩阵 · {Math.round((audit.coverage ?? 0) * 100)}% 条款有去处 · {audit.core_partial} 条规则部分保留 · {audit.core_dropped} 条丢失</summary>
+      <div className="cov">
+        {audit.clauses.map((c: any) => {
+          const m = map[c.id];
+          const g = m?.target ? grade[m.target] : null;
+          const bad = unc.has(c.id) || (m?.disposition === "IGNORED") || g?.status === "DROPPED";
+          return (
+            <div key={c.id} className={`cov-row ${bad ? "bad" : ""} ${g?.status === "PARTIAL" ? "partial" : ""}`}>
+              <span className="mono muted">{c.id}</span>
+              <span>{c.text}</span>
+              <span className="disp">{unc.has(c.id) ? "未覆盖" : DISP[m?.disposition] || m?.disposition}
+                {m?.target && <span className="mono"> → {m.target}</span>}
+                {g?.status === "PARTIAL" && <em> · 部分：{g.missing}</em>}
+                {m?.disposition === "IGNORED" && m?.reason && <em> · {m.reason}</em>}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function PromptEditor({ c, reload }: { c: any; reload: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState<string>(c.prompts[0]?.text || "");
+  const [msg, setMsg] = useState<string | null>(null);
+  if (!open) return <button className="btn sm" style={{ marginTop: 18 }} onClick={() => setOpen(true)}>编辑原始 Prompt</button>;
+  return (
+    <div className="editor">
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={18} aria-label="原始 Prompt" />
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
+        <button className="btn solid sm" onClick={async () => {
+          try { await post(`/api/channels/${c.id}/prompt`, { text }); setMsg("已保存为新版本，正在编译（约 2–4 分钟），完成后在这里确认。"); setOpen(false); setTimeout(reload, 1500); }
+          catch (e) { setMsg(String((e as Error).message)); }
+        }}>保存并编译</button>
+        <button className="btn ghost sm" onClick={() => setOpen(false)}>取消</button>
+        <span className="muted" style={{ fontSize: 12.5 }}>保存后生成新 Playbook 版本，确认前旧版本继续生效。</span>
+      </div>
+      {msg && <p className="zhu" style={{ fontSize: 13 }}>{msg}</p>}
+    </div>
+  );
+}
 
 function Channel({ c, reload }: { c: any; reload: () => void }) {
   const pb = c.playbooks[0];
@@ -46,13 +100,15 @@ function Channel({ c, reload }: { c: any; reload: () => void }) {
             </div>
           </details>
         )}
+        {pb?.status === "NEEDS_CONFIRMATION" && <Coverage audit={pb.audit} />}
         {prompt && (
           <details className="fold">
             <summary>用户原始 Prompt · v{prompt.version}{prompt.origin ? " · 来自 Notion" : ""}</summary>
             <div className="rawprompt">{prompt.text}</div>
-            {prompt.origin && <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>来源：<a href={prompt.origin} target="_blank" rel="noreferrer" style={{ borderBottom: "1px solid var(--rule-2)" }}>{prompt.origin}</a></p>}
+            {prompt.origin?.startsWith("http") && <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>来源：<a href={prompt.origin} target="_blank" rel="noreferrer" style={{ borderBottom: "1px solid var(--rule-2)" }}>{prompt.origin}</a></p>}
           </details>
         )}
+        {c.mode === "TRACKED" && <PromptEditor c={c} reload={reload} />}
       </div>
       <div className="pb">
         <span className="caps">Runtime Playbook</span>

@@ -368,6 +368,83 @@ def channel_ingest(cid: str, body: Ingest):
     return set_enabled(cid, body.enabled, body.min_minutes)
 
 
+def _bg(fn, *args, label: str = "") -> None:
+    def run():
+        try:
+            fn(*args)
+        except Exception as e:  # noqa: BLE001
+            db.event("compile", f"{label}失败：{e}", level="error")
+    threading.Thread(target=run, daemon=True).start()
+
+
+class PromptBody(BaseModel):
+    text: str
+    note: str | None = None
+
+
+@app.post("/api/channels/{cid}/prompt")
+def channel_prompt(cid: str, body: PromptBody):
+    """Save a new raw prompt version and compile it (text-only model calls, background)."""
+    from ..compiler import add_prompt_version, compile_prompt
+    if not db.one("SELECT id FROM channels WHERE id=?", cid):
+        raise HTTPException(404)
+    if len(body.text.strip()) < 30:
+        raise HTTPException(400, "Prompt 太短")
+    pid = add_prompt_version(cid, body.text.strip(), "manual", body.note)
+    _bg(compile_prompt, cid, pid, label="Playbook 编译")
+    db.event("compile", f"{cid} 原始 Prompt 新版本已保存，开始编译")
+    return {"prompt_id": pid, "compiling": True}
+
+
+class DraftBody(BaseModel):
+    name: str
+    why: str
+    source_id: str | None = None
+
+
+@app.post("/api/channels/draft")
+def channel_draft(body: DraftBody):
+    from ..compiler import draft_prompt
+    titles = []
+    if body.source_id:
+        s = db.one("SELECT youtube_channel_id FROM sources WHERE id=?", body.source_id)
+        if s and s["youtube_channel_id"]:
+            try:
+                from ..ingest import feed
+                titles = [e["title"] for e in feed(s["youtube_channel_id"])]
+            except Exception:  # noqa: BLE001
+                titles = []
+    return {"raw_prompt": draft_prompt(body.name, body.why, titles)}
+
+
+class TrackBody(BaseModel):
+    name: str
+    why: str
+    prompt: str
+    source_id: str
+
+
+@app.post("/api/channels/track")
+def channel_track(body: TrackBody):
+    """Onboarding: turn a source's (unknown) channel into a TRACKED channel and compile its prompt."""
+    from ..compiler import add_prompt_version, compile_prompt
+    from ..util import slug
+    s = db.one("SELECT * FROM sources WHERE id=?", body.source_id)
+    if not s or not s.get("youtube_channel_id"):
+        raise HTTPException(400, "这一期还没有解析出频道信息")
+    ch = db.one("SELECT * FROM channels WHERE youtube_channel_id=?", s["youtube_channel_id"])
+    cid = ch["id"] if ch else (slug(body.name) if slug(body.name) != "item" else s["youtube_channel_id"].lower())
+    if not ch:
+        db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, why, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                cid, body.name, s["youtube_channel_id"], "TRACKED", body.why, now(), now())
+    else:
+        db.exec("UPDATE channels SET mode='TRACKED', why=?, updated_at=? WHERE id=?", body.why, now(), cid)
+    db.exec("UPDATE sources SET channel_id=? WHERE youtube_channel_id=?", cid, s["youtube_channel_id"])
+    pid = add_prompt_version(cid, body.prompt.strip(), "onboarding")
+    _bg(compile_prompt, cid, pid, label="Playbook 编译")
+    return {"channel_id": cid, "prompt_id": pid}
+
+
 @app.post("/api/queue/resume")
 def resume():
     paused = db.setting("queue_paused")

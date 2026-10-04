@@ -346,6 +346,39 @@ function UnitSection({ u, section, assets, flags, facets, active, setActive, rel
   );
 }
 
+/* ───────────────────────────── onboarding ───────────────────────────── */
+function Track({ source, onDone }: { source: any; onDone: () => void }) {
+  const [why, setWhy] = useState("");
+  const [name, setName] = useState(source.channel_title || "");
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  return (
+    <div className="track">
+      <h3>把「{source.channel_title}」加入长期关注</h3>
+      <p className="muted">以后这个频道的视频会按你的学习目标生产。先告诉系统你为什么看它，系统起草一份频道学习 Prompt，你改完再编译。</p>
+      <label>频道名<input value={name} onChange={(e) => setName(e.target.value)} /></label>
+      <label>你主要为什么看这个频道？<textarea rows={3} value={why} onChange={(e) => setWhy(e.target.value)} placeholder="例如：学习他怎么判断宏观周期，以及他引用的数据和论证过程" /></label>
+      {!draft ? (
+        <button className="btn solid sm" disabled={why.trim().length < 6 || !!busy} onClick={async () => {
+          setBusy("起草中（约 1 分钟）…");
+          try { const r = await post("/api/channels/draft", { name, why, source_id: source.id }); setDraft(r.raw_prompt); setBusy(null); }
+          catch (e) { setBusy(String((e as Error).message)); }
+        }}>起草学习 Prompt</button>
+      ) : (
+        <>
+          <label>频道学习 Prompt（可直接修改）<textarea rows={16} value={draft} onChange={(e) => setDraft(e.target.value)} /></label>
+          <button className="btn solid sm" disabled={!!busy} onClick={async () => {
+            setBusy("保存并编译…");
+            try { await post("/api/channels/track", { name, why, prompt: draft, source_id: source.id }); setBusy("已加入长期关注，Playbook 编译完成后会出现在「待你拍板」。"); setTimeout(onDone, 2000); }
+            catch (e) { setBusy(String((e as Error).message)); }
+          }}>保存并编译</button>
+        </>
+      )}
+      {busy && <p className="zhu" style={{ fontSize: 13 }}>{busy}</p>}
+    </div>
+  );
+}
+
 /* ───────────────────────────── page ───────────────────────────── */
 function Progress() {
   const ref = useRef<HTMLDivElement>(null);
@@ -371,6 +404,7 @@ export default function Reader({ id }: { id: string }) {
   const [active, setActiveState] = useState<Active>(null);
   const [current, setCurrent] = useState<string | null>(null);
   const [shot, setShot] = useState<Asset | null>(null);
+  const [tracking, setTracking] = useState(false);
   const setActive = useCallback((a: Active) => setActiveState(a), []);
 
   const units: Unit[] = useMemo(() => (data?.units || []).slice().sort((a: Unit, b: Unit) => a.start - b.start), [data]);
@@ -429,7 +463,11 @@ export default function Reader({ id }: { id: string }) {
           {playbook && <span>Playbook v{playbook.version}{playbook.channel_id ? "" : "（通用）"}</span>}
           {source.url && <a href={source.url} target="_blank" rel="noreferrer">原视频 ↗</a>}
           {source.notion_url && <a href={source.notion_url} target="_blank" rel="noreferrer">Notion ↗</a>}
+          {(!channel || channel.mode !== "TRACKED") && source.youtube_channel_id && (
+            <button className="btn sm zhu" onClick={() => setTracking(!tracking)}>加入长期关注</button>
+          )}
         </div>
+        {tracking && <Track source={source} onDone={() => { setTracking(false); reload(); }} />}
       </header>
 
       <div className="reviewbar">
