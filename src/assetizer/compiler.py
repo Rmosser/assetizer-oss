@@ -22,6 +22,10 @@ from .contracts import prompts as P
 from .llm import LLM, ContractError
 from .util import now, sha256_text
 
+RESERVED_FACETS = {"title", "ticker", "tickers", "video_time", "time", "start", "end", "learning_priority", "priority",
+                   "summary", "speaker_summary", "teacher_reasoning", "visual_evidence", "visual_breakdown",
+                   "screenshot", "screenshot_recommendation", "screenshot_anchors", "required_context", "claims",
+                   "uncertainties", "concept_name", "importance_rationale"}
 PHASES = ["understanding", "merge", "knowledge", "article", "selection"]
 DISPOSITIONS = ["RULE", "EXAMPLE", "ORCHESTRATION", "ARTICLE_STYLE", "REDUNDANT", "IGNORED"]
 
@@ -42,10 +46,21 @@ def split_clauses(raw: str) -> list[dict]:
         parts = [p.strip() for p in re.split(r"(?<=[。！？!?；;])\s*", t) if p.strip()]
         for p in parts:
             plain = re.sub(r"[*_`]+", "", p).strip()
-            if len(plain) < 3:
+            if len(plain) < 3 and not plain.endswith(("：", ":")):
                 continue
             out.append({"id": f"C{len(out) + 1:03}", "text": plain, "section": heading})
-    return out
+    # fold short lead-ins ("例如：", "格式：") into the clause they introduce
+    merged: list[dict] = []
+    carry = ""
+    for c in out:
+        if len(c["text"]) <= 24 and c["text"].endswith(("：", ":")):
+            carry += c["text"]
+            continue
+        merged.append({**c, "text": carry + c["text"]})
+        carry = ""
+    for i, c in enumerate(merged):
+        c["id"] = f"C{i + 1:03}"
+    return merged
 
 
 def _norm(s: str) -> str:
@@ -83,7 +98,8 @@ def _compile_prompt(identity: dict, clauses: list[dict]) -> str:
   ORCHESTRATION（执行环境/工具/保存路径类要求，由系统承担，不给 Worker）、ARTICLE_STYLE（文章写法）、
   REDUNDANT（与另一条款重复，target=那条规则 id）、IGNORED（必须在 reason 写明原因）。
 - rules：每条规则是对 Worker 的明确指令，保留用户原意中的**具体目录、条件、步骤**（例如列举的结构类型、多周期 Setup→Trigger），不要压缩成笼统表述；phases 标出规则作用的阶段；clause_ids 列出来源条款。
-- facets：用户希望每个知识单元固定记录的字段（如「老师怎么看出来」以外的专门栏目），没有就给空数组。key 用英文小写。
+- facets：用户希望每个知识单元**额外**固定记录的专门栏目，没有就给空数组。key 用英文小写。系统已内置以下核心字段，facets 不得重复它们：
+  标题、Ticker、起止时间、学习优先级、摘要、主讲人推理（老师怎么看出来）、视觉证据、截图锚点（时间/原因）、所需上下文、关键陈述、不确定性。
 - article_style：一段话概括文章写法（只来自 ARTICLE_STYLE 条款）。
 - policy_conflicts：与全局政策冲突的条款（例如要求补充 Source 之外的资料），说明冲突点。
 - 示例里的 ticker/日期/价格只说明格式，不得写成规则内容。
@@ -147,7 +163,8 @@ def compile_prompt(channel_id: str, prompt_id: int) -> int:
     data = {
         "identity": identity,
         "rules": [{"id": r["id"], "rule": r["rule"], "quote": r["quote"], "phases": r["phases"], "clause_ids": r["clause_ids"]} for r in o["rules"]],
-        "facets": [{k: f[k] for k in ("key", "label", "type", "description")} for f in o["facets"]],
+        "facets": [{k: f[k] for k in ("key", "label", "type", "description")} for f in o["facets"]
+                   if f["key"] not in RESERVED_FACETS],
         "article_style": o["article_style"],
     }
     audit = {
