@@ -24,6 +24,10 @@ def resolve(ctx: RunContext) -> dict:
     if info.get("live_status") in ("is_live", "is_upcoming"):
         raise Waiting("LIVE_IN_PROGRESS", "直播尚未结束，稍后自动重试")
     channel = db.one("SELECT * FROM channels WHERE youtube_channel_id=?", info.get("channel_id"))
+    cfg = db.setting(f"ingest:{channel['id']}") if channel else None
+    if cfg and cfg.get("enabled") and (info.get("duration") or 0) < 60 * cfg.get("min_minutes", 10) \
+            and db.one("SELECT 1 FROM events WHERE run_id=? AND kind='ingest'", ctx.id):
+        raise RuntimeError(f"SKIPPED_SHORT: {info.get('duration')}s below channel minimum")
     db.exec("""UPDATE sources SET youtube_channel_id=?, channel_title=?, title=?, published_at=?, duration=?, info=?,
                channel_id=COALESCE(channel_id, ?), updated_at=? WHERE id=?""",
             info.get("channel_id"), info.get("channel"), info.get("title"), info.get("upload_date"),

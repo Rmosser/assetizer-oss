@@ -161,7 +161,8 @@ def channels():
             p["article_style"] = d.get("article_style")
         prompts = db.q("SELECT id, version, sha256, origin, origin_edited_at, created_at, text FROM channel_prompts WHERE channel_id=? ORDER BY version DESC", c["id"])
         stats = db.one("SELECT COUNT(*) n, MAX(created_at) last FROM sources WHERE channel_id=?", c["id"])
-        out.append({**c, "playbooks": pbs, "prompts": prompts, "sources": stats["n"], "last_source": stats["last"]})
+        out.append({**c, "playbooks": pbs, "prompts": prompts, "sources": stats["n"], "last_source": stats["last"],
+                    "ingest": db.setting(f"ingest:{c['id']}") or {"enabled": False}})
     uni = db.one("SELECT id, version, status FROM playbooks WHERE channel_id IS NULL AND status='ACTIVE'")
     return {"channels": out, "universal": uni,
             "decisions": db.q("SELECT * FROM decisions WHERE resolved_at IS NULL")}
@@ -352,6 +353,19 @@ def remote_browser():
     r = subprocess.run(["bash", script], capture_output=True, text=True, timeout=60)
     return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-500:],
             "tunnel": "ssh -N -L 6080:127.0.0.1:6080 ovh-investment", "url": "http://localhost:6080/vnc.html"}
+
+
+class Ingest(BaseModel):
+    enabled: bool
+    min_minutes: int = 10
+
+
+@app.post("/api/channels/{cid}/ingest")
+def channel_ingest(cid: str, body: Ingest):
+    from ..ingest import set_enabled
+    if not db.one("SELECT id FROM channels WHERE id=? AND mode='TRACKED'", cid):
+        raise HTTPException(404)
+    return set_enabled(cid, body.enabled, body.min_minutes)
 
 
 @app.post("/api/queue/resume")

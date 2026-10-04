@@ -19,6 +19,17 @@ function Channel({ c, reload }: { c: any; reload: () => void }) {
           {c.mode === "TRACKED" ? "长期关注" : "发现中"} · 已收 {c.sources} 期{c.last_source ? ` · 最近 ${ago(c.last_source)}` : ""}
         </div>
         {c.why && <p className="why">{c.why}」</p>}
+        {c.mode === "TRACKED" && c.youtube_channel_id && (
+          <div style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <label className={`switch ${c.ingest?.enabled ? "on" : ""}`}
+              onClick={async () => { await post(`/api/channels/${c.id}/ingest`, { enabled: !c.ingest?.enabled }); reload(); }}>
+              <i /> 自动收录新视频
+            </label>
+            <span className="muted" style={{ fontSize: 12.5 }}>
+              {c.ingest?.enabled ? `每 30 分钟检查一次 · 只收录开启后发布、${c.ingest.min_minutes || 10} 分钟以上的视频` : "开启后，新发布的视频会自动付印（不回溯旧视频）"}
+            </span>
+          </div>
+        )}
         {pb && (
           <details className="fold">
             <summary>频道规则与溯源（{pb.rules.length} 条）</summary>

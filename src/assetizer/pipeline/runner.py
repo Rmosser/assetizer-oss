@@ -261,8 +261,9 @@ def _wait(run_id: str, reason: str, message: str) -> None:
 
 def _fail(run_id: str, e: BaseException) -> None:
     kind = _classify(e)
-    db.exec("UPDATE runs SET production='FAILED', error_class=?, error=?, finished_at=? WHERE id=?",
-            kind, f"{e}\n{traceback.format_exc()[-1500:]}", now(), run_id)
+    state = "CANCELLED" if kind == "SKIPPED_SHORT" else "FAILED"
+    db.exec("UPDATE runs SET production=?, error_class=?, error=?, finished_at=? WHERE id=?",
+            state, kind, f"{e}\n{traceback.format_exc()[-1500:]}", now(), run_id)
     db.event("run", f"生产失败：{kind}", run_id, "error")
 
 
@@ -275,7 +276,7 @@ class Worker:
     def __init__(self, poll: float = 5.0):
         self.poll = poll
         self.stop = False
-        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0}
+        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0}
 
     def recover(self) -> None:
         n = kill_orphans()
@@ -305,6 +306,13 @@ class Worker:
         if t - self.last["retention"] > 3600:
             self.last["retention"] = t
             retention()
+        if t - self.last["ingest"] > 1800:
+            self.last["ingest"] = t
+            from ..ingest import poll
+            try:
+                poll()
+            except Exception as e:  # noqa: BLE001
+                db.event("ingest", f"自动收录异常：{e}", level="warn")
 
     def tick(self) -> bool:
         self.housekeeping()
