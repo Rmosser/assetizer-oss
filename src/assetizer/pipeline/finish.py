@@ -116,7 +116,12 @@ def package(ctx: RunContext) -> dict:
         shutil.rmtree(root)
     root.mkdir(parents=True)
     units = {u["id"]: u for u in _units(ctx)}
-    _link(ctx.dir / "article" / "article.md", root / "article" / "article.md")
+    # the package article is rebuilt from sections so reviewer edits and renumbering are reflected
+    outline = ctx.load("article/outline.json", {})
+    parts = [f"# {outline.get('title') or ctx.source.get('title')}"]
+    for sec in db.q("SELECT kind, unit_ids, markdown FROM sections WHERE run_id=? ORDER BY ord", ctx.id):
+        parts.append(sec["markdown"])
+    write_text(root / "article" / "article.md", "\n\n".join(parts))
     counts: dict[str, int] = {}
     for clip in db.q("SELECT * FROM assets WHERE run_id=? AND kind='clip' AND status='GENERATED'", ctx.id):
         u = units[clip["unit_id"]]
