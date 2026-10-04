@@ -57,6 +57,14 @@ _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sig
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
 
 
+def model_for(base: str, effort: str | None) -> str:
+    """agy encodes effort in the model id (gemini-3.8-flash-{low,medium,high}); --effort conflicts."""
+    if not effort:
+        return base
+    m = re.match(r"^(.*)-(low|medium|high)$", base)
+    return f"{m[1]}-{effort}" if m and effort in ("low", "medium", "high") else base
+
+
 def _seconds(spec: str) -> float:
     spec = spec.strip()
     mult = {"s": 1, "m": 60, "h": 3600}.get(spec[-1:], 1)
@@ -140,14 +148,13 @@ class AgyProvider:
                 return CallResult((call_dir / "response.txt").read_text(), r, reused=True)
         allowed = sorted(str(Path(m).resolve()) for m in (media or []))
         write_text(call_dir / "prompt.md", prompt)
+        model = model_for(self.s.agy_model, effort)
         cmd = [
-            self.s.agy_bin, "--model", self.s.agy_model,
+            self.s.agy_bin, "--model", model,
             "--disable-slash-commands", "--dangerously-skip-permissions",
             "--print-timeout", timeout or self.s.agy_print_timeout,
             "--output-format", "stream-json",
         ]
-        if effort:
-            cmd += ["--effort", effort]
         if schema is not None:
             write_json(call_dir / "schema.json", gemini_schema(schema))
             cmd += ["--json-schema", str((call_dir / "schema.json").resolve())]
@@ -164,7 +171,7 @@ class AgyProvider:
 
         env = dict(os.environ, GOGC="20", GOMEMLIMIT="6GiB")
         receipt: dict[str, Any] = {
-            "provider": self.name, "kind": kind, "model_requested": self.s.agy_model, "agy_version": self.version(),
+            "provider": self.name, "kind": kind, "model_requested": model, "agy_version": self.version(),
             "started_utc": now(), "allowed_view_files": allowed, "deviation": None,
             "schema": schema is not None, "prompt_bytes": len(prompt.encode()),
         }
@@ -286,7 +293,7 @@ class AgyProvider:
             receipt["status"] = "FAILED"
             receipt["error_class"] = kind_err
             receipt["error_excerpt"] = blob[-1500:]
-        if receipt.get("actual_model") and receipt["actual_model"] != self.s.agy_model and kind_err is None:
+        if receipt.get("actual_model") and receipt["actual_model"] != model and kind_err is None:
             receipt["status"] = "FAILED"
             kind_err = receipt["error_class"] = "MODEL_MISMATCH"
         if allowed and kind_err is None and receipt["view_file_count"] != len(allowed):

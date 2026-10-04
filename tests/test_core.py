@@ -95,3 +95,21 @@ def test_markdown_blocks():
     para = bl[1]["paragraph"]["rich_text"]
     assert any(x.get("annotations", {}).get("bold") for x in para)
     assert all(len(x["text"]["content"]) <= 1900 for x in B.rich("长" * 5000))
+
+
+def test_compiler_clause_split_and_provenance():
+    from assetizer.compiler import provenance_ok, split_clauses
+    raw = "# 一、目标\n\n我想学习**读图**。不要硬凑数量；\n\n* “这个缺口”\n* 这里在盘整\n\n---\n\n1. 第一条要求。第二句。"
+    cl = split_clauses(raw)
+    texts = [c["text"] for c in cl]
+    assert texts[0] == "我想学习读图。" and "不要硬凑数量；" in texts
+    assert "“这个缺口”" in texts and "第二句。" in texts
+    assert all(c["section"] == "一、目标" for c in cl)
+    assert provenance_ok("我想学习读图", raw) and not provenance_ok("编造的要求", raw)
+
+
+def test_effort_maps_to_model_variant():
+    from assetizer.providers.agy import model_for
+    assert model_for("gemini-3.8-flash-high", "medium") == "gemini-3.8-flash-medium"
+    assert model_for("gemini-3.8-flash-high", None) == "gemini-3.8-flash-high"
+    assert model_for("claude-opus-5-5-high", "low") == "claude-opus-5-5-low"

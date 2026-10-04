@@ -145,7 +145,7 @@ def knowledge(ctx: RunContext) -> dict:
             raise ContractError("SCHEMA_VIOLATION", f"unknown topic refs {bad[:5]}")
 
     skel = llm.structured(ctx.calls, "knowledge-skeleton", P.skeleton_prompt(ctx.playbook, skel_input),
-                          P.SKELETON_SCHEMA, effort="medium", check=check_skel)
+                          P.SKELETON_SCHEMA, check=check_skel)
     units = []
     for u in skel["units"]:
         refs = [mtopics[r] for r in u["topic_refs"]]
@@ -171,12 +171,12 @@ def knowledge(ctx: RunContext) -> dict:
         name = f"knowledge-detail-{bi // BATCH + 1:02}"
         try:
             o = llm.structured(ctx.calls, name, P.detail_prompt(ctx.playbook, brief, list(recs.values())), schema,
-                               effort="medium", check=check_detail)
+                               check=check_detail)
         except ContractError as e:
             if e.kind != "MISSING_UNITS":
                 raise
             o = llm.structured(ctx.calls, name + "-retry", P.detail_prompt(ctx.playbook, brief, list(recs.values())),
-                               schema, effort="medium")
+                               schema)
         for d in o["units"]:
             if d["label"] in labels:
                 details[d["label"]] = d
@@ -244,14 +244,14 @@ def article(ctx: RunContext) -> dict:
     outline = llm.structured(ctx.calls, "article-outline",
                              P.outline_prompt(ctx.playbook, meta, [{k: u[k] for k in ("label", "title", "learning_priority", "why", "tickers")}
                                                                    | {"start": fmt_tc(u["start"])} for u in units]),
-                             P.OUTLINE_SCHEMA, effort="medium")
+                             P.OUTLINE_SCHEMA)
     sections: dict[str, str] = {}
     for bi in range(0, len(units), BATCH):
         batch = units[bi:bi + BATCH]
         recs = {c: _strip(by_id[c]) for u in batch for c in u["provenance"]["chunk_topic_refs"] if c in by_id}
         o = llm.structured(ctx.calls, f"article-sections-{bi // BATCH + 1:02}",
                            P.sections_prompt(ctx.playbook, [_brief(u) for u in batch], list(recs.values())),
-                           P.SECTIONS_SCHEMA, effort="medium")
+                           P.SECTIONS_SCHEMA)
         for s in o["sections"]:
             sections.setdefault(s["label"], s["markdown"])
     db.exec("DELETE FROM sections WHERE run_id=?", ctx.id)
