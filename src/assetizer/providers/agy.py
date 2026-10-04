@@ -28,6 +28,7 @@ from .. import config
 from ..util import now, read_json, write_json, write_text
 
 ARGV_LIMIT = 120_000
+LIVE_PGIDS: set[int] = set()  # process groups of in-flight agy calls (killed on worker shutdown)
 
 
 class ProviderError(RuntimeError):
@@ -197,6 +198,7 @@ class AgyProvider:
                         pass
                     time.sleep(0.25)
 
+            LIVE_PGIDS.add(proc.pid)
             threading.Thread(target=monitor, daemon=True).start()
             limit = _seconds(timeout or self.s.agy_print_timeout) + 300
             last_line = [time.monotonic()]
@@ -258,6 +260,7 @@ class AgyProvider:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
             done.set()
+            LIVE_PGIDS.discard(proc.pid)
         if stdin_file:
             stdin_file.close()
 

@@ -335,7 +335,17 @@ class Worker:
 
     def loop(self) -> None:
         self.recover()
-        signal.signal(signal.SIGTERM, lambda *_: setattr(self, "stop", True))
+        def on_term(*_):
+            # stop now: kill in-flight agy groups; the next start resumes from checkpoints
+            from ..providers.agy import LIVE_PGIDS
+            for pg in list(LIVE_PGIDS):
+                try:
+                    os.killpg(pg, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            os._exit(0)
+
+        signal.signal(signal.SIGTERM, on_term)
         db.event("worker", "Worker 已启动")
         while not self.stop:
             try:
