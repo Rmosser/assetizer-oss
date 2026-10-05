@@ -21,7 +21,7 @@
   --grain-opacity: 0.35;
 
   --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
-  --sans: "Geist", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --sans: "Geist Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, monospace;
 
   --gutter: clamp(20px, 3.2vw, 48px);

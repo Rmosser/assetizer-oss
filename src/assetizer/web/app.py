@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -15,6 +16,16 @@ from .. import config, db
 from ..util import now
 
 app = FastAPI(title="Assetizer", docs_url="/api/docs")
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
+class ImmutableStatic(StaticFiles):
+    """Vite emits content-hashed file names: cache them for a year."""
+
+    async def get_response(self, path, scope):
+        r = await super().get_response(path, scope)
+        r.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return r
 STATIC = Path(__file__).with_name("static").resolve()
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
 PUBLIC_HOST = os.environ.get("ASSETIZER_PUBLIC_HOST", "").lower()          # e.g. kan.example.com
@@ -495,7 +506,7 @@ def resume():
 
 # ------------------------------------------------------------------ SPA
 if (STATIC / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
+    app.mount("/assets", ImmutableStatic(directory=STATIC / "assets"), name="assets")
 
 
 @app.get("/{path:path}")
