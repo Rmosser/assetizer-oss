@@ -102,7 +102,11 @@ MERGE_SCHEMA = obj({
 })
 
 
-def merge_prompt(playbook: dict, chunk_records: list[dict], overlap_pairs: list[list[str]]) -> str:
+SEAM_HINT = ("- 接缝规则：前一段视频结尾处的主题往往写得较粗；在重叠区里，如果后一段把同一时间拆成了多个独立的案例或标的，"
+             "以后一段更细的拆分为准，分别作为独立主题保留，不要把它们并进前一段那个粗主题。")
+
+
+def merge_prompt(playbook: dict, chunk_records: list[dict], overlap_pairs: list[list[str]], seam_hint: bool = False) -> str:
     return f"""{context(playbook, 'merge')}
 
 只读下面冻结的分段理解记录，禁止工具与媒体。生成**合并索引**，不要复写 claim：
@@ -110,6 +114,7 @@ def merge_prompt(playbook: dict, chunk_records: list[dict], overlap_pairs: list[
 - 重叠区里系统已预先算出时间相交的主题对（可能重复）：{json.dumps(overlap_pairs, ensure_ascii=False)}；判断是否为同一内容，是则合并引用。
 - 保留 Speaker 归属、计划/已执行/假设的区别与不确定性；不改状态，不补内容，不加强程度。
 - speakers：合并说话人注册表（key 稳定）。conflicts：分段间的矛盾。
+{SEAM_HINT if seam_hint else ""}
 
 INPUT
 {json.dumps(chunk_records, ensure_ascii=False)}"""

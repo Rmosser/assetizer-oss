@@ -68,8 +68,40 @@ def understand(ctx: RunContext) -> dict:
 
 
 # ------------------------------------------------------------------ merge
+def resolve_seams(chunks: list[dict], plan: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Seam policy "trim": a coarse topic at the end of chunk i that is covered, inside the overlap, by two or more
+    finer topics of chunk i+1 is cut back to the overlap start (or dropped if it lies almost entirely inside it)."""
+    log = []
+    out = [dict(c, topics=list(c["topics"])) for c in chunks]
+    for i in range(len(out) - 1):
+        o0 = plan[i + 1]["offset"]
+        o1 = plan[i]["offset"] + plan[i]["length"]
+        nxt = out[i + 1]["topics"]
+        kept = []
+        for t in out[i]["topics"]:
+            a, b = t["start_s"], t["end_s"]
+            inside = max(0.0, min(b, o1) - max(a, o0))
+            covered = [x for x in nxt if min(b, x["end_s"]) - max(a, x["start_s"]) >= 0.5 * (x["end_s"] - x["start_s"])]
+            if inside >= 0.5 * (b - a) and len(covered) >= 2:
+                if o0 - a >= 30:
+                    t = dict(t, end_s=o0, end=fmt_tc(o0), claims=[c for c in t.get("claims", []) if parse_tc(c["t"]) < o0])
+                    log.append({"topic": t["id"], "action": "trim", "to": fmt_tc(o0), "covered_by": [x["id"] for x in covered]})
+                else:
+                    log.append({"topic": t["id"], "action": "drop", "covered_by": [x["id"] for x in covered]})
+                    continue
+            kept.append(t)
+        out[i]["topics"] = kept
+    return out, log
+
+
 def merge(ctx: RunContext) -> dict:
+    import os
+    policy = os.environ.get("ASSETIZER_SEAM_POLICY") or db.setting("seam_policy", "none")
     chunks = ctx.load("machine/chunks.json")
+    seam_log = []
+    if policy == "trim" and len(chunks) > 1:
+        chunks, seam_log = resolve_seams(chunks, ctx.load("machine/chunk-plan.json")["chunks"])
+        ctx.save("machine/seam-log.json", seam_log)
     by_id = {t["id"]: t for c in chunks for t in c["topics"]}
     if len(chunks) == 1:
         merged = [{"id": f"M{i + 1:02}", "title": t["title"], "chunk_topic_refs": [t["id"]], "causal_links": [],
@@ -91,8 +123,8 @@ def merge(ctx: RunContext) -> dict:
             if bad:
                 raise ContractError("SCHEMA_VIOLATION", f"unknown refs {bad[:5]}")
 
-        o = ctx.llm().structured(ctx.calls, "merge", P.merge_prompt(ctx.playbook, slim, pairs), P.MERGE_SCHEMA,
-                                 effort="medium", check=check)
+        o = ctx.llm().structured(ctx.calls, "merge", P.merge_prompt(ctx.playbook, slim, pairs, seam_hint=policy == "prompt"),
+                                 P.MERGE_SCHEMA, effort="medium", check=check)
         merged = [{**t, "id": f"M{i + 1:02}"} for i, t in enumerate(o["topics"])]
         speakers, conflicts = o["speakers"], o["conflicts"]
         referenced = {r for t in merged for r in t["chunk_topic_refs"]}
@@ -116,7 +148,8 @@ def merge(ctx: RunContext) -> dict:
                 ctx.source["id"], ctx.id, sp.get("key"), sp.get("name"), sp.get("role"), sp.get("confidence"), sp.get("evidence"))
     for c in conflicts:
         ctx.flag("RUN", None, "MERGE_CONFLICT", "REVIEW", "分段间存在矛盾", c)
-    return {"topics": len(merged), "speakers": len(speakers), "conflicts": len(conflicts)}
+    return {"topics": len(merged), "speakers": len(speakers), "conflicts": len(conflicts), "seam_policy": policy,
+            "seam_actions": len(seam_log)}
 
 
 def _topic_records(ctx: RunContext):
