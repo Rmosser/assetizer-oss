@@ -28,19 +28,27 @@ export function autospace(s: string): string {
   return (s || "").replace(RE.hanLatin, "$1 $2").replace(RE.latinHan, "$1 $2");
 }
 
-export const typeset = (s: string) => autospace(cjkPunct(s));
+/* Latin/Han spacing is left to CSS `text-autospace` (it knows about line edges; a literal thin space does not). */
+export const typeset = (s: string) => cjkPunct(s);
 
 const seg = typeof Intl !== "undefined" && "Segmenter" in Intl ? new Intl.Segmenter("zh-Hans", { granularity: "word" }) : null;
 
-/** Break lines only between words: keep-all + <wbr> at segmenter word boundaries. */
+const HAN_END = new RegExp(`[${HAN}]$`, "u");
+const HAN_START = new RegExp(`^[${HAN}]`, "u");
+
+/** Break lines only between words: keep-all, plus a <wbr> at each Han–Han word boundary. Han–Latin boundaries
+ *  stay inside one text node so `text-autospace` can still put its 1/8 em there. */
 export function Words({ children }: { children: string }) {
   const text = typeset(children || "");
   if (!seg) return <>{text}</>;
-  return (
-    <span className="kw">
-      {[...seg.segment(text)].map((s, i) => <Fragment key={i}>{s.segment}<wbr /></Fragment>)}
-    </span>
-  );
+  const runs: string[] = [];
+  let buf = "";
+  for (const { segment } of seg.segment(text)) {
+    if (buf && HAN_END.test(buf) && HAN_START.test(segment)) { runs.push(buf); buf = ""; }
+    buf += segment;
+  }
+  if (buf) runs.push(buf);
+  return <span className="kw">{runs.map((r, i) => <Fragment key={i}>{i > 0 && <wbr />}{r}</Fragment>)}</span>;
 }
 
 /** "09/08/2026 技术分析视频 持仓/板块个股分析/关注列表" → { head: "技术分析视频", dek: "持仓、板块个股分析、关注列表" } */

@@ -147,14 +147,14 @@ input, textarea { font: inherit; }
 .skip { position: absolute; left: -9999px; top: 8px; z-index: 100; padding: 8px 14px; background: var(--ink); color: var(--paper); }
 .skip:focus { left: 8px; }
 
-/* Chinese setting: strict breaking, squeezed punctuation, autospace where supported */
-.prose, .hero-lede, .why, .zhupi, .facet dd, .rule p, .decision p, .state-block p, .feature-title, .reader-head h1,
-.unit-title, .toc-title h3, .yaomu, .musts, .track p, .needs, .sheet-lede {
+/* Chinese setting, inherited everywhere: strict breaking, squeezed punctuation, Han/Latin autospace */
+body {
   line-break: strict;
   text-spacing-trim: trim-start;
   text-autospace: normal;
   hanging-punctuation: allow-end;
 }
+h1, h2, h3, h4, h5, .yaomu-row .t, .musts a, .dek, .toc-title h3, .run-title { text-wrap: balance; }
 
 /* ───────────────────────── utilities ───────────────────────── */
 .num { font-variant-numeric: tabular-nums lining-nums; letter-spacing: 0; }
@@ -447,7 +447,7 @@ details[open] > summary .plus { transform: rotate(45deg); }
 }
 .reader-head { padding: var(--s7) 0 var(--s6); border-bottom: 3px double var(--rule-2); }
 .head-in { grid-column: 2 / -1; position: relative; display: flex; flex-direction: column; align-items: flex-start; }
-.head-in.has-yin h1 { padding-right: 132px; }
+.head-in.has-yin h1, .head-in.has-yin .dek { padding-right: 132px; }
 .crumb { justify-self: start; display: inline-flex; align-items: center; gap: 8px; min-height: 32px; font: 500 13px var(--sans); color: var(--ink-3); transition: color 0.2s; }
 .crumb:hover { color: var(--ink); }
 .reader-head .kicker { margin-top: var(--s4); }
@@ -621,8 +621,10 @@ details[open] > summary .plus { transform: rotate(45deg); }
 
 .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--s4); margin: 0 0 var(--s5); }
 .shot { margin: 0; }
-.shot-btn { display: block; width: 100%; cursor: zoom-in; border-radius: 2px; }
-.shot img { width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; display: block; border-radius: 2px; background: var(--paper-3); box-shadow: 0 0 0 1px var(--rule); transition: transform 0.4s var(--ease), box-shadow 0.3s; }
+.shot-btn { position: relative; display: block; width: 100%; cursor: zoom-in; border-radius: 2px; background: var(--paper-3); }
+.shot-btn::before { content: "刊"; position: absolute; inset: 0; display: grid; place-items: center; font: 700 22px var(--serif); color: color-mix(in srgb, var(--ink-3) 35%, transparent); }
+.shot img { position: relative; }
+.shot img { width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; display: block; border-radius: 2px; box-shadow: 0 0 0 1px var(--rule); transition: transform 0.4s var(--ease), box-shadow 0.3s; }
 .shot-btn:hover img { transform: translateY(-2px); box-shadow: 0 0 0 1px var(--rule-2), var(--shadow); }
 .shot figcaption { margin-top: var(--s2); font: 13.5px/1.6 var(--serif); color: var(--ink-2); text-align: justify; }
 .shot figcaption .num { margin-right: 8px; font: 11.5px var(--mono); color: var(--ink-3); }
@@ -793,7 +795,7 @@ dialog { color: var(--ink); }
 
 .lightbox {
   width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0;
-  background: rgba(10, 10, 9, 0.94); color: #e9e3d6; overflow: hidden; animation: fadein 0.2s;
+  background: rgba(10, 10, 9, 0.97); color: #e9e3d6; overflow: hidden; animation: fadein 0.2s;
 }
 .lightbox::backdrop { background: transparent; }
 .lb-track { display: flex; width: 100%; height: calc(100% - 96px - var(--safe-b)); overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
@@ -861,6 +863,7 @@ dialog { color: var(--ink); }
 .queue-state.bad::before { background: var(--zhu); animation: breathe 1.6s infinite; }
 /* grid-line trick: 1px gaps over a rule-coloured background align at any column count */
 .instruments { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-top: var(--s6); background: var(--rule); border-block: 1px solid var(--rule); }
+.page-hero + .instruments { margin-top: 0; border-top: 0; }
 .inst { background: var(--paper); padding: var(--s5) var(--s5) var(--s5) 0; min-width: 0; }
 .inst:not(:nth-child(4n + 1)) { padding-left: var(--s5); }
 .inst .lbl { display: flex; align-items: center; gap: 8px; }
@@ -989,6 +992,7 @@ dialog { color: var(--ink); }
   .zhupi.compact .acts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
   .zhupi.compact .acts .btn { width: 100%; }
   .pi-cards .zhupi.done { padding: var(--s2) var(--s4); border: 1px solid var(--rule); }
+  .unit + .margin details.notes { display: none; }
 
   /* video and screenshots go edge to edge */
   .film, .film-note { margin-inline: calc(-1 * var(--gutter)); border-radius: 0; }
@@ -1043,7 +1047,7 @@ dialog { color: var(--ink); }
   .reader-head { padding: var(--s4) 0 var(--s5); }
   .reader-head .kicker { margin-top: var(--s3); }
   .reader-head h1 { font-size: 25px; line-height: 1.38; }
-  .head-in.has-yin h1 { padding-right: 80px; }
+  .head-in.has-yin h1, .head-in.has-yin .dek, .head-in.has-yin .reader-meta { padding-right: 64px; }
   .reader-meta { font-size: 13px; }
   .prose { font-size: 17px; line-height: 1.8; }
   .prose.lede p:first-child { font-size: 17.5px; }

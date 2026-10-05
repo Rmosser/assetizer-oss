@@ -1,0 +1,10 @@
+import { chromium } from "playwright-core";
+const browser = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+const page = await ctx.newPage();
+await page.goto("http://localhost:8772/issue/1MuKAUgL4r4", { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(3500);
+const sb = await page.$(".shot-btn"); await sb.scrollIntoViewIfNeeded(); await sb.click(); await page.waitForTimeout(1200);
+console.log(await page.evaluate(() => { const d = document.querySelector("dialog.lightbox"); const cs = getComputedStyle(d);
+  return { bg: cs.backgroundColor, op: cs.opacity, w: d.getBoundingClientRect().width, h: d.getBoundingClientRect().height, open: d.open, anim: cs.animationName, modal: d.matches(":modal") }; }));
+await browser.close();

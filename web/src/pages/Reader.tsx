@@ -216,10 +216,15 @@ function Shukou({ duration, units, flags, current, onJump }: {
 }
 
 /* ───────────────────────────── 要目 ───────────────────────────── */
-function IssueIndex({ units, flags, current, onJump, mobile }: {
-  units: Unit[]; flags: Flag[]; current: string | null; onJump: (id: string) => void; mobile: boolean;
+function IssueIndex({ units, flags, current, onJump, mobile, full = false }: {
+  units: Unit[]; flags: Flag[]; current: string | null; onJump: (id: string) => void; mobile: boolean; full?: boolean;
 }) {
-  const [all, setAll] = useStored("az-idx-all", false);
+  const [allPref, setAll] = useStored("az-idx-all", false);
+  const all = full || allPref;
+  useEffect(() => {
+    // the sheet opens its <dialog> in a parent effect, after this one: wait a frame
+    if (full && current) requestAnimationFrame(() => document.querySelector(`.sheet .yaomu-row[href="#u-${current}"]`)?.scrollIntoView({ block: "center" }));
+  }, [full]); // eslint-disable-line react-hooks/exhaustive-deps
   const [open, setOpen] = useState(!mobile);
   useEffect(() => setOpen(!mobile), [mobile]);
   const openBy: Record<string, number> = {};
@@ -249,7 +254,7 @@ function IssueIndex({ units, flags, current, onJump, mobile }: {
               </li>
             ))}
           </ol>
-          {must < units.length && (
+          {!full && must < units.length && (
             <button className="yaomu-more" onClick={() => setAll(!all)}>
               {all ? "只看必学" : `其余 ${units.length - must} 个单元`}<i className={`chev${all ? " up" : ""}`} aria-hidden />
             </button>
@@ -679,8 +684,8 @@ function Confirm({ className = "", arm, children, onConfirm, needs }: {
   );
 }
 
-function Stepper({ count, pos, onStep }: { count: number; pos: number; onStep: (d: number) => void }) {
-  if (count === 0) return <span className="rb-clear">朱批已清<span className="only-desktop"> · 可以审定</span></span>;
+function Stepper({ count, pos, onStep, done, mobile }: { count: number; pos: number; onStep: (d: number) => void; done: boolean; mobile: boolean }) {
+  if (count === 0) return <span className="rb-clear">朱批已清{!done && !mobile && " · 可以审定"}</span>;
   return (
     <span className="stepper" role="group" aria-label="逐条处理朱批">
       <button onClick={() => onStep(-1)} aria-label="上一处朱批">‹</button>
@@ -909,7 +914,7 @@ export default function Reader({ id }: { id: string }) {
           ) : (
             <span className="rb-state">{approved ? <Yin size={26} /> : null}{REVIEW[source.review]}</span>
           )}
-          <Stepper count={queue.length} pos={queue.length ? Math.min(pos, queue.length - 1) : -1} onStep={step} />
+          <Stepper count={queue.length} pos={queue.length ? Math.min(pos, queue.length - 1) : -1} onStep={step} done={approved} mobile={mobile} />
           {!mobile && (
             <span className="rb-deliv" title={source.delivery_reason || ""}>
               {DELIVERY[source.delivery] || source.delivery}
@@ -937,7 +942,7 @@ export default function Reader({ id }: { id: string }) {
 
       {indexOpen && (
         <Sheet title={<>本期 <span className="num">{units.length}</span> 个知识单元</>} tall onClose={() => setIndexOpen(false)}>
-          <IssueIndex units={units} flags={flags} current={current} mobile={false} onJump={(uid) => { setIndexOpen(false); setTimeout(() => jump(uid, false), 60); }} />
+          <IssueIndex units={units} flags={flags} current={current} mobile={false} full onJump={(uid) => { setIndexOpen(false); setTimeout(() => jump(uid, false), 60); }} />
         </Sheet>
       )}
       {reviewOpen && <ReviewSheet open={queue.length} review={source.review} onSet={setReview} onClose={() => setReviewOpen(false)} />}
