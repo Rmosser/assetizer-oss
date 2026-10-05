@@ -30,6 +30,8 @@
 
 18. **对照实验结论（2026-10-05，docs/experiments-2026-10-05.md）**：保持 50+5 分段（整段一次理解丢失约一半知识点、时间定位误差中位数 151–206 s）；1 fps 理解代理与原画差异在噪声内；2 fps 边界窗口与全画质窗口相当；**取消对模型边界的 ASR 吸附**（会变差），仅对兜底区间吸附——修订第 7 条。
 
+19. **分段接缝**（实验 S）：合并前用规则截断前一段末尾的粗主题（被后一段 ≥2 个细主题覆盖时截到重叠起点），默认开启；提示词做法实测无效。
+
 **推迟：** Playbook 编译器与 Onboarding UI、轻量 Discovery（transcript-based）、RSS 自动收录、PromptAmendment、M lane 并行、媒体 proxy A/B、systemd-run scope（先确认 user systemd 可用）。
 
 ## 0. 设计约束（来自用户与证据）

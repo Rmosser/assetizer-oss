@@ -96,7 +96,7 @@ def resolve_seams(chunks: list[dict], plan: list[dict]) -> tuple[list[dict], lis
 
 def merge(ctx: RunContext) -> dict:
     import os
-    policy = os.environ.get("ASSETIZER_SEAM_POLICY") or db.setting("seam_policy", "none")
+    policy = os.environ.get("ASSETIZER_SEAM_POLICY") or db.setting("seam_policy", "trim")  # experiment S, 2026-10-05
     chunks = ctx.load("machine/chunks.json")
     seam_log = []
     if policy == "trim" and len(chunks) > 1:
