@@ -32,7 +32,7 @@ function ThemeToggle() {
   );
 }
 
-function Paste() {
+function Paste({ autoFocus = false, onDone }: { autoFocus?: boolean; onDone?: () => void } = {}) {
   const [v, setV] = useState("");
   const [hint, setHint] = useState<string | null>(null);
   const ref = useRef<HTMLInputElement>(null);
@@ -50,6 +50,7 @@ function Paste() {
       const r = await post("/api/submit", { url: v.trim() });
       setHint(r.existing ? "这一期已在队列里" : "已加入付印队列");
       setV("");
+      onDone?.();
       window.dispatchEvent(new Event("az:refresh"));
     } catch (err) {
       setHint(String((err as Error).message || err));
@@ -58,12 +59,39 @@ function Paste() {
   };
   return (
     <form className="paste" onSubmit={submit}>
-      <input ref={ref} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接，回车付印" aria-label="提交视频链接" />
+      <input ref={ref} autoFocus={autoFocus} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接，回车付印" aria-label="提交视频链接" />
       <kbd>⌘K</kbd>
       {hint && <span className="hint" role="status">{hint}</span>}
     </form>
   );
 }
+
+function PasteSheet() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button className="iconbtn only-mobile" onClick={() => setOpen(true)} aria-label="提交视频链接">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+      </button>
+      {open && (
+        <div className="sheet-backdrop" onClick={() => setOpen(false)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="付印一期">
+            <div className="sheet-grip" />
+            <h3>付印一期</h3>
+            <p className="muted">粘贴 YouTube 链接，系统会自动理解、拆解、剪辑并写好文章。</p>
+            <Paste autoFocus onDone={() => setTimeout(() => setOpen(false), 1200)} />
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+const TABS = [
+  { key: "issues", to: "/", label: "刊", icon: <path d="M5 4h10l4 4v12H5z M15 4v4h4 M8 12h8 M8 16h6" /> },
+  { key: "channels", to: "/channels", label: "频道", icon: <path d="M4 7h16M4 12h16M4 17h10" /> },
+  { key: "engine", to: "/engine", label: "机房", icon: <path d="M4 6h16v5H4z M4 13h16v5H4z M7 8.5h.01 M7 15.5h.01" /> },
+];
 
 export default function App() {
   const path = usePath();
@@ -96,11 +124,24 @@ export default function App() {
           <a {...linkProps("/engine")} className={tab === "engine" ? "on" : ""}>机房{alerts > 0 && <span className="count">!</span>}</a>
         </nav>
         <div className="tools">
-          <Paste />
+          <div className="only-desktop paste-wrap"><Paste /></div>
+          <PasteSheet />
           <ThemeToggle />
         </div>
       </header>
       <div key={path}>{page}</div>
+      <nav className="tabbar" aria-label="主导航（移动端）">
+        {TABS.map((t) => (
+          <a key={t.key} {...linkProps(t.to)} className={tab === t.key ? "on" : ""}>
+            <span className="tab-ico">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round">{t.icon}</svg>
+              {t.key === "issues" && flags > 0 && <span className="count">{flags}</span>}
+              {t.key === "engine" && alerts > 0 && <span className="count">!</span>}
+            </span>
+            <span className="tab-label">{t.label}</span>
+          </a>
+        ))}
+      </nav>
     </>
   );
 }

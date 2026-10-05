@@ -392,6 +392,75 @@ function Track({ source, onDone }: { source: any; onDone: () => void }) {
   );
 }
 
+/* ───────────────────────────── mobile: mini spine + unit index ───────────────────────────── */
+function MiniSpine({ duration, units, flags, current, onOpen }: {
+  duration: number; units: Unit[]; flags: Flag[]; current: string | null; onOpen: () => void;
+}) {
+  const i = Math.max(0, units.findIndex((u) => u.id === current));
+  const flagged = new Set(flags.filter((f) => f.resolution === "OPEN" && f.severity !== "INFO").map((f) => f.target_id));
+  const x = (t: number) => `${(Math.min(duration, Math.max(0, t)) / duration) * 100}%`;
+  return (
+    <button className="minispine only-mobile" onClick={onOpen} aria-label="打开单元目录">
+      <span className="ms-count mono">{String(i + 1).padStart(2, "0")}<em>/{units.length}</em></span>
+      <span className="ms-track" aria-hidden>
+        {units.map((u) => (
+          <i key={u.id} className={`${u.id === current ? "on" : ""} lp${u.learning_priority}`}
+            style={{ left: x(u.start), width: `calc(${x(u.end)} - ${x(u.start)})` }} />
+        ))}
+        {units.filter((u) => flagged.has(u.id)).map((u) => <b key={u.id} style={{ left: x(u.start) }} />)}
+      </span>
+      <span className="ms-open">目录</span>
+    </button>
+  );
+}
+
+function UnitIndex({ units, flags, current, onPick, onClose }: {
+  units: Unit[]; flags: Flag[]; current: string | null; onPick: (id: string) => void; onClose: () => void;
+}) {
+  const open = (id: string) => flags.filter((f) => f.target_id === id && f.resolution === "OPEN" && f.severity !== "INFO").length;
+  useEffect(() => {
+    document.getElementById(`idx-${current}`)?.scrollIntoView({ block: "center" });
+  }, [current]);
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet tall" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="单元目录">
+        <div className="sheet-grip" />
+        <h3>本期 {units.length} 个知识单元</h3>
+        <ol className="idx">
+          {units.map((u, n) => (
+            <li key={u.id} id={`idx-${u.id}`}>
+              <button className={u.id === current ? "on" : ""} onClick={() => onPick(u.id)}>
+                <span className="mono n">{String(n + 1).padStart(2, "0")}</span>
+                <span className="t">{u.title}</span>
+                <span className="meta mono">{tc(u.start)}{u.learning_priority === 3 && <em className="must-dot">必学</em>}{open(u.id) > 0 && <em className="pi-dot">批 {open(u.id)}</em>}</span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  );
+}
+
+function ReviewSheet({ review, onSet, onClose }: { review: string; onSet: (r: string) => void; onClose: () => void }) {
+  const opts: [string, string, string][] = [["APPROVED", "通过", "这一期可以作为学习版本"], ["CHANGES_REQUESTED", "需修改", "有地方要改，先不定稿"], ["REJECTED", "驳回", "这一期不采用"]];
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="审阅这一期">
+        <div className="sheet-grip" />
+        <h3>审阅这一期</h3>
+        <div className="review-opts">
+          {opts.map(([k, label, desc]) => (
+            <button key={k} className={review === k ? "on" : ""} onClick={() => { onSet(k); onClose(); }}>
+              <b>{label}</b><span>{desc}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ───────────────────────────── page ───────────────────────────── */
 function Progress() {
   const ref = useRef<HTMLDivElement>(null);
@@ -418,6 +487,8 @@ export default function Reader({ id }: { id: string }) {
   const [current, setCurrent] = useState<string | null>(null);
   const [shot, setShot] = useState<Asset | null>(null);
   const [tracking, setTracking] = useState(false);
+  const [indexOpen, setIndexOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const setActive = useCallback((a: Active) => setActiveState(a), []);
 
   const units: Unit[] = useMemo(() => (data?.units || []).slice().sort((a: Unit, b: Unit) => a.start - b.start), [data]);
@@ -492,13 +563,20 @@ export default function Reader({ id }: { id: string }) {
         {["FAILED", "STALE"].includes(source.delivery) && (
           <button className="btn ghost sm" onClick={async () => { await post(`/api/sources/${source.id}/deliver`); reload(); }}>重新交付</button>
         )}
-        <div className="right">
+        <button className="btn sm only-mobile review-trigger" onClick={() => setReviewOpen(true)}>审阅</button>
+        <div className="right only-desktop">
           <button className={`btn sm ${source.review === "APPROVED" ? "solid" : ""}`} onClick={() => setReview("APPROVED")}>通过</button>
           <button className={`btn sm ${source.review === "CHANGES_REQUESTED" ? "solid" : ""}`} onClick={() => setReview("CHANGES_REQUESTED")}>需修改</button>
           <button className={`btn sm ghost ${source.review === "REJECTED" ? "zhu" : ""}`} onClick={() => setReview("REJECTED")}>驳回</button>
         </div>
       </div>
 
+      {units.length > 0 && (
+        <MiniSpine duration={source.duration || units[units.length - 1].end} units={units} flags={flags} current={current} onOpen={() => setIndexOpen(true)} />
+      )}
+      {indexOpen && <UnitIndex units={units} flags={flags} current={current} onClose={() => setIndexOpen(false)}
+        onPick={(id) => { setIndexOpen(false); setTimeout(() => jump(id), 50); }} />}
+      {reviewOpen && <ReviewSheet review={source.review} onSet={setReview} onClose={() => setReviewOpen(false)} />}
       {!run || !units.length ? (
         <div className="empty"><h3>这一期还在付印</h3><p>完成后会自动出现在这里。可以在「机房」查看进度。</p></div>
       ) : (
