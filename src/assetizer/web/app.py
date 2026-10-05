@@ -1,9 +1,15 @@
 """FastAPI app: JSON API + media + the built SPA."""
 from __future__ import annotations
 
+import bisect
+import mimetypes
+import functools
+import json
 import os
+import re
 import shutil
 import threading
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -27,6 +33,7 @@ class ImmutableStatic(StaticFiles):
         r.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return r
 STATIC = Path(__file__).with_name("static").resolve()
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
 PUBLIC_HOST = os.environ.get("ASSETIZER_PUBLIC_HOST", "").lower()          # e.g. kan.example.com
 ACCESS_TEAM = os.environ.get("ASSETIZER_ACCESS_TEAM", "")                  # e.g. example-team
@@ -97,16 +104,19 @@ def _cover(run_id: str | None) -> int | None:
 
 def _issue(s: dict, n: int) -> dict:
     run = db.one("SELECT * FROM runs WHERE id=?", s["current_run_id"]) if s.get("current_run_id") else None
-    latest = db.one("SELECT * FROM runs WHERE source_id=? ORDER BY created_at DESC LIMIT 1", s["id"])
+    # experiment runs share the source but are not part of its production history
+    latest = db.one("SELECT * FROM runs WHERE source_id=? AND kind!='EXPERIMENT' ORDER BY created_at DESC LIMIT 1", s["id"])
     summ = db.unj(run["summary"], {}) if run else {}
     flags = db.one("SELECT COUNT(*) n FROM flags WHERE source_id=? AND run_id IS ? AND resolution='OPEN' AND severity!='INFO'",
                    s["id"], s.get("current_run_id"))["n"]
     must = db.one("SELECT COUNT(*) n FROM units WHERE run_id IS ? AND learning_priority=3", s.get("current_run_id"))["n"]
     clips = sum(v for k, v in (summ.get("assets") or {}).items() if k == "clip:GENERATED")
+    musts = db.q("SELECT id, title FROM units WHERE run_id IS ? AND learning_priority=3 ORDER BY start LIMIT 3",
+                 s.get("current_run_id"))
     return {"no": n, "id": s["id"], "title": s.get("title") or s["id"], "channel": s.get("channel_title"),
             "channel_id": s.get("channel_id"), "published_at": s.get("published_at"), "duration": s.get("duration"),
             "review": s["review"], "delivery": s["delivery"], "notion_url": s.get("notion_url"),
-            "units": summ.get("units"), "must": must, "clips": clips, "flags": flags, "cover": _cover(s.get("current_run_id")),
+            "units": summ.get("units"), "must": must, "clips": clips, "flags": flags, "cover": _cover(s.get("current_run_id")), "musts": musts,
             "production": latest["production"] if latest else None, "stage": latest["stage"] if latest else None,
             "latest_run": latest["id"] if latest else None, "updated_at": s["updated_at"]}
 
@@ -148,6 +158,37 @@ def _eta(run: dict) -> float | None:
     return round(left)
 
 
+_NONWORD = re.compile(r"[\W_]+", re.U)
+
+
+def _norm(t: str) -> str:
+    return _NONWORD.sub("", t or "").lower()
+
+
+@functools.lru_cache(maxsize=4)
+def _transcript_chars(path: str, mtime: float) -> tuple[str, tuple[float, ...]]:
+    chars, times = [], []
+    for w in json.loads(Path(path).read_text())["words"]:
+        for ch in _norm(w["word"]):
+            chars.append(ch)
+            times.append(w["start"])
+    return "".join(chars), tuple(times)
+
+
+def _quote_time(transcript: str | None, quote: str | None, lo: float, hi: float) -> float | None:
+    """Where in the source a quoted line was spoken: longest common run inside the unit's window."""
+    q = _norm(quote or "")
+    if not transcript or len(q) < 4 or not Path(transcript).exists():
+        return None
+    text, times = _transcript_chars(transcript, Path(transcript).stat().st_mtime)
+    i0, i1 = bisect.bisect_left(times, lo), bisect.bisect_right(times, hi)
+    hay = text[i0:i1]
+    m = SequenceMatcher(None, hay, q, autojunk=False).find_longest_match(0, len(hay), 0, len(q))
+    if m.size < max(4, int(len(q) * 0.4)):
+        return None
+    return times[max(i0, i0 + m.a - m.b)]
+
+
 @app.get("/api/sources/{sid}")
 def source(sid: str, run: str | None = None):
     s = db.one("SELECT * FROM sources WHERE id=?", sid)
@@ -170,6 +211,17 @@ def source(sid: str, run: str | None = None):
             u["topic_start"], u["topic_end"] = u["start"], u["end"]
             u["start"], u["end"] = clip_span[u["id"]]
     units.sort(key=lambda u: u["start"])
+    flags = [{**f, "evidence": db.unj(f["evidence"], None)} for f in db.q("SELECT * FROM flags WHERE run_id=? ORDER BY severity, id", rid)]
+    spans = {u["id"]: (min([g["start"] for g in u.get("segments") or []] + [u["start"]]),
+                       max([g["end"] for g in u.get("segments") or []] + [u["end"]])) for u in units}
+    for f in flags:
+        ev = f["evidence"]
+        if isinstance(ev, dict) and ev.get("quote") and f.get("target_id") in spans:
+            lo, hi = spans[f["target_id"]]
+            try:
+                ev["t"] = _quote_time(s.get("transcript_path"), ev["quote"], lo - 90, hi + 90)
+            except (OSError, ValueError, KeyError):
+                ev["t"] = None
     playbook = db.one("SELECT id, channel_id, version, status, data FROM playbooks WHERE id=?", r["playbook_id"]) if r and r.get("playbook_id") else None
     if playbook:
         playbook["facets"] = db.unj(playbook.pop("data"), {}).get("facets", [])
@@ -177,10 +229,11 @@ def source(sid: str, run: str | None = None):
         "source": {k: v for k, v in s.items() if k not in ("info",)} | {"info": db.unj(s.get("info"), {})},
         "run": _run_view(r), "units": units, "assets": assets, "playbook": playbook,
         "sections": [{**x, "unit_ids": db.unj(x["unit_ids"], [])} for x in db.q("SELECT * FROM sections WHERE run_id=? ORDER BY ord", rid)],
-        "flags": [{**f, "evidence": db.unj(f["evidence"], None)} for f in db.q("SELECT * FROM flags WHERE run_id=? ORDER BY severity, id", rid)],
+        "flags": flags,
         "speakers": db.q("SELECT * FROM speakers WHERE run_id=?", rid),
-        "runs": db.q("SELECT id, production, created_at, finished_at FROM runs WHERE source_id=? ORDER BY created_at DESC", sid),
+        "runs": db.q("SELECT id, kind, production, created_at, finished_at FROM runs WHERE source_id=? AND kind!='EXPERIMENT' ORDER BY created_at DESC", sid),
         "channel": db.one("SELECT id, name, mode FROM channels WHERE id=?", s.get("channel_id")),
+        "no": db.one("SELECT COUNT(*) n FROM sources WHERE created_at <= ?", s["created_at"])["n"],
     }
 
 
@@ -239,6 +292,7 @@ def engine():
         "runs": runs, "calls": calls,
         "events": db.q("SELECT * FROM events ORDER BY id DESC LIMIT 80"),
         "capacity_note": "串行处理：60 分钟视频约 1.5–2 小时；每日上限约 10–12 个视频小时。",
+        "stage_labels": STAGE_LABELS,
     }
 
 

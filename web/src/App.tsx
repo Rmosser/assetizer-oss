@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { post } from "./api";
 import { usePoll } from "./hooks";
 import { linkProps, navigate, usePath } from "./router";
+import { Sheet } from "./components/Sheet";
 import Issues from "./pages/Issues";
 import Reader from "./pages/Reader";
 import Channels from "./pages/Channels";
@@ -19,6 +20,7 @@ function ThemeToggle() {
     const t = dark ? "light" : "dark";
     document.documentElement.dataset.theme = t;
     try { localStorage.setItem("az-theme", t); } catch { /* private mode */ }
+    document.querySelector('meta[name="theme-color"]:not([media])')?.setAttribute("content", t === "dark" ? "#141311" : "#f3efe6");
     setDark(!dark);
   };
   return (
@@ -32,7 +34,13 @@ function ThemeToggle() {
   );
 }
 
-function Paste({ autoFocus = false, onDone }: { autoFocus?: boolean; onDone?: () => void } = {}) {
+async function submitUrl(url: string): Promise<string> {
+  const r = await post("/api/submit", { url: url.trim() });
+  window.dispatchEvent(new Event("az:refresh"));
+  return r.existing ? "这一期已在队列里" : "已加入付印队列";
+}
+
+function Paste() {
   const [v, setV] = useState("");
   const [hint, setHint] = useState<string | null>(null);
   const ref = useRef<HTMLInputElement>(null);
@@ -46,102 +54,132 @@ function Paste({ autoFocus = false, onDone }: { autoFocus?: boolean; onDone?: ()
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!v.trim()) return;
-    try {
-      const r = await post("/api/submit", { url: v.trim() });
-      setHint(r.existing ? "这一期已在队列里" : "已加入付印队列");
-      setV("");
-      onDone?.();
-      window.dispatchEvent(new Event("az:refresh"));
-    } catch (err) {
-      setHint(String((err as Error).message || err));
-    }
+    try { setHint(await submitUrl(v)); setV(""); }
+    catch (err) { setHint(String((err as Error).message || err)); }
     setTimeout(() => setHint(null), 2600);
   };
   return (
     <form className="paste" onSubmit={submit}>
-      <input ref={ref} autoFocus={autoFocus} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接，回车付印" aria-label="提交视频链接" />
+      <input ref={ref} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接，回车付印" aria-label="提交视频链接" inputMode="url" />
       <kbd>⌘K</kbd>
       {hint && <span className="hint" role="status">{hint}</span>}
     </form>
   );
 }
 
-function PasteSheet() {
-  const [open, setOpen] = useState(false);
+function PasteSheet({ onClose }: { onClose: () => void }) {
+  const [v, setV] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const go = async (url: string) => {
+    if (!url.trim()) return;
+    setBusy(true);
+    try { setMsg(await submitUrl(url)); setV(""); setTimeout(onClose, 1100); }
+    catch (err) { setMsg(String((err as Error).message || err)); }
+    setBusy(false);
+  };
+  const fromClipboard = async () => {
+    try { const t = await navigator.clipboard.readText(); setV(t); if (/youtu/.test(t)) go(t); }
+    catch { setMsg("无法读取剪贴板，请手动粘贴"); }
+  };
   return (
-    <>
-      <button className="iconbtn only-mobile" onClick={() => setOpen(true)} aria-label="提交视频链接">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
-      </button>
-      {open && (
-        <div className="sheet-backdrop" onClick={() => setOpen(false)}>
-          <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="付印一期">
-            <div className="sheet-grip" />
-            <h3>付印一期</h3>
-            <p className="muted">粘贴 YouTube 链接，系统会自动理解、拆解、剪辑并写好文章。</p>
-            <Paste autoFocus onDone={() => setTimeout(() => setOpen(false), 1200)} />
-          </div>
+    <Sheet title="付印一期" onClose={onClose}>
+      <p className="sheet-lede">粘贴 YouTube 链接。系统会理解、拆解、剪辑并写好文章，你只需要回来阅读。</p>
+      <form className="sheet-form" onSubmit={(e) => { e.preventDefault(); go(v); }}>
+        <input value={v} onChange={(e) => setV(e.target.value)} placeholder="https://youtu.be/…" aria-label="视频链接" inputMode="url" autoComplete="off" />
+        <div className="sheet-row">
+          <button type="button" className="btn" onClick={fromClipboard}>从剪贴板粘贴</button>
+          <button type="submit" className="btn solid" disabled={busy || !v.trim()}>付印</button>
         </div>
-      )}
-    </>
+      </form>
+      {msg && <p className="sheet-msg" role="status">{msg}</p>}
+    </Sheet>
   );
 }
 
-const TABS = [
-  { key: "issues", to: "/", label: "刊", icon: <path d="M5 4h10l4 4v12H5z M15 4v4h4 M8 12h8 M8 16h6" /> },
-  { key: "channels", to: "/channels", label: "频道", icon: <path d="M4 7h16M4 12h16M4 17h10" /> },
-  { key: "engine", to: "/engine", label: "机房", icon: <path d="M4 6h16v5H4z M4 13h16v5H4z M7 8.5h.01 M7 15.5h.01" /> },
-];
+/** Android share target: /share?url=… or ?text=… → submit, then go home. */
+function Share() {
+  const [msg, setMsg] = useState("正在收下这个链接…");
+  useEffect(() => {
+    const q = new URLSearchParams(location.search);
+    const raw = q.get("url") || q.get("text") || "";
+    const url = raw.match(/https?:\/\/\S+/)?.[0] || raw;
+    if (!url) { navigate("/", { replace: true }); return; }
+    submitUrl(url).then((m) => { setMsg(m); setTimeout(() => navigate("/", { replace: true }), 900); })
+      .catch((e) => setMsg(String((e as Error).message || e)));
+  }, []);
+  return <main className="page"><div className="state-block"><h3>{msg}</h3></div></main>;
+}
+
+/** Phones: the masthead slides away while reading down and returns on the way up. */
+function useChromeAutoHide() {
+  useEffect(() => {
+    const root = document.documentElement;
+    const mq = matchMedia("(max-width: 900px)");
+    let last = scrollY, raf = 0;
+    const on = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const d = scrollY - last;
+        if (!mq.matches || scrollY < 120) root.dataset.chrome = "shown";
+        else if (Math.abs(d) > 8) root.dataset.chrome = d > 0 ? "hidden" : "shown";
+        if (Math.abs(d) > 8 || scrollY < 120) last = scrollY;
+      });
+    };
+    addEventListener("scroll", on, { passive: true });
+    return () => { removeEventListener("scroll", on); cancelAnimationFrame(raf); };
+  }, []);
+}
 
 export default function App() {
   const path = usePath();
   const { data } = usePoll<any>("/api/overview", 15000);
+  const [pasting, setPasting] = useState(false);
+  useChromeAutoHide();
   const flags = data?.open_flags ?? 0;
   const alerts = data?.alerts?.length ?? 0;
   const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : "issues";
 
   useEffect(() => {
-    document.title = tab === "channels" ? "频道 · 资产刊" : tab === "engine" ? "机房 · 资产刊" : "资产刊";
-  }, [tab]);
+    document.documentElement.dataset.chrome = "shown";
+    if (!path.startsWith("/issue/")) document.title = tab === "channels" ? "频道 · 资产刊" : tab === "engine" ? "机房 · 资产刊" : "资产刊";
+  }, [path, tab]);
 
   let page;
   const m = path.match(/^\/issue\/([^/]+)/);
   if (m) page = <Reader id={decodeURIComponent(m[1])} />;
+  else if (path === "/share") page = <Share />;
   else if (tab === "channels") page = <Channels />;
   else if (tab === "engine") page = <Engine />;
   else page = <Issues />;
 
   return (
     <>
+      <a className="skip" href="#main">跳到正文</a>
       <header className="masthead">
         <a className="brand" {...linkProps("/")} aria-label="资产刊 首页">
           <Seal />
           <span className="wordmark"><b>资产刊</b><span>ASSETIZER</span></span>
         </a>
         <nav className="nav" aria-label="主导航">
-          <a {...linkProps("/")} className={tab === "issues" ? "on" : ""}>刊{flags > 0 && <span className="count">{flags}</span>}</a>
-          <a {...linkProps("/channels")} className={tab === "channels" ? "on" : ""}>频道</a>
-          <a {...linkProps("/engine")} className={tab === "engine" ? "on" : ""}>机房{alerts > 0 && <span className="count">!</span>}</a>
+          <a {...linkProps("/")} className={tab === "issues" ? "on" : ""} aria-current={tab === "issues" ? "page" : undefined}>
+            刊{flags > 0 && <sup className="count" aria-label={`${flags} 处朱批`}>{flags}</sup>}
+          </a>
+          <a {...linkProps("/channels")} className={tab === "channels" ? "on" : ""} aria-current={tab === "channels" ? "page" : undefined}>频道</a>
+          <a {...linkProps("/engine")} className={tab === "engine" ? "on" : ""} aria-current={tab === "engine" ? "page" : undefined}>
+            机房{alerts > 0 && <sup className="count" aria-label={`${alerts} 条告警`}>!</sup>}
+          </a>
         </nav>
         <div className="tools">
-          <div className="only-desktop paste-wrap"><Paste /></div>
-          <PasteSheet />
+          <div className="paste-wrap"><Paste /></div>
+          <button className="iconbtn paste-btn" onClick={() => setPasting(true)} aria-label="付印一期">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
           <ThemeToggle />
         </div>
       </header>
-      <div key={path}>{page}</div>
-      <nav className="tabbar" aria-label="主导航（移动端）">
-        {TABS.map((t) => (
-          <a key={t.key} {...linkProps(t.to)} className={tab === t.key ? "on" : ""}>
-            <span className="tab-ico">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round">{t.icon}</svg>
-              {t.key === "issues" && flags > 0 && <span className="count">{flags}</span>}
-              {t.key === "engine" && alerts > 0 && <span className="count">!</span>}
-            </span>
-            <span className="tab-label">{t.label}</span>
-          </a>
-        ))}
-      </nav>
+      {pasting && <PasteSheet onClose={() => setPasting(false)} />}
+      <div key={path} id="main">{page}</div>
     </>
   );
 }

@@ -113,10 +113,10 @@ def run() -> dict:
     waudit = {
         "source": "Run-013 compile; not independently audited for production",
         "policy_conflicts": [{"rule_id": "rule_extended_reading_recommendations",
-                              "issue": "「可联想到」的延伸资源与 Source-only 政策冲突；执行时只保留 Source 明确提到的资料。"}],
+                              "issue": "「可联想到」的延伸资源与「只依据视频」原则冲突；执行时只保留视频里明确提到的资料。"}],
     }
     wid = _playbook("wang-haibin", wpid, wdata, waudit, "NEEDS_CONFIRMATION", "seed:run-013")
-    db.decision("CONFIRM_PLAYBOOK", str(wid), "确认「王海滨的财经闲谈」频道 Playbook",
-                "Run-013 编译结果尚未做生产级逐条审计；1 条规则与 Source-only 政策冲突（Policy 优先）。确认后该频道视频会自动生产。")
+    db.decision("CONFIRM_PLAYBOOK", str(wid), "确认「王海滨的财经闲谈」的频道规程",
+                "编译结果尚未逐条核对；1 条规则与「只依据视频」原则冲突，以原则为准。确认后，这个频道的视频会自动生产。")
     return {"channels": db.q("SELECT id, name, mode FROM channels"),
             "playbooks": db.q("SELECT id, channel_id, version, status FROM playbooks")}

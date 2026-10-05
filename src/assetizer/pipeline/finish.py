@@ -64,7 +64,8 @@ def review_check(ctx: RunContext) -> dict:
                 # fidelity problems need the reviewer; boundary polish notes do not
                 sev = iss["severity"] if iss["kind"] in FIDELITY_KINDS else "INFO"
                 ctx.flag("UNIT", u["id"], "AI_" + iss["kind"], sev, f"「{u['title']}」{_KIND_ZH.get(iss['kind'], iss['kind'])}",
-                         iss.get("note", ""), evidence={"quote": iss.get("evidence")}, origin="AI_CHECK")
+                         iss.get("note", ""), evidence={"quote": iss.get("evidence"), "claim": iss.get("claim") or None},
+                         origin="AI_CHECK")
     return {"items": len(items), "issues": found}
 
 

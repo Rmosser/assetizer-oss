@@ -186,9 +186,9 @@ def compile_prompt(channel_id: str, prompt_id: int) -> int:
     pid = db.exec("""INSERT INTO playbooks(channel_id, prompt_id, version, status, data, audit, origin, created_at)
                      VALUES (?,?,?,?,?,?,?,?)""", channel_id, prompt_id, v + 1, "NEEDS_CONFIRMATION", db.j(data), db.j(audit),
                   f"compiler:p{pr['version']}", now())
-    db.decision("CONFIRM_PLAYBOOK", str(pid), f"确认「{ch['name']}」频道 Playbook v{v + 1}",
-                f"覆盖 {audit['coverage'] * 100:.0f}% 条款；{audit['core_partial']} 条规则部分保留、{audit['core_dropped']} 条丢失；"
-                f"{len(audit['policy_conflicts'])} 处与 Source-only 政策冲突（政策优先）。")
+    db.decision("CONFIRM_PLAYBOOK", str(pid), f"确认「{ch['name']}」的频道规程 v{v + 1}",
+                f"{audit['coverage'] * 100:.0f}% 的条款有去处；{audit['core_partial']} 条规则部分保留、{audit['core_dropped']} 条丢失；"
+                f"{len(audit['policy_conflicts'])} 处与「只依据视频」原则冲突，以原则为准。")
     db.event("compile", f"{ch['name']} Playbook v{v + 1} 编译完成，待确认")
     return pid
 

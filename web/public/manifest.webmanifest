@@ -1,0 +1,17 @@
+{
+  "name": "资产刊",
+  "short_name": "资产刊",
+  "description": "投资视频的知识单元、片段与文章——只为你编的刊。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3efe6",
+  "theme_color": "#f3efe6",
+  "icons": [
+    { "src": "/seal-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/seal-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/seal-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "share_target": { "action": "/share", "method": "GET", "params": { "title": "title", "text": "text", "url": "url" } }
+}

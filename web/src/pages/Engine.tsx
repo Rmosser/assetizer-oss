@@ -1,17 +1,86 @@
+import { useState } from "react";
 import { post } from "../api";
+import { IssueTitle } from "../cjk";
+import { Fault, Stale, Unroll } from "../components/States";
 import { usePoll } from "../hooks";
-import { linkProps } from "../router";
-import { ago, bytes, PRODUCTION, WAIT } from "../util";
+import { linkProps, useRestoreScroll } from "../router";
+import { ago, bytes, clock, PRODUCTION, WAIT } from "../util";
 
 function Lamp({ state, label }: { state: "ok" | "bad" | "idle"; label: string }) {
-  return <span className="lbl"><i className={`lamp ${state}`} aria-hidden /><span className="caps" style={{ color: "var(--ink-2)" }}>{label}</span></span>;
+  return <span className="lbl"><i className={`lamp ${state}`} aria-hidden /><span className="label">{label}</span></span>;
 }
 
 const fmtK = (n?: number | null) => (n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n));
+const SSH = "ssh -N -L 6080:127.0.0.1:6080 ovh-investment";
+const KIND: Record<string, string> = { worker: "机房", stage: "工序", run: "付印", delivery: "交付", review: "审阅", compile: "编译", ingest: "收录", alert: "告警", experiment: "实验" };
+/** "CLEANUP 完成" → "清理 完成": stage codes in log lines read as their Chinese labels */
+const humanize = (msg: string, labels: Record<string, string>) => (msg || "").replace(/\b[A-Z][A-Z_]{2,}\b/g, (m) => labels[m] || m).replace(/^Worker /, "机房");
+
+function Cmd({ text }: { text: string }) {
+  const [ok, setOk] = useState(false);
+  return (
+    <span className="cmd">
+      <code>{text}</code>
+      <button onClick={async () => { try { await navigator.clipboard.writeText(text); setOk(true); setTimeout(() => setOk(false), 1500); } catch { /* ignore */ } }}>
+        {ok ? "已复制" : "复制"}
+      </button>
+    </span>
+  );
+}
+
+function StageBar({ stages }: { stages: any[] }) {
+  return (
+    <span className="stagebar" aria-label="阶段">
+      {stages.filter((s) => s.name !== "CLEANUP").map((s) => <i key={s.name} className={s.status} title={`${s.label} · ${s.status}`} />)}
+    </span>
+  );
+}
+
+function RunRow({ r, reload }: { r: any; reload: () => void }) {
+  const bad = ["FAILED", "WAITING"].includes(r.production);
+  return (
+    <li className="run">
+      <span className="run-id num">{r.id.replace(/^.*?-(r\d+)$/, "$1")}</span>
+      <span className="run-when" title={r.created_at}>{ago(r.created_at)}</span>
+      <StageBar stages={r.stages} />
+      <span className={`run-state${bad ? " bad" : ""}`}>
+        {PRODUCTION[r.production] || r.production}{r.wait_reason ? ` · ${WAIT[r.wait_reason] || r.wait_reason}` : ""}{r.error_class ? ` · ${r.error_class}` : ""}
+      </span>
+      {["FAILED", "WAITING", "COMPLETE_PARTIAL"].includes(r.production) && r.kind !== "IMPORT" &&
+        <button className="btn sm" onClick={async () => { await post(`/api/runs/${r.id}/retry`); reload(); }}>重试</button>}
+    </li>
+  );
+}
+
+function Runs({ runs, reload }: { runs: any[]; reload: () => void }) {
+  const groups: { sid: string; title: string; prod: any[]; exp: any[] }[] = [];
+  for (const r of runs) {
+    let g = groups.find((x) => x.sid === r.source_id);
+    if (!g) groups.push((g = { sid: r.source_id, title: r.title || r.source_id, prod: [], exp: [] }));
+    (r.kind === "EXPERIMENT" ? g.exp : g.prod).push(r);
+  }
+  return (
+    <div className="runs">
+      {groups.map((g) => (
+        <section key={g.sid} className="run-group">
+          <a className="run-title" {...linkProps(`/issue/${encodeURIComponent(g.sid)}`)}><IssueTitle title={g.title} /></a>
+          <ol>{g.prod.map((r) => <RunRow key={r.id} r={r} reload={reload} />)}</ol>
+          {g.exp.length > 0 && (
+            <details className="fold mini">
+              <summary><i className="plus" aria-hidden /><span>{`实验运行 ${g.exp.length} 次`}</span></summary>
+              <ol>{g.exp.map((r) => <RunRow key={r.id} r={{ ...r, id: r.id }} reload={reload} />)}</ol>
+            </details>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
 
 export default function Engine() {
-  const { data, reload } = usePoll<any>("/api/engine", 10000);
-  if (!data) return <div className="loading">展卷</div>;
+  const { data, error, loadedAt, reload } = usePoll<any>("/api/engine", 10000);
+  useRestoreScroll(!!data);
+  if (!data) return error ? <Fault error={error} retry={reload} /> : <Unroll />;
   const d = data.disk;
   const used = d.total - d.free;
   const pct = (x: number) => `${Math.max(0.4, (x / d.total) * 100)}%`;
@@ -21,92 +90,76 @@ export default function Engine() {
   const c = data.calls || {};
   return (
     <main className="page">
-      <section className="hero" style={{ gridTemplateColumns: "1fr auto" }}>
-        <h1 className="hero-date" style={{ fontSize: "clamp(56px, 7vw, 104px)" }}>机房<small>付印设备与生产记录</small></h1>
-        <div style={{ textAlign: "right" }}>
-          {data.paused ? (
-            <>
-              <div className="zhupi-link" style={{ marginTop: 0 }}>队列已暂停 · {WAIT[data.paused.reason] || data.paused.reason}</div>
-              <div style={{ marginTop: 12 }}><button className="btn zhu sm" onClick={async () => { await post("/api/queue/resume"); reload(); }}>手动恢复</button></div>
-            </>
-          ) : <div className="zhupi-quiet" style={{ marginTop: 0 }}>队列运行正常</div>}
+      <Stale error={error} loadedAt={loadedAt} />
+      <section className="hero page-hero">
+        <h1 className="hero-title">机房</h1>
+        <div className="hero-lede">
+          付印设备与生产记录。{data.capacity_note.replace(/^串行处理：/, "串行付印：")}
+          <div className={`queue-state${data.paused ? " bad" : ""}`}>
+            {data.paused ? (
+              <>队列已暂停 · {WAIT[data.paused.reason] || data.paused.reason}
+                <button className="btn zhu sm" onClick={async () => { await post("/api/queue/resume"); reload(); }}>手动恢复</button></>
+            ) : <>队列运行正常</>}
+          </div>
         </div>
       </section>
 
       <div className="instruments">
         <div className="inst">
-          <Lamp state={agy ? (agy.ok ? "ok" : "bad") : "idle"} label="模型 · agy" />
+          <Lamp state={agy ? (agy.ok ? "ok" : "bad") : "idle"} label="模型" />
           <div className="big">{agy ? (agy.ok ? "在线" : "需要登录") : "未探测"}</div>
-          <div className="sub">{data.model}{agy?.checked_at ? ` · ${ago(agy.checked_at)}检查` : " · 每次付印前自动探测"}</div>
+          <div className="sub"><span className="num">{data.model}</span>{agy?.checked_at ? ` · ${ago(agy.checked_at)}检查` : " · 每次付印前自动探测"}</div>
         </div>
         <div className="inst">
           <Lamp state={yt ? "bad" : data.youtube.profile_ok ? "ok" : "idle"} label="YouTube 会话" />
           <div className="big">{yt ? "需要登录" : data.youtube.profile_ok ? "已就绪" : "未配置"}</div>
-          <div className="sub">远程屏幕登录：先建隧道 <code style={{ fontFamily: "var(--mono)", fontSize: 11.5 }}>ssh -N -L 6080:127.0.0.1:6080 ovh-investment</code></div>
-          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button className="btn sm" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
-          </div>
+          <div className="sub">远程屏幕登录需要先在电脑上建隧道：</div>
+          <Cmd text={SSH} />
+          <button className="btn sm inst-act" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
         </div>
         <div className="inst">
           <Lamp state={data.notion.token && (data.notion.database || data.notion.parent) ? "ok" : "idle"} label="Notion 交付" />
           <div className="big">{data.notion.token ? (data.notion.database ? "已连接" : "待指定位置") : "未配置"}</div>
-          <div className="sub">{data.notion.token ? "数据库每期一行，正文含视频与截图" : "配置 token 前，可以在应用内阅读与审阅"}</div>
+          <div className="sub">{data.notion.token ? "数据库每期一行，正文含视频与截图" : "配置之前，可以在应用内阅读与审阅"}</div>
         </div>
         <div className="inst">
           <Lamp state={d.free / d.total < 0.15 ? "bad" : "ok"} label="磁盘" />
-          <div className="big">{bytes(d.free)} <span style={{ font: "500 14px var(--sans)", color: "var(--ink-3)" }}>可用</span></div>
-          <div className="diskbar" aria-label="磁盘占用">
-            <i className="media" style={{ width: pct(d.media) }} title="原始媒体" />
-            <i style={{ width: pct(d.runs) }} title="生产工作区" />
-            <i className="pk" style={{ width: pct(d.packages) }} title="发布素材包" />
-            <i style={{ width: pct(other), background: "var(--rule-2)" }} title="其他" />
+          <div className="big"><span className="num">{bytes(d.free)}</span><small>可用</small></div>
+          <div className="diskbar" role="img" aria-label={`媒体 ${bytes(d.media)}，工作区 ${bytes(d.runs)}，素材包 ${bytes(d.packages)}`}>
+            <i className="media" style={{ width: pct(d.media) }} />
+            <i className="work" style={{ width: pct(d.runs) }} />
+            <i className="pk" style={{ width: pct(d.packages) }} />
+            <i className="other" style={{ width: pct(other) }} />
           </div>
           <div className="legend">
-            <span style={{ color: "var(--ink-2)" }}>媒体 {bytes(d.media)}</span>
-            <span style={{ color: "var(--ink)" }}>工作区 {bytes(d.runs)}</span>
-            <span style={{ color: "var(--ink-3)" }}>素材包 {bytes(d.packages)}</span>
+            <span className="media">媒体 {bytes(d.media)}</span>
+            <span className="work">工作区 {bytes(d.runs)}</span>
+            <span className="pk">素材包 {bytes(d.packages)}</span>
           </div>
         </div>
+        <div className="inst tile"><span className="label">模型调用</span><div className="v"><span className="num">{c.n ?? 0}</span><small>次</small></div></div>
+        <div className="inst tile"><span className="label">模型耗时</span><div className="v"><span className="num">{c.wall ? Math.round(c.wall / 60) : 0}</span><small>分钟</small></div></div>
+        <div className="inst tile"><span className="label">Token · 入 / 出 / 思考</span><div className="v sm"><span className="num">{fmtK(c.inp)} / {fmtK(c.outp)} / {fmtK(c.think)}</span></div></div>
+        <div className="inst tile"><span className="label">模型峰值内存</span><div className="v"><span className="num">{c.rss ? (c.rss / 1048576).toFixed(1) : "—"}</span><small>GiB</small></div></div>
       </div>
-      <div className="tiles">
-        <div className="tile"><span className="caps">模型调用</span><div className="v">{c.n ?? 0}<small>次</small></div></div>
-        <div className="tile"><span className="caps">模型耗时</span><div className="v">{c.wall ? Math.round(c.wall / 60) : 0}<small>分钟</small></div></div>
-        <div className="tile"><span className="caps">Token（入 / 出 / 思考）</span><div className="v" style={{ fontSize: 26 }}>{fmtK(c.inp)} / {fmtK(c.outp)} / {fmtK(c.think)}</div></div>
-        <div className="tile"><span className="caps">agy 峰值内存</span><div className="v">{c.rss ? (c.rss / 1048576).toFixed(1) : "—"}<small>GiB</small></div></div>
-      </div>
-      <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>{data.capacity_note} 金额成本：provider 未暴露，暂不统计。</p>
+      <p className="colophon">金额成本：模型服务商没有提供，暂不统计。</p>
 
       <div className="cols2">
         <div>
           <div className="rule-title"><h2>生产记录</h2></div>
-          <table className="runs">
-            <thead><tr><th>期</th><th>阶段</th><th>状态</th><th></th></tr></thead>
-            <tbody>
-              {data.runs.map((r: any) => (
-                <tr key={r.id}>
-                  <td className="t"><a {...linkProps(`/issue/${encodeURIComponent(r.source_id)}`)}>{r.title || r.source_id}</a>
-                    <div className="mono muted" style={{ fontSize: 11.5 }}>{r.id} · {ago(r.created_at)}</div></td>
-                  <td><div className="minirail" aria-label="阶段">{r.stages.map((s: any) => <i key={s.name} className={s.status} title={`${s.label} · ${s.status}`} />)}</div></td>
-                  <td><span className={`state-tag ${["FAILED", "WAITING"].includes(r.production) ? "bad" : r.production?.startsWith("COMPLETE") ? "ok" : ""}`}>
-                    {PRODUCTION[r.production] || r.production}{r.wait_reason ? ` · ${WAIT[r.wait_reason] || r.wait_reason}` : ""}{r.error_class ? ` · ${r.error_class}` : ""}</span></td>
-                  <td>{["FAILED", "WAITING", "COMPLETE_PARTIAL"].includes(r.production) && r.kind !== "IMPORT" &&
-                    <button className="btn sm" onClick={async () => { await post(`/api/runs/${r.id}/retry`); reload(); }}>重试</button>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <Runs runs={data.runs} reload={reload} />
         </div>
         <div>
           <div className="rule-title"><h2>日志</h2></div>
-          <div className="log" role="log">
+          <ol className="log" role="log">
             {data.events.map((e: any) => (
-              <div key={e.id} className={`lv-${e.level}`}>
-                <span className="muted">{e.ts.replace("T", " ").slice(5, 19)}</span>
-                <span>{e.kind}</span>
-                <span>{e.message}</span>
-              </div>
+              <li key={e.id} className={`lv-${e.level}`}>
+                <span className="when num" title={e.ts}>{clock(e.ts)}</span>
+                <span className="kind">{KIND[e.kind] || e.kind}</span>
+                <span className="msg">{humanize(e.message, data.stage_labels || {})}</span>
+              </li>
             ))}
-          </div>
+          </ol>
         </div>
       </div>
     </main>

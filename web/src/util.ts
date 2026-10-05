@@ -14,8 +14,30 @@ export function cnNum(n: number): string {
 const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
 
 export function cnDate(d = new Date()) {
-  return { md: `${cnNum(d.getMonth() + 1)}月${cnNum(d.getDate())}日`, y: `${cnYear(d.getFullYear())} · 星期${WEEK[d.getDay()]}` };
+  return { md: `${cnNum(d.getMonth() + 1)}月${cnNum(d.getDate())}日`, y: `${cnYear(d.getFullYear())}年`, w: `星期${WEEK[d.getDay()]}` };
 }
+
+/** "20260908" | ISO → Date (local) */
+export function parseDay(s?: string | null): Date | null {
+  if (!s) return null;
+  if (/^\d{8}$/.test(s)) return new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8));
+  const d = new Date(s);
+  return isNaN(+d) ? null : d;
+}
+
+/** "20260908" → 九月八日 */
+export function cnDay(s?: string | null) {
+  const d = parseDay(s);
+  return d ? `${cnNum(d.getMonth() + 1)}月${cnNum(d.getDate())}日` : "";
+}
+
+/** group header for the archive: 二〇二六年 · 九月 */
+export function cnMonth(d: Date) {
+  return `${cnYear(d.getFullYear())}年 · ${cnNum(d.getMonth() + 1)}月`;
+}
+
+/** 3504 s → 58′ */
+export const mins = (sec?: number | null) => (sec ? `${Math.round(sec / 60)}′` : "—");
 
 export function tc(sec?: number | null, withHours = true) {
   if (sec == null || isNaN(sec)) return "—";
@@ -55,17 +77,23 @@ export function bytes(n?: number | null) {
 }
 
 export const REVIEW: Record<string, string> = {
-  UNREVIEWED: "待审阅", IN_REVIEW: "审阅中", APPROVED: "已通过", CHANGES_REQUESTED: "需修改", REJECTED: "已驳回",
+  UNREVIEWED: "待审阅", IN_REVIEW: "审阅中", APPROVED: "已审定", CHANGES_REQUESTED: "需修改", REJECTED: "已驳回",
 };
 export const PRODUCTION: Record<string, string> = {
   QUEUED: "排队中", RUNNING: "付印中", WAITING: "等待中", INTERRUPTED: "已中断", FAILED: "失败",
-  COMPLETE: "已完成", COMPLETE_PARTIAL: "已完成（部分告警）", CANCELLED: "已取消",
+  COMPLETE: "已完成", COMPLETE_PARTIAL: "完成 · 有告警", CANCELLED: "已取消", EXPERIMENT: "实验",
 };
 export const WAIT: Record<string, string> = {
   AGY_AUTH_REQUIRED: "模型登录失效", PROVIDER_QUOTA: "模型配额", YOUTUBE_AUTH: "YouTube 需登录",
-  DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "Playbook 待确认", LIVE_IN_PROGRESS: "直播未结束",
+  DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "频道规程待确认", LIVE_IN_PROGRESS: "直播未结束",
 };
 export const DELIVERY: Record<string, string> = {
-  NOT_STARTED: "待交付", BLOCKED: "Notion 未配置", DELIVERING: "交付中", DELIVERED: "已交付 Notion",
+  NOT_STARTED: "待交付", BLOCKED: "Notion 未配置", DELIVERING: "交付中", DELIVERED: "已入 Notion",
   STALE: "待更新", FAILED: "交付失败",
 };
+
+export function clock(iso?: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}

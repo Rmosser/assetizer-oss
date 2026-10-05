@@ -2,11 +2,29 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>资产刊 · Assetizer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>资产刊</title>
+    <meta name="description" content="投资视频的知识单元、片段与文章——只为你编的刊。" />
+    <meta name="theme-color" content="#f3efe6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#141311" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f3efe6" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="资产刊" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='3' fill='%23B8322A'/><text x='16' y='23' font-size='19' text-anchor='middle' fill='%23F3EFE6' font-family='serif' font-weight='700'>刊</text></svg>" />
+    <link rel="apple-touch-icon" href="/seal-180.png" />
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <script>
-      try { const t = localStorage.getItem("az-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+      try {
+        var t = localStorage.getItem("az-theme");
+        if (t) {
+          document.documentElement.dataset.theme = t;
+          document.querySelector('meta[name="theme-color"]:not([media])').setAttribute("content", t === "dark" ? "#141311" : "#f3efe6");
+        } else if (matchMedia("(prefers-color-scheme: dark)").matches) {
+          document.querySelector('meta[name="theme-color"]:not([media])').setAttribute("content", "#141311");
+        }
+      } catch (e) {}
     </script>
   </head>
   <body>

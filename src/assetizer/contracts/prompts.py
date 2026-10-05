@@ -285,7 +285,7 @@ CHECK_SCHEMA = obj({"checks": arr(obj({
     "label": STR,
     "issues": arr(obj({"kind": {"type": "string", "enum": CHECK_KINDS},
                        "severity": {"type": "string", "enum": ["REVIEW", "INFO"]},
-                       "evidence": STR, "note": STR})),
+                       "evidence": STR, "claim": STR, "note": STR})),
 }))})
 
 
@@ -299,7 +299,8 @@ def check_prompt(items: list[dict]) -> str:
 - ENDS_BEFORE_CONCLUSION：结尾是否在结论前结束；NEXT_TOPIC_BLEED：结尾是否混入下一主题；
 - CLAIM_MISMATCH：单元的计划/已执行/条件陈述与该区间 ASR 是否不一致（例如 ASR 是"继续关注"，单元写成"剔除"）；
 - ATTRIBUTION_RISK / OVERSTATEMENT：归属错误或程度被加强。
-evidence 原样引用 ASR 片段。
+evidence 原样引用 ASR 片段；claim 逐字复制单元文字里被质疑的那一句（不改写、不加引号；问题与单元陈述无关时给空字符串）。
+note 用中文写给审阅者：引用原话用「」，不要用英文引号。
 
 ITEMS
 {json.dumps(items, ensure_ascii=False)}"""

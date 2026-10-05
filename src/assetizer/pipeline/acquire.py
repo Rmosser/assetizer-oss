@@ -47,7 +47,7 @@ def playbook(ctx: RunContext) -> dict:
         if cid:
             row = db.one("SELECT * FROM playbooks WHERE channel_id=? AND status='ACTIVE' ORDER BY version DESC LIMIT 1", cid)
             if row is None and db.one("SELECT id FROM playbooks WHERE channel_id=? AND status='NEEDS_CONFIRMATION'", cid):
-                raise Waiting("PLAYBOOK_CONFIRMATION", "频道 Playbook 待确认")
+                raise Waiting("PLAYBOOK_CONFIRMATION", "频道规程待确认")
         if row is None:
             row = db.one("SELECT * FROM playbooks WHERE channel_id IS NULL AND status='ACTIVE' ORDER BY version DESC LIMIT 1")
         db.exec("UPDATE runs SET playbook_id=? WHERE id=?", row["id"], ctx.id)
