@@ -28,6 +28,8 @@
 16. **模型输入一律为 Proxy**（2026-10-05 实测后裁决）：agy 自 1.2.2 起（官方 changelog：防止大文件撑爆上下文）`view_file` 拒绝 >100 MB 文件，本机自动升级后触发，Run-014 式 619 MB 流复制 Chunk 不再可读。CHUNK 改为从原片精确起点重编码 1 fps、原分辨率、GOP 60 s、CRF 32 的 Proxy（50 min ≈ 92 MB，Ticker/价格清晰可读），超限按 CRF 36 → 720p 阶梯降级；Boundary 窗口 2 fps。副作用：offset 精确等于起点（不再依赖关键帧），agy 峰值内存显著下降。
 17. **`--json-schema` 只用于小输出**（同日实测）：整段理解在 schema 模式下把输出预算耗在 thinking、返回空 topics；contract repair 随后编造了占位主题。裁决：大输出阶段把 Schema 写进 Prompt 并本地校验（Run-014 路径）；内容为空 / 不合规 / 工具偏航 → 重新生成一次；repair 仅限无法解析的文本，且不得编造。
 
+18. **对照实验结论（2026-10-05，docs/experiments-2026-10-05.md）**：保持 50+5 分段（整段一次理解丢失约一半知识点、时间定位误差中位数 151–206 s）；1 fps 理解代理与原画差异在噪声内；2 fps 边界窗口与全画质窗口相当；**取消对模型边界的 ASR 吸附**（会变差），仅对兜底区间吸附——修订第 7 条。
+
 **推迟：** Playbook 编译器与 Onboarding UI、轻量 Discovery（transcript-based）、RSS 自动收录、PromptAmendment、M lane 并行、媒体 proxy A/B、systemd-run scope（先确认 user systemd 可用）。
 
 ## 0. 设计约束（来自用户与证据）
