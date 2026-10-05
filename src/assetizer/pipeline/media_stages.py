@@ -253,11 +253,10 @@ def boundary(ctx: RunContext) -> dict:
             a, b = span_a, span_b
             ctx.flag("UNIT", u["id"], "BOUNDARY_FALLBACK", "REVIEW", f"「{u['title']}」边界模型失败，已按单元区间确定性剪辑",
                      evidence={"error": o.get("error")})
-        if words:
+        # Experiment C (2026-10-05): raw model boundaries match Codex-verified cuts better than any ASR snapping
+        # variant (≤3 s at both ends: raw 75–79 %, snapped 54–71 %). Snap only the deterministic fallback span.
+        if words and src == "fallback":
             sn = snap(a, b, words, seg_ends, nxt.get(u["id"]), ctx.duration)
-            if not (sn["start_snapped"] and sn["end_snapped"]):
-                ctx.flag("UNIT", u["id"], "BOUNDARY_UNCERTAIN", "INFO", f"「{u['title']}」边界附近没有找到清晰句界",
-                         evidence={"start": fmt_tc(a), "end": fmt_tc(b)})
         else:
             sn = {"start": a, "end": b, "start_snapped": False, "end_snapped": False}
         if isinstance(o, dict) and o.get("context_missing"):
