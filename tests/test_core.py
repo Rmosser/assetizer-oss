@@ -135,3 +135,7 @@ def test_safety_block_detection():
     from assetizer.llm import is_safety_block
     assert is_safety_block("This request was blocked by Gemini's filters. They can occasionally trigger by mistake")
     assert not is_safety_block('{"topics": []}')
+
+
+def test_network_errors_are_transient():
+    assert classify_error('request failed: read tcp 1.2.3.4:1->5.6.7.8:443: read: connection reset by peer') == "PROVIDER_TRANSIENT"

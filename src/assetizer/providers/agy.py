@@ -53,7 +53,8 @@ class CallResult:
 
 
 _TRANSIENT_RE = re.compile(r"\b(429|500|502|503|504)\b|resource_exhausted|unavailable|deadline exceeded|timed out|"
-                           r"temporarily|overloaded|rate limit", re.I)
+                           r"temporarily|overloaded|rate limit|connection reset|broken pipe|unexpected eof|"
+                           r"connection refused|tls handshake|no such host|i/o timeout", re.I)
 _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sign in again|invalid_grant|"
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
 
