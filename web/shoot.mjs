@@ -11,7 +11,7 @@ for (const theme of themes) {
   page.on("pageerror", (e) => console.log("PAGEERROR", e.message));
   page.on("console", (m) => m.type() === "error" && console.log("CONSOLE", m.text()));
   for (const p of pages) {
-    await page.goto((process.env.BASE || "http://127.0.0.1:8771") + urls[p], { waitUntil: "networkidle" });
+    await page.goto((process.env.BASE || "http://127.0.0.1:8771") + urls[p], { waitUntil: "load" });
     await page.waitForTimeout(900);
     await page.screenshot({ path: `${out}/${p}-${theme}-${width}.png`, fullPage: false });
     if (p === "reader") {

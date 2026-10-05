@@ -503,7 +503,7 @@ export default function Reader({ id }: { id: string }) {
         <div className="empty"><h3>这一期还在付印</h3><p>完成后会自动出现在这里。可以在「机房」查看进度。</p></div>
       ) : (
         <div className="reader">
-          <div style={{ gridRow: "1 / span 999" }}>
+          <div className="spine-col" style={{ gridRow: "1 / span 999" }}>
             <Spine duration={source.duration || units[units.length - 1].end} units={units} assets={assets} flags={flags} active={current} onJump={jump} />
           </div>
           <div className="article">

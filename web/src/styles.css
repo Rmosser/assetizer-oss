@@ -534,9 +534,15 @@ details.fold[open] summary::before { content: "−"; }
   .toc-stats { display: none; }
 }
 @media (max-width: 900px) {
-  .masthead { grid-template-columns: auto 1fr; height: auto; padding-top: 10px; padding-bottom: 10px; row-gap: 8px; }
+  .masthead { grid-template-columns: auto minmax(0, 1fr); height: auto; padding-top: 10px; padding-bottom: 10px; row-gap: 8px; }
   .nav { grid-column: 1 / -1; grid-row: 2; justify-content: center; }
-  .paste { width: 100%; }
+  .tools { min-width: 0; gap: 6px; }
+  .paste, .paste:focus-within { flex: 1; min-width: 0; width: auto; }
+  .paste kbd { display: none; }
+  .margin { grid-column: 1; }
+  .spine-col { display: none; }
+  .cov-row { grid-template-columns: 1fr; gap: 4px; }
+  .cov-row .disp, .rule .id, .zhupi, .prose { overflow-wrap: anywhere; }
   .hero { grid-template-columns: 1fr; gap: 20px; }
   .toc-row { grid-template-columns: 44px minmax(0, 1fr) 72px; gap: 14px; }
   .cover { display: none; }
@@ -587,7 +593,7 @@ details.notes .zhupi { margin-left: -16px; }
 /* compiler coverage + editors */
 .cov { margin-top: 12px; border-top: 1px solid var(--ink); max-height: 560px; overflow: auto; }
 .cov-row { display: grid; grid-template-columns: 52px minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; padding: 9px 0; border-bottom: 1px solid var(--rule); font: 14px/1.7 var(--serif); }
-.cov-row .disp { font: 12.5px/1.6 var(--sans); color: var(--ink-2); }
+.cov-row .disp { font: 12.5px/1.6 var(--sans); color: var(--ink-2); overflow-wrap: anywhere; }
 .cov-row .disp em { font-style: normal; color: var(--ink-3); }
 .cov-row.bad { background: var(--zhu-wash); }
 .cov-row.bad .disp { color: var(--zhu-ink); font-weight: 600; }
