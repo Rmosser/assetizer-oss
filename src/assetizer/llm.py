@@ -65,6 +65,11 @@ def extract_json(text: str, required: list[str] | None = None) -> Any:
     raise ContractError("FORMAT_NONCOMPLIANCE", f"{len(found)} candidate objects with required keys")
 
 
+def is_safety_block(text: str) -> bool:
+    t = (text or "")[:600].lower()
+    return "blocked by gemini's filters" in t or "blocked by gemini’s filters" in t
+
+
 def _strip_extras(obj: Any, schema: dict) -> Any:
     """agy's finish tool adds toolAction/toolSummary keys; drop unknown top-level keys."""
     if isinstance(obj, dict) and schema.get("type") == "object" and "properties" in schema:
@@ -163,6 +168,12 @@ class LLM:
                     raise
                 deviations += 1
                 last = e
+                continue
+            if is_safety_block(r.text):
+                # Gemini filters occasionally false-positive on trading content; a fresh call usually passes
+                write_json(d / f"invalid-{n}.json", {"classification": "PROVIDER_SAFETY_BLOCK", "detail": r.text[:300]})
+                last = ContractError("PROVIDER_SAFETY_BLOCK", "blocked by Gemini filters")
+                deviations += 1  # allow the third attempt
                 continue
             try:
                 obj = parse(r.text)

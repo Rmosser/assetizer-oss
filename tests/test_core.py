@@ -129,3 +129,9 @@ def test_dedupe_clips_keeps_higher_priority():
     units = {"a": {"learning_priority": 2}, "b": {"learning_priority": 3}, "c": {"learning_priority": 2}}
     bnd = {"a": {"start": 448, "end": 702}, "b": {"start": 449, "end": 701}, "c": {"start": 600, "end": 900}}
     assert dedupe_clips(bnd, units) == {"a": "b"}
+
+
+def test_safety_block_detection():
+    from assetizer.llm import is_safety_block
+    assert is_safety_block("This request was blocked by Gemini's filters. They can occasionally trigger by mistake")
+    assert not is_safety_block('{"topics": []}')

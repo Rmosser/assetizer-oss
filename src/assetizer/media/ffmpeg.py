@@ -190,7 +190,7 @@ def moov_first(p: Path) -> bool:
     return False
 
 
-VIEW_FILE_LIMIT = 95 * 1024 * 1024  # agy >= 1.2.16 refuses view_file above 100 MB
+VIEW_FILE_LIMIT = 95 * 1024 * 1024  # agy >= 1.2.2 refuses view_file above 100 MB (changelog: context-overflow guard)
 
 
 def model_proxy(src: Path, start: float, length: float, out: Path, fps: float = 1.0, crf: int = 30,
