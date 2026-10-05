@@ -113,7 +113,7 @@ def _issue(s: dict, n: int) -> dict:
     clips = sum(v for k, v in (summ.get("assets") or {}).items() if k == "clip:GENERATED")
     musts = db.q("SELECT id, title FROM units WHERE run_id IS ? AND learning_priority=3 ORDER BY start LIMIT 3",
                  s.get("current_run_id"))
-    return {"no": n, "id": s["id"], "title": s.get("title") or s["id"], "channel": s.get("channel_title"),
+    return {"no": n, "id": s["id"], "title": s.get("title") or s["id"], "headline": s.get("headline"), "channel": s.get("channel_title"),
             "channel_id": s.get("channel_id"), "published_at": s.get("published_at"), "duration": s.get("duration"),
             "review": s["review"], "delivery": s["delivery"], "notion_url": s.get("notion_url"),
             "units": summ.get("units"), "must": must, "clips": clips, "flags": flags, "cover": _cover(s.get("current_run_id")), "musts": musts,
@@ -277,7 +277,8 @@ def engine():
         return sum(f.stat().st_size for f in p.rglob("*") if f.is_file() and not f.is_symlink()) if p.exists() else 0
     runs = [_run_view(r) for r in db.q("SELECT * FROM runs ORDER BY created_at DESC LIMIT 30")]
     for r in runs:
-        r["title"] = (db.one("SELECT title FROM sources WHERE id=?", r["source_id"]) or {}).get("title")
+        src = db.one("SELECT title, headline FROM sources WHERE id=?", r["source_id"]) or {}
+        r["title"], r["headline"] = src.get("title"), src.get("headline")
     calls = db.one("""SELECT COUNT(*) n, SUM(wall_seconds) wall, SUM(input_tokens) inp, SUM(output_tokens) outp,
                       SUM(thinking_tokens) think, MAX(peak_rss_kib) rss FROM model_calls""")
     return {
@@ -305,11 +306,33 @@ def run_detail(rid: str):
             "events": db.q("SELECT * FROM events WHERE run_id=? ORDER BY id DESC LIMIT 200", rid)}
 
 
+THUMB_WIDTHS = (320, 480, 640, 960, 1280)
+
+
+def _thumb(src: Path, w: int) -> Path:
+    """Downscaled JPEG next to the original, made once (screenshots are full-HD; lists show them at 120–640 px)."""
+    w = min(THUMB_WIDTHS, key=lambda x: abs(x - w))
+    out = src.with_name(f"{src.stem}.w{w}.jpg")
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    from PIL import Image
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        if im.width > w:
+            im = im.resize((w, round(im.height * w / im.width)), Image.LANCZOS)
+        tmp = out.with_name(f"{out.name}.{os.getpid()}.{threading.get_ident()}.part")
+        im.save(tmp, "JPEG", quality=80, optimize=True, progressive=True)
+    tmp.replace(out)
+    return out
+
+
 @app.get("/media/{asset_id}")
-def media(asset_id: int):
+def media(asset_id: int, w: int | None = None):
     a = db.one("SELECT path, kind FROM assets WHERE id=?", asset_id)
     if not a or not a["path"] or not Path(a["path"]).exists():
         raise HTTPException(404)
+    if w and a["kind"] in ("screenshot", "poster"):
+        return FileResponse(_thumb(Path(a["path"]), w), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
     mt = {"clip": "video/mp4", "clip_subtitled": "video/mp4", "screenshot": "image/jpeg", "poster": "image/jpeg",
           "srt": "text/plain; charset=utf-8", "ass": "text/plain; charset=utf-8"}.get(a["kind"])
     return FileResponse(a["path"], media_type=mt, headers={"Cache-Control": "private, max-age=86400"})

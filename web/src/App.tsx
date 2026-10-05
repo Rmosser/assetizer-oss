@@ -48,8 +48,10 @@ function Paste() {
     const on = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); ref.current?.focus(); }
     };
+    const focus = () => ref.current?.focus();
     addEventListener("keydown", on);
-    return () => removeEventListener("keydown", on);
+    addEventListener("az:focus-paste", focus);
+    return () => { removeEventListener("keydown", on); removeEventListener("az:focus-paste", focus); };
   }, []);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -136,6 +138,12 @@ export default function App() {
   const { data } = usePoll<any>("/api/overview", 15000);
   const [pasting, setPasting] = useState(false);
   useChromeAutoHide();
+  useEffect(() => {
+    // "付印第一期" and friends: the sheet on phones, the masthead field on desktop
+    const on = () => (matchMedia("(max-width: 900px)").matches ? setPasting(true) : dispatchEvent(new Event("az:focus-paste")));
+    addEventListener("az:paste", on);
+    return () => removeEventListener("az:paste", on);
+  }, []);
   const flags = data?.open_flags ?? 0;
   const alerts = data?.alerts?.length ?? 0;
   const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : "issues";

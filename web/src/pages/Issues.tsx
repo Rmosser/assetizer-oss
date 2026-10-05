@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { media, post } from "../api";
-import { IssueTitle, splitTitle, typeset, Words } from "../cjk";
+import { media, post, srcSet } from "../api";
+import { IssueTitle, issueHeadline, originalTitle, typeset, Words } from "../cjk";
 import { Yin } from "../components/Yin";
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDate, cnDay, cnMonth, cnNum, dur, mins, parseDay, WAIT } from "../util";
+import { cnDate, cnDay, cnMonth, cnNum, dur, parseDay, WAIT } from "../util";
 
 type Stage = { name: string; label: string; status: string; started_at?: string };
 
@@ -42,6 +42,7 @@ export function PressLine({ run }: { run: any }) {
   );
 }
 
+const headOf = (it: any) => issueHeadline(it.headline, it.musts?.[0]?.title, it.title);
 const producing = (it: any) => ["QUEUED", "RUNNING", "WAITING", "INTERRUPTED"].includes(it.production) && !it.units;
 const issueHref = (it: any, hash = "") => `/issue/${encodeURIComponent(it.id)}${hash}`;
 
@@ -57,14 +58,14 @@ function Feature({ it }: { it: any }) {
   return (
     <section className="feature" aria-label="本期">
       <a className="feature-cover" {...linkProps(issueHref(it))} tabIndex={-1} aria-hidden>
-        {it.cover ? <img src={media(it.cover)} alt="" fetchPriority="high" /> : <span className="ph">刊</span>}
+        {it.cover ? <img src={media(it.cover, 1280)} srcSet={srcSet(it.cover, [640, 960, 1280])} sizes="(max-width: 640px) 100vw, 58vw" alt="" fetchPriority="high" /> : <span className="ph">刊</span>}
       </a>
       <div className="feature-text">
         <div className="kicker">{it.channel || "未识别频道"} · 第{cnNum(it.no)}期{it.published_at ? ` · ${cnDay(it.published_at)}` : ""}</div>
-        <h2 className="feature-title"><a {...linkProps(issueHref(it))}><Words>{splitTitle(it.title).head}</Words></a></h2>
-        {splitTitle(it.title).dek && <p className="dek"><Words>{splitTitle(it.title).dek}</Words></p>}
+        <h2 className="feature-title"><a {...linkProps(issueHref(it))}><Words>{headOf(it)}</Words></a></h2>
+        {originalTitle(it.title) !== headOf(it) && <p className="dek"><span className="dek-k">原题</span><Words>{originalTitle(it.title)}</Words></p>}
         {it.units != null ? (
-          <p className="feature-stats"><span className="num">{it.units}</span> 单元 · 必学 <span className="num">{it.must}</span> · <span className="num">{it.clips}</span> 段片段 · <span className="num">{mins(it.duration)}</span></p>
+          <p className="feature-stats"><span className="ph"><span className="num">{Math.round((it.duration || 0) / 60)}</span> 分钟</span> · <span className="ph"><span className="num">{it.units}</span> 单元（必学 <span className="num">{it.must}</span>）</span> · <span className="ph"><span className="num">{it.clips}</span> 段片段</span></p>
         ) : <p className="feature-stats">尚未成刊</p>}
         {it.musts?.length > 0 && (
           <div className="musts">
@@ -97,11 +98,14 @@ function Row({ it }: { it: any }) {
       <a className="toc-row" {...linkProps(issueHref(it))}>
         <div className="toc-no"><span className="num">{String(it.no).padStart(3, "0")}</span></div>
         <div className="cover">
-          {it.cover ? <img src={media(it.cover)} alt="" loading="lazy" /> : <span className="ph">刊</span>}
+          {it.cover ? <img src={media(it.cover, 320)} srcSet={srcSet(it.cover, [320, 640])} sizes="120px" alt="" loading="lazy" /> : <span className="ph">刊</span>}
         </div>
         <div className="toc-title">
-          <h3><IssueTitle title={it.title} /></h3>
-          <div className="meta">{it.channel || "未识别频道"} · {cnDay(it.published_at)} · {mins(it.duration)}{it.units != null && <> · {it.units} 单元</>}</div>
+          <h3><Words>{headOf(it)}</Words></h3>
+          <div className="meta">
+            {[it.channel || "未识别频道", cnDay(it.published_at), `${Math.round((it.duration || 0) / 60)} 分钟`, it.units != null && `${it.units} 单元`]
+              .filter(Boolean).map((x, i) => <span key={i} className="ph">{i > 0 && " · "}{x}</span>)}
+          </div>
         </div>
         <div className="toc-state"><State it={it} /></div>
       </a>
@@ -168,7 +172,7 @@ export default function Issues() {
     addEventListener("az:refresh", on);
     return () => removeEventListener("az:refresh", on);
   }, [reload]);
-  if (!data) return error ? <Fault error={error} retry={reload} /> : <Unroll />;
+  if (!data) return <main className="page">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   const d = cnDate();
   const issues: any[] = mockIssues(data.issues);
   const ready = issues.filter((i) => i.units != null);
@@ -252,8 +256,8 @@ export default function Issues() {
           {rest.length > 0 && <Archive issues={rest} />}
         </>
       ) : !data.producing && (
-        <Empty title="还没有任何一期">
-          点右上角的「＋」或在搜索框粘贴一个 YouTube 视频链接。系统会自动理解、拆解成知识单元，并剪好片段、写好文章——你只需要回来阅读。
+        <Empty title="还没有任何一期" action={<button className="btn solid" onClick={() => dispatchEvent(new Event("az:paste"))}>付印第一期</button>}>
+          粘贴一个 YouTube 视频链接，系统会理解、拆解成知识单元，剪好片段、写好文章。你只需要回来阅读。
         </Empty>
       )}
       {issues.length > 0 && (

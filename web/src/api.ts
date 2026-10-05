@@ -22,4 +22,7 @@ export async function post<T = any>(path: string, body: unknown = {}): Promise<T
   return data as T;
 }
 
-export const media = (id: number | null | undefined) => (id ? `/media/${id}` : undefined);
+export const media = (id: number | null | undefined, w?: number) => (id ? `/media/${id}${w ? `?w=${w}` : ""}` : undefined);
+/** responsive stills: the server keeps 320–1280 px JPEG derivatives of screenshots and posters */
+export const srcSet = (id: number | null | undefined, widths = [640, 1280]) =>
+  id ? widths.map((w) => `/media/${id}?w=${w} ${w}w`).join(", ") : undefined;

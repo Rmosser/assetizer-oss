@@ -197,6 +197,7 @@ TOPIC RECORDS
 # --------------------------------------------------------------- article
 OUTLINE_SCHEMA = obj({
     "title": STR,
+    "headline": STR,
     "intro_markdown": STR,
     "outro_markdown": STR,
 })
@@ -207,6 +208,7 @@ def outline_prompt(playbook: dict, meta: dict, units: list[dict]) -> str:
 
 禁止工具与媒体。你在为本期写一篇结构化学习文章的**开头与结尾**；各单元正文由后续调用分别撰写，按 Source 时间顺序排列。
 - title：本期文章标题（克制、信息化，不标题党）。
+- headline：本期题眼，12–20 字，点出本期最值得学的一两个具体判断（带标的或结构名，例如「MRNA 双缺口回踩，长周末前先减仓」）；不写日期、栏目名或“技术分析”这类泛称，不标题党。
 - intro_markdown：Markdown。包含一段 2–4 句的导语（本期主线），然后一个"学习导航"表格（列：单元｜看点｜优先级★），按时间顺序列出全部单元；优先级用 ★/★★/★★★。不要写运行元数据。
 - outro_markdown：Markdown。本期可带走的要点清单（按频道规则需要的清单形式），只用单元中的证据；没有就留空字符串。
 
@@ -285,7 +287,7 @@ CHECK_SCHEMA = obj({"checks": arr(obj({
     "label": STR,
     "issues": arr(obj({"kind": {"type": "string", "enum": CHECK_KINDS},
                        "severity": {"type": "string", "enum": ["REVIEW", "INFO"]},
-                       "evidence": STR, "claim": STR, "note": STR})),
+                       "title": STR, "evidence": STR, "claim": STR, "note": STR})),
 }))})
 
 
@@ -294,13 +296,16 @@ def check_prompt(items: list[dict]) -> str:
 {POLICY}
 
 你是只读质检员：禁止工具与媒体，不改写任何内容，只报告可能需要人工判断的问题；每个条目都必须返回一条 checks 记录；没有问题时 issues 给空数组，不要为了有输出而挑刺。
-对每个条目（一个 Clip 及其知识单元），依据所附 ASR 原文检查：
+对每个条目（一个 Clip、它的知识单元和读者看到的正文 article），依据所附 ASR 原文检查：
 - HALF_SENTENCE_START：开头是否从半句开始；DANGLING_REFERENCE：开头的"这个/它/他"是否缺少指代对象；
 - ENDS_BEFORE_CONCLUSION：结尾是否在结论前结束；NEXT_TOPIC_BLEED：结尾是否混入下一主题；
 - CLAIM_MISMATCH：单元的计划/已执行/条件陈述与该区间 ASR 是否不一致（例如 ASR 是"继续关注"，单元写成"剔除"）；
 - ATTRIBUTION_RISK / OVERSTATEMENT：归属错误或程度被加强。
-evidence 原样引用 ASR 片段；claim 逐字复制单元文字里被质疑的那一句（不改写、不加引号；问题与单元陈述无关时给空字符串）。
-note 用中文写给审阅者：引用原话用「」，不要用英文引号。
+每个 issue 的字段：
+- title：给审阅者看的具体标题，不超过 24 字，必须点出对象（被质疑的说法，或片段的时间点），例如“列入 T0 级别”超出了原话、01:05 起 MP 尚未出场；不要只写类别名。
+- claim：从 article 里逐字复制被质疑的那一句（去掉 Markdown 符号，不改写、不加引号，不超过 60 字）；问题只涉及片段起止、与正文无关时给空字符串。
+- evidence：从 ASR 原文摘出最能说明问题的一句（不超过 60 字），只允许补标点，不改字。
+- note：写给审阅者的一两句话：原话怎么说、正文怎么写、差在哪里。禁止出现 Claim 编号、ASR、label 等内部词；引用原话用「」，引用正文用“”。
 
 ITEMS
 {json.dumps(items, ensure_ascii=False)}"""

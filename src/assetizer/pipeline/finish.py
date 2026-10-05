@@ -30,10 +30,15 @@ def review_check(ctx: RunContext) -> dict:
     words = read_json(tp)["words"]
     units = {u["id"]: u for u in _units(ctx)}
     items = []
+    article = {}
+    for s in db.q("SELECT unit_ids, markdown FROM sections WHERE run_id=? AND kind='UNIT'", ctx.id):
+        for uid in db.unj(s["unit_ids"], []):
+            article[uid] = s["markdown"]
     for c in db.q("SELECT * FROM assets WHERE run_id=? AND kind='clip' AND status='GENERATED' ORDER BY start", ctx.id):
         u = units[c["unit_id"]]
         a, b = c["start"], c["end"]
         items.append({"label": u["label"], "title": u["title"], "required_context": u["required_context"],
+                      "article": article.get(u["id"], "")[:1600],
                       "claims": [{k: x.get(k) for k in ("kind", "text", "condition", "time_scope")} for x in u.get("claims", [])][:8],
                       "asr_head": _text(words, a, a + 20), "asr_tail": _text(words, b - 20, b),
                       "asr_full": _text(words, a, b)[:1800]})
@@ -63,7 +68,8 @@ def review_check(ctx: RunContext) -> dict:
                 found += 1
                 # fidelity problems need the reviewer; boundary polish notes do not
                 sev = iss["severity"] if iss["kind"] in FIDELITY_KINDS else "INFO"
-                ctx.flag("UNIT", u["id"], "AI_" + iss["kind"], sev, f"「{u['title']}」{_KIND_ZH.get(iss['kind'], iss['kind'])}",
+                title = (iss.get("title") or "").strip() or f"「{u['title']}」{_KIND_ZH.get(iss['kind'], iss['kind'])}"
+                ctx.flag("UNIT", u["id"], "AI_" + iss["kind"], sev, title,
                          iss.get("note", ""), evidence={"quote": iss.get("evidence"), "claim": iss.get("claim") or None},
                          origin="AI_CHECK")
     return {"items": len(items), "issues": found}

@@ -42,15 +42,15 @@ export function Lightbox({ shots, index, onClose }: { shots: Shot[]; index: numb
   const s = shots[i];
   return createPortal(
     <dialog ref={ref} className="lightbox" aria-label="截图">
-      <div className="lb-track" ref={track} onScroll={onScroll}>
+      <div className={`lb-track${zoom ? " locked" : ""}`} ref={track} onScroll={onScroll}>
         {shots.map((x, k) => (
           <figure key={x.id} className={`lb-frame${zoom && k === i ? " zoom" : ""}`}>
-            <img src={media(x.id)} alt={x.meta?.reason || ""} onDoubleClick={() => setZoom(!zoom)} onClick={() => setZoom(!zoom)} />
+            <img src={media(x.id)} alt={x.meta?.reason || ""} onClick={() => setZoom(!zoom)} />
           </figure>
         ))}
       </div>
       <div className="lb-bar">
-        <p><span className="num">{tc(s?.start)}</span>{s?.meta?.reason && typeset(s.meta.reason)}</p>
+        <p><span className="num">{tc(s?.start)}</span>{s?.meta?.reason && typeset(s.meta.reason)}<span className="lb-hint">{zoom ? "再点一下还原" : "点图放大"}</span></p>
         {shots.length > 1 && (
           <div className="lb-nav">
             <button onClick={() => go(i - 1)} disabled={i === 0} aria-label="上一张">‹</button>

@@ -153,7 +153,7 @@ function Channel({ c, reload }: { c: any; reload: () => void }) {
 export default function Channels() {
   const { data, error, loadedAt, reload } = usePoll<any>("/api/channels", 0);
   useRestoreScroll(!!data);
-  if (!data) return error ? <Fault error={error} retry={reload} /> : <Unroll />;
+  if (!data) return <main className="page">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   const tracked = data.channels.filter((c: any) => c.mode === "TRACKED");
   const others = data.channels.filter((c: any) => c.mode !== "TRACKED");
   return (

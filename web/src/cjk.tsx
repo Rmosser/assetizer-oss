@@ -11,6 +11,7 @@ const RE = {
   bang: new RegExp(`(?<=[${HAN}])!(?!\\[)`, "gu"),
   paren: new RegExp(`\\(([^()\\n]*[${HAN}][^()\\n]*)\\)`, "gu"),
   dquote: new RegExp(`"([^"\\n]*[${HAN}][^"\\n]*)"`, "gu"),
+  squote: new RegExp(`(?<=[${HAN}])\\s*[‘']([^‘’'\\n]{1,40})[’']\\s*(?=[${HAN}])`, "gu"),
   hanLatin: new RegExp(`([${HAN}])([A-Za-z0-9$])`, "gu"),
   latinHan: new RegExp(`([A-Za-z0-9%])([${HAN}])`, "gu"),
 };
@@ -20,7 +21,7 @@ export function cjkPunct(s: string): string {
   return (s || "")
     .replace(RE.comma, "，").replace(RE.semi, "；").replace(RE.colon, "：")
     .replace(RE.ques, "？").replace(RE.bang, "！")
-    .replace(RE.paren, "（$1）").replace(RE.dquote, "“$1”");
+    .replace(RE.paren, "（$1）").replace(RE.dquote, "“$1”").replace(RE.squote, "“$1”");
 }
 
 /** A thin space between Han and Latin/digits (what `text-autospace` does where the browser supports it). */
@@ -31,23 +32,15 @@ export function autospace(s: string): string {
 /* Latin/Han spacing is left to CSS `text-autospace` (it knows about line edges; a literal thin space does not). */
 export const typeset = (s: string) => cjkPunct(s);
 
-const seg = typeof Intl !== "undefined" && "Segmenter" in Intl ? new Intl.Segmenter("zh-Hans", { granularity: "word" }) : null;
 
-const HAN_END = new RegExp(`[${HAN}]$`, "u");
-const HAN_START = new RegExp(`^[${HAN}]`, "u");
+/* Break opportunities only at phrase joints — before 与/及/并, after 的、：；，, around brackets and quotes.
+   Everything else stays together (keep-all); Segmenter splits finance terms like 收|敛. No joint between a
+   ticker and Han: a <wbr> there would cancel `text-autospace`.
+   Han–Latin boundaries stay inside one text node, so `text-autospace` still adds its 1/8 em. */
+const JOINT = new RegExp(`(?=[与及并](?=[${HAN}A-Za-z0-9]))|(?<=[的、：；，])|(?=[（「“《])|(?<=[）」”》])`, "gu");
 
-/** Break lines only between words: keep-all, plus a <wbr> at each Han–Han word boundary. Han–Latin boundaries
- *  stay inside one text node so `text-autospace` can still put its 1/8 em there. */
 export function Words({ children }: { children: string }) {
-  const text = typeset(children || "");
-  if (!seg) return <>{text}</>;
-  const runs: string[] = [];
-  let buf = "";
-  for (const { segment } of seg.segment(text)) {
-    if (buf && HAN_END.test(buf) && HAN_START.test(segment)) { runs.push(buf); buf = ""; }
-    buf += segment;
-  }
-  if (buf) runs.push(buf);
+  const runs = typeset(children || "").split(JOINT).filter(Boolean);
   return <span className="kw">{runs.map((r, i) => <Fragment key={i}>{i > 0 && <wbr />}{r}</Fragment>)}</span>;
 }
 
@@ -81,10 +74,10 @@ export function cleanUnitTitle(h: string): string {
 }
 
 const CN = "〇一二三四五六七八九";
-/** Chapter-style ordinal: 3 → 三, 10 → 十, 35 → 三十五 */
+/** Chapter-style ordinal: 3 → 〇三, 10 → 十, 35 → 三十五 (a lone 一 reads as a dash) */
 export function cnNo(n: number): string {
   if (n < 0 || n > 99) return String(n);
-  if (n <= 10) return n === 10 ? "十" : CN[n];
+  if (n <= 10) return n === 10 ? "十" : "〇" + CN[n];
   const t = Math.floor(n / 10), o = n % 10;
   return (t > 1 ? CN[t] : "") + "十" + (o ? CN[o] : "");
 }
@@ -95,3 +88,23 @@ export function quotedFragments(s: string): string[] {
   for (const m of (s || "").matchAll(/[“「]([^”」]{4,80})[”」]/g)) out.push(m[1]);
   return out;
 }
+
+/** Internal vocabulary that leaks from model notes into reader-facing text. */
+export const deJargon = (s: string) => (s || "")
+  .replace(/Claim\s*\d+\s*/g, "正文")
+  .replace(/ASR\s*原文/g, "原话转写").replace(/\bASR\b/g, "转写")
+  .replace(/被禁用的夸大词汇/g, "夸大措辞")
+  .replace(/（[A-Z_]{3,}）/g, "");
+
+/** Close a sentence that the model left open. */
+export const endStop = (s: string) => (/[\p{Script=Han}」”）A-Za-z0-9]$/u.test((s || "").trim()) ? `${s.trim()}。` : s);
+
+/** The issue's headline: the pipeline's 题眼, else the first must-read unit, else the cleaned video title. */
+export const issueHeadline = (headline: string | null | undefined, mustTitle: string | null | undefined, title: string) =>
+  (headline || mustTitle || splitTitle(title).head).trim();
+
+/** Original title as a quiet second line: 技术分析视频 · 持仓、板块个股分析… */
+export const originalTitle = (title: string) => {
+  const { head, dek } = splitTitle(title);
+  return dek ? `${head} · ${dek}` : head;
+};

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { post } from "../api";
-import { IssueTitle } from "../cjk";
+import { deJargon, issueHeadline } from "../cjk";
 import { Fault, Stale, Unroll } from "../components/States";
-import { usePoll } from "../hooks";
+import { useMedia, usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
 import { ago, bytes, clock, PRODUCTION, WAIT } from "../util";
 
@@ -14,7 +14,15 @@ const fmtK = (n?: number | null) => (n == null ? "—" : n >= 1e6 ? (n / 1e6).to
 const SSH = "ssh -N -L 6080:127.0.0.1:6080 ovh-investment";
 const KIND: Record<string, string> = { worker: "机房", stage: "工序", run: "付印", delivery: "交付", review: "审阅", compile: "编译", ingest: "收录", alert: "告警", experiment: "实验" };
 /** "CLEANUP 完成" → "清理 完成": stage codes in log lines read as their Chinese labels */
-const humanize = (msg: string, labels: Record<string, string>) => (msg || "").replace(/\b[A-Z][A-Z_]{2,}\b/g, (m) => labels[m] || m).replace(/^Worker /, "机房");
+const humanize = (msg: string, labels: Record<string, string>) =>
+  deJargon(msg || "").replace(/\b[A-Z][A-Z_]{2,}\b/g, (m) => labels[m] || m).replace(/^Worker /, "机房");
+/** consecutive identical events collapse into one line with a count */
+const collapse = (events: any[]) => events.reduce((a: any[], e: any) => {
+  const l = a[a.length - 1];
+  if (l && l.kind === e.kind && l.message === e.message) { l.n++; return a; }
+  a.push({ ...e, n: 1 });
+  return a;
+}, []);
 
 function Cmd({ text }: { text: string }) {
   const [ok, setOk] = useState(false);
@@ -56,14 +64,14 @@ function Runs({ runs, reload }: { runs: any[]; reload: () => void }) {
   const groups: { sid: string; title: string; prod: any[]; exp: any[] }[] = [];
   for (const r of runs) {
     let g = groups.find((x) => x.sid === r.source_id);
-    if (!g) groups.push((g = { sid: r.source_id, title: r.title || r.source_id, prod: [], exp: [] }));
+    if (!g) groups.push((g = { sid: r.source_id, title: issueHeadline(r.headline, null, r.title || r.source_id), prod: [], exp: [] }));
     (r.kind === "EXPERIMENT" ? g.exp : g.prod).push(r);
   }
   return (
     <div className="runs">
       {groups.map((g) => (
         <section key={g.sid} className="run-group">
-          <a className="run-title" {...linkProps(`/issue/${encodeURIComponent(g.sid)}`)}><IssueTitle title={g.title} /></a>
+          <a className="run-title" {...linkProps(`/issue/${encodeURIComponent(g.sid)}`)}>{g.title}</a>
           <ol>{g.prod.map((r) => <RunRow key={r.id} r={r} reload={reload} />)}</ol>
           {g.exp.length > 0 && (
             <details className="fold mini">
@@ -79,8 +87,9 @@ function Runs({ runs, reload }: { runs: any[]; reload: () => void }) {
 
 export default function Engine() {
   const { data, error, loadedAt, reload } = usePoll<any>("/api/engine", 10000);
+  const phone = useMedia("(max-width: 900px)");
   useRestoreScroll(!!data);
-  if (!data) return error ? <Fault error={error} retry={reload} /> : <Unroll />;
+  if (!data) return <main className="page">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   const d = data.disk;
   const used = d.total - d.free;
   const pct = (x: number) => `${Math.max(0.4, (x / d.total) * 100)}%`;
@@ -113,9 +122,13 @@ export default function Engine() {
         <div className="inst">
           <Lamp state={yt ? "bad" : data.youtube.profile_ok ? "ok" : "idle"} label="YouTube 会话" />
           <div className="big">{yt ? "需要登录" : data.youtube.profile_ok ? "已就绪" : "未配置"}</div>
-          <div className="sub">远程屏幕登录需要先在电脑上建隧道：</div>
-          <Cmd text={SSH} />
-          <button className="btn sm inst-act" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
+          {phone ? <div className="sub">需要重新登录时，在电脑上打开机房操作。</div> : (
+            <>
+              <div className="sub">远程屏幕登录需要先在电脑上建隧道：</div>
+              <Cmd text={SSH} />
+              <button className="btn sm inst-act" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
+            </>
+          )}
         </div>
         <div className="inst">
           <Lamp state={data.notion.token && (data.notion.database || data.notion.parent) ? "ok" : "idle"} label="Notion 交付" />
@@ -152,11 +165,11 @@ export default function Engine() {
         <div>
           <div className="rule-title"><h2>日志</h2></div>
           <ol className="log" role="log">
-            {data.events.map((e: any) => (
+            {collapse(data.events).map((e: any) => (
               <li key={e.id} className={`lv-${e.level}`}>
                 <span className="when num" title={e.ts}>{clock(e.ts)}</span>
                 <span className="kind">{KIND[e.kind] || e.kind}</span>
-                <span className="msg">{humanize(e.message, data.stage_labels || {})}</span>
+                <span className="msg">{humanize(e.message, data.stage_labels || {})}{e.n > 1 && <span className="muted"> ×{e.n}</span>}</span>
               </li>
             ))}
           </ol>

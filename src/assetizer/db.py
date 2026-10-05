@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS sources (
   youtube_channel_id TEXT,
   channel_title TEXT,
   title TEXT,
+  headline TEXT,                                       -- 本期题眼 (article outline)
   published_at TEXT,
   duration REAL,
   info TEXT,
@@ -259,8 +260,17 @@ def connect() -> sqlite3.Connection:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=30000")
         conn.executescript(SCHEMA)
+        _migrate(conn)
         _local.conn, _local.path = conn, path
     return conn
+
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for databases created before the column existed."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(sources)")}
+    if "headline" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN headline TEXT")
 
 
 @contextmanager

@@ -11,6 +11,7 @@ Policy (ADR-3):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -21,6 +22,22 @@ import jsonschema
 
 from .providers.agy import AgyProvider, ProviderError, gemini_schema
 from .util import read_json, write_json
+
+
+def _fingerprint(*parts: Any) -> str:
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def _reusable(accepted: Path, key: str) -> bool:
+    """An accepted result is reused only for the same request (crash resume). A changed prompt or schema must
+    not be answered from cache; results written before fingerprints existed keep resuming as before."""
+    if not accepted.exists():
+        return False
+    k = accepted.with_suffix(".key")
+    if not k.exists() or k.read_text().strip() == key:
+        return True
+    accepted.rename(accepted.with_name(f"{accepted.stem}.stale-{int(time.time())}{accepted.suffix}"))
+    return False
 
 Recorder = Callable[[dict], None]
 
@@ -116,12 +133,14 @@ class LLM:
              media: list[str] | None = None, effort: str | None = None) -> str:
         d = Path(call_root) / stage
         accepted = d / "accepted.md"
-        if accepted.exists():
+        key = _fingerprint(prompt, media, effort)
+        if _reusable(accepted, key):
             return accepted.read_text()
         r = self._call(d / "attempt-1", stage, prompt, kind=stage, media=media, effort=effort)
         if len(r.text.strip()) < min_chars:
             raise ContractError("CONTENT_FAILURE", f"response only {len(r.text)} chars")
         accepted.write_text(r.text)
+        accepted.with_suffix(".key").write_text(key)
         return r.text
 
     def structured(self, call_root: Path, stage: str, prompt: str, schema: dict, *,
@@ -141,7 +160,8 @@ class LLM:
         """
         d = Path(call_root) / stage
         accepted = d / "accepted.json"
-        if accepted.exists():
+        key = _fingerprint(prompt, schema, media, effort, enforce)
+        if _reusable(accepted, key):
             return read_json(accepted)
         full_prompt = prompt if enforce else (
             prompt + "\n\n输出格式：只输出一个 JSON 对象，不要 Markdown 代码块、不要任何解释文字。必须符合以下 JSON Schema：\n"
@@ -178,6 +198,7 @@ class LLM:
             try:
                 obj = parse(r.text)
                 write_json(accepted, obj)
+                accepted.with_suffix(".key").write_text(key)
                 return obj
             except ContractError as e:
                 write_json(d / f"invalid-{n}.json", {"classification": e.kind, "detail": str(e)})
@@ -199,4 +220,5 @@ class LLM:
         rr = self._call(d / "contract-repair", stage + ":repair", repair_prompt, kind="contract-repair")
         obj = parse(rr.text)
         write_json(accepted, obj)
+        accepted.with_suffix(".key").write_text(key)
         return obj

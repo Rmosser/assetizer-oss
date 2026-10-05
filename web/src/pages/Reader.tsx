@@ -1,15 +1,16 @@
 import DOMPurify from "dompurify";
 import { marked, type Token, type Tokens } from "marked";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { media, post } from "../api";
-import { cleanUnitTitle, cnNo, plainIssueTitle, quotedFragments, splitTitle, typeset, Words } from "../cjk";
+import { createPortal } from "react-dom";
+import { media, post, srcSet } from "../api";
+import { cleanUnitTitle, cnNo, deJargon, endStop, issueHeadline, originalTitle, quotedFragments, typeset, Words } from "../cjk";
 import { Lightbox } from "../components/Lightbox";
 import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll, Empty } from "../components/States";
 import { Yin } from "../components/Yin";
 import { useMedia, useOnce, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDay, cnNum, DELIVERY, mins, REVIEW, tc } from "../util";
+import { cnDay, cnNum, cnYear, DELIVERY, mins, parseDay, REVIEW, tc } from "../util";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -91,11 +92,59 @@ function needleCandidates(f: Flag): string[] {
   if (f.evidence?.claim) c.push(f.evidence.claim);
   c.push(...quotedFragments(f.body || ""));
   c.push(...quotedFragments((f.title || "").replace(/^「[^」]*」/, "")));
-  return c.map((x) => typeset(x.trim())).filter((x) => x.length >= 4);
+  return c.map((x) => typeset(x.replace(/[*_`#>]/g, "").trim())).filter((x) => x.length >= 4);
 }
 
 /** the note's headline without the unit title it repeats: 「MRNA…」程度可能被加强 → 程度可能被加强 */
 const verbOf = (f: Flag) => (f.title || "").replace(/^「[^」]*」\s*/, "").trim() || f.title;
+/** older notes carry a category-only title (「单元」+ 类别); the pipeline now writes a specific one */
+const GENERIC = /^「[^」]*」\s*(片段|程度|陈述|归属|开头|结尾|边界|截图)/;
+function firstClause(s: string) {
+  const t = deJargon(s || "").split(/[。；]/)[0].trim();
+  if (t.length <= 40) return t;
+  const cut = t.lastIndexOf("，", 40);
+  return (cut > 12 ? t.slice(0, cut) : t.slice(0, 38)) + "…";
+}
+function headOf(f: Flag, needle?: string) {
+  if (!GENERIC.test(f.title || "")) return f.title || "";
+  const verb = verbOf(f);
+  if (needle) return `「${needle}」${verb.replace(/^片段/, "")}`;
+  return (f.body && firstClause(f.body)) || verb;
+}
+
+/* near-match 圈点: the sentence in one text node whose character bigrams best cover a candidate (≥ 0.6) */
+const bigrams = (s: string) => {
+  const t = s.replace(/[^\p{Script=Han}A-Za-z0-9]/gu, "");
+  const o = new Set<string>();
+  for (let i = 0; i < t.length - 1; i++) o.add(t.slice(i, i + 2));
+  return o;
+};
+const overlap = (a: Set<string>, b: Set<string>) => { let n = 0; a.forEach((x) => { if (b.has(x)) n++; }); return n / Math.max(1, Math.min(a.size, b.size)); };
+function wrapBest(root: HTMLElement, cands: string[], id: number): HTMLElement | null {
+  const cb = cands.map(bigrams).filter((b) => b.size >= 4);
+  if (!cb.length) return null;
+  let best: { n: Text; i: number; len: number; s: number } | null = null;
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode() as Text | null; n; n = w.nextNode() as Text | null) {
+    if ((n.parentElement as HTMLElement)?.closest("em.quan")) continue;
+    for (const m of n.data.matchAll(/[^。！？；]{8,}[。！？；]?/g)) {
+      const mb = bigrams(m[0]);
+      for (const c of cb) {
+        const sc = overlap(c, mb);
+        if (sc >= 0.6 && (!best || sc > best.s)) best = { n, i: m.index!, len: m[0].length, s: sc };
+      }
+    }
+  }
+  if (!best) return null;
+  const r = document.createRange();
+  r.setStart(best.n, best.i);
+  r.setEnd(best.n, best.i + best.len);
+  const em = document.createElement("em");
+  em.className = "quan near";
+  em.dataset.flag = String(id);
+  r.surroundContents(em);
+  return em;
+}
 
 /* ───────────────────────────── spine (desktop): 书口 with 鱼尾 ───────────────────────────── */
 function Spine({ title, duration, units, flags, missing, current, playhead, onJump }: {
@@ -121,7 +170,6 @@ function Spine({ title, duration, units, flags, missing, current, playhead, onJu
   for (let t = 600; t < duration - 120; t += 600) ticks.push(t);
   const ci = units.findIndex((u) => u.id === current);
   const act = ci >= 0 ? units[ci] : null;
-  const wide = w >= 70;
 
   return (
     <div className="spine">
@@ -143,6 +191,14 @@ function Spine({ title, duration, units, flags, missing, current, playhead, onJu
             const hollow = missing.has(u.id);
             return (
               <a key={u.id} href={`#u-${u.id}`} aria-label={`${cnNo(i + 1)} ${u.title} · ${tc(u.start)}`}
+                tabIndex={i === Math.max(0, ci) ? 0 : -1}
+                onKeyDown={(e) => {
+                  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+                  e.preventDefault();
+                  const k = Math.max(0, Math.min(units.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
+                  onJump(units[k].id);
+                  requestAnimationFrame(() => (box.current?.querySelectorAll("a")[k] as HTMLElement | undefined)?.focus());
+                }}
                 onClick={(e) => { e.preventDefault(); onJump(u.id); }}
                 onMouseEnter={() => setHover({ u, i, y: (y0 + y1) / 2 })} onFocus={() => setHover({ u, i, y: (y0 + y1) / 2 })} onBlur={() => setHover(null)}>
                 <rect x="0" y={y0} width={w} height={Math.max(6, y1 - y0)} fill="transparent" />
@@ -156,7 +212,7 @@ function Spine({ title, duration, units, flags, missing, current, playhead, onJu
           })}
           {playhead != null && <line x1="18" x2="35" y1={y(playhead)} y2={y(playhead)} className="sp-head" />}
           {act && (
-            <g className="sp-fish" style={{ transform: `translate(${wide ? 44 : 38}px, ${y(act.start) - 1}px)` }} aria-hidden>
+            <g className="sp-fish" style={{ transform: `translate(44px, ${y(act.start) - 1}px)` }} aria-hidden>
               <path d="M0 0H11V11L5.5 6.5L0 11Z" />
             </g>
           )}
@@ -311,7 +367,7 @@ function Film({ unit, clip, sub, poster, active, setActive, onTime, eager }: {
           onPause={() => onTime(null)} />
       ) : (
         <>
-          {poster && <img src={media(poster.id)} alt="" loading={eager ? "eager" : "lazy"} fetchPriority={eager ? "high" : "auto"}
+          {poster && <img src={media(poster.id, 1280)} srcSet={srcSet(poster.id)} sizes="(max-width: 900px) 100vw, 640px" alt="" loading={eager ? "eager" : "lazy"} fetchPriority={eager ? "high" : "auto"}
             onLoad={() => setReady(true)} onError={(e) => { (e.target as HTMLImageElement).style.visibility = "hidden"; }} />}
           <button className="play" onClick={() => setActive({ assetId: vid.id, unitId: unit.id, title: unit.title, time: 0, docked: false, clipStart: clip.start, seq: Date.now() })}
             aria-label={`播放：${unit.title}`}>
@@ -378,8 +434,7 @@ function Zhupi({ f, needle, onSet, playAt, focused, compact }: {
   useEffect(() => { if (focused) setOpen(true); }, [focused]);
   const resolved = f.resolution !== "OPEN";
   const info = f.severity === "INFO";
-  const verb = verbOf(f);
-  const head = needle ? `「${needle}」${verb.replace(/^片段/, "")}` : verb;
+  const head = info ? f.title : headOf(f, needle);
   const ev = f.evidence || {};
   const long = (ev.quote || "").length > 70;
   const src = f.origin === "AI_CHECK" ? "AI 预审" : f.origin === "MACHINE_QA" ? "机检" : "";
@@ -391,23 +446,27 @@ function Zhupi({ f, needle, onSet, playAt, focused, compact }: {
       <div className="zhupi done" data-flag={f.id}>
         <span className="done-line"><Gou play={fresh} /> {RESOLVED[f.resolution] || "已处理"}<span className="sep">·</span>
           <button className="link" onClick={() => set("OPEN")}>撤回</button></span>
-        <span className="done-h">{typeset(head)}</span>
+        <span className="done-h"><Words>{head}</Words></span>
       </div>
     );
   }
   return (
     <div className={`zhupi${info ? " info" : ""}${focused ? " flash" : ""}${compact ? " compact" : ""}${compact && !open ? " shut" : ""}`} data-flag={f.id}
       onMouseEnter={() => quan(true)} onMouseLeave={() => quan(false)}>
-      <div className="k" onClick={compact ? () => setOpen(!open) : undefined}>
-        <i className="pi-mark" aria-hidden>{info ? "注" : "批"}</i>
-        <span>{flagKind(f.kind)}</span>
-        {src && <span className="src">{src}</span>}
-        {compact && <i className={`chev${open ? " up" : ""}`} aria-hidden />}
-      </div>
-      <h5 onClick={compact ? () => setOpen(!open) : undefined}>{typeset(head)}</h5>
+      {compact ? (
+        <button className="zp-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
+          <span className="k"><i className="pi-mark" aria-hidden>批</i><span>{flagKind(f.kind)}</span>{src && <span className="src">{src}</span>}<i className={`chev${open ? " up" : ""}`} aria-hidden /></span>
+          <h5><Words>{head}</Words></h5>
+        </button>
+      ) : (
+        <>
+          <div className="k"><i className="pi-mark" aria-hidden>{info ? "注" : "批"}</i><span>{flagKind(f.kind)}</span>{src && <span className="src">{src}</span>}</div>
+          <h5><Words>{head}</Words></h5>
+        </>
+      )}
       <div className="zp-body">
         <div>
-          {f.body && <p>{typeset(f.body)}</p>}
+          {f.body && <p>{typeset(endStop(deJargon(f.body)))}</p>}
           {ev.quote && (
             <blockquote className={`q${long ? (more ? " open" : " clamp") : ""}`} onClick={long && !more ? () => setMore(true) : undefined}>
               {ev.t != null ? (
@@ -416,7 +475,7 @@ function Zhupi({ f, needle, onSet, playAt, focused, compact }: {
                   <span className="num">{tc(ev.t)}</span>
                 </button>
               ) : null}
-              「{typeset(ev.quote)}」
+              <span className="q-text">「{typeset(ev.quote)}」</span>
             </blockquote>
           )}
           {ev.start && ev.end && !ev.quote && <p className="ev-range num">{ev.start} – {ev.end}</p>}
@@ -518,10 +577,10 @@ function UnitControls({ clip, setPub, setEmbed, onNudge, nudging }: { clip: Asse
 }
 
 /* ───────────────────────────── unit ───────────────────────────── */
-function UnitSection({ n, u, section, assets, flags, facets, active, setActive, playAt, onTime, reload, onShot, sourceId, focusFlag, onSetFlag, mobile }: {
+function UnitSection({ n, u, section, assets, flags, facets, active, setActive, playAt, onTime, reload, onShot, sourceId, focusFlag, onSetFlag, mobile, inline }: {
   n: number; u: Unit; section: any; assets: Asset[]; flags: Flag[]; facets: any[]; active: Active; setActive: (a: Active) => void;
   playAt: (unitId: string, t: number) => boolean; onTime: (t: number | null) => void; reload: () => void; onShot: (shots: Asset[], i: number) => void;
-  sourceId: string; focusFlag: number | null; onSetFlag: (f: Flag, r: string) => void; mobile: boolean;
+  sourceId: string; focusFlag: number | null; onSetFlag: (f: Flag, r: string) => void; mobile: boolean; inline: boolean;
 }) {
   const [nudging, setNudging] = useState(false);
   const [more, setMore] = useState(false);
@@ -549,14 +608,17 @@ function UnitSection({ n, u, section, assets, flags, facets, active, setActive, 
     for (const f of review) {
       let em = root.querySelector<HTMLElement>(`em.quan[data-flag="${f.id}"]`);
       if (!em) {
-        for (const c of needleCandidates(f)) {
+        const cands = needleCandidates(f);
+        for (const c of cands) {
           if (!root.textContent?.includes(c)) continue;
           em = wrapText(root, c, f.id);
           if (em) break;
         }
+        if (!em) em = wrapBest(root, cands, f.id);
       }
       if (em) {
-        found[f.id] = em.textContent || "";
+        // an exact match names the questioned words in the note's headline; a near match only marks the sentence
+        if (!em.classList.contains("near")) found[f.id] = em.textContent || "";
         em.classList.toggle("done", f.resolution !== "OPEN");
       }
     }
@@ -575,19 +637,19 @@ function UnitSection({ n, u, section, assets, flags, facets, active, setActive, 
       <article className={`unit${u.decision === "REJECTED" ? " rejected" : ""}${anyOpen ? " has-pi" : ""}`} id={`u-${u.id}`} data-unit={u.id} data-no={cnNo(n)}>
         <div className="unit-meta">
           <span className="no">{cnNo(n)}</span>
-          <span className="num">{tc(u.start)} – {tc(u.end)}</span>
+          <span className="num">{tc(u.start)}<span className="to">–</span>{tc(u.end)}</span>
           {u.learning_priority === 3 && <span className="tag must">必学</span>}
           {(u.tickers || []).slice(0, 5).map((t: string) => <span key={t} className="tag tk">{t}</span>)}
         </div>
         <h2 className="unit-title"><Words>{heading}</Words></h2>
-        {mobile && review.length > 0 && <div className="pi-cards">{review.map((f) => zp(f, true))}</div>}
+        {inline && review.length > 0 && <div className="pi-cards">{review.map((f) => zp(f, true))}</div>}
         <Film unit={u} clip={clip} sub={sub} poster={poster} active={active} setActive={setActive} onTime={onTime} eager={n <= 2} />
         {shots.length > 0 && (
           <div className={`shots${shots.length === 1 ? " one" : ""}`}>
             {shots.map((s, i) => (
               <figure className="shot" key={s.id}>
                 <button className="shot-btn" onClick={() => onShot(shots, i)} aria-label={`放大截图 ${tc(s.start)}`}>
-                  <img src={media(s.id)} alt={s.meta?.reason || ""} loading="lazy" width={1920} height={1080} />
+                  <img src={media(s.id, 640)} srcSet={srcSet(s.id)} sizes="(max-width: 900px) 84vw, 320px" alt={s.meta?.reason || ""} loading="lazy" width={1920} height={1080} />
                 </button>
                 <figcaption><span className="num">{tc(s.start)}</span>{s.meta?.reason && typeset(s.meta.reason)}</figcaption>
               </figure>
@@ -625,7 +687,7 @@ function UnitSection({ n, u, section, assets, flags, facets, active, setActive, 
         )}
       </article>
       <aside className="margin" aria-label="朱批">
-        {!mobile && review.length > 0 && <div className="margin-stack">{review.map((f) => zp(f))}</div>}
+        {!inline && review.length > 0 && <div className="margin-stack">{review.map((f) => zp(f))}</div>}
         {notes.length > 0 && (
           <details className="notes">
             <summary>{`注记 ${notes.length} 条`}</summary>
@@ -699,6 +761,7 @@ function Stepper({ count, pos, onStep, done, mobile }: { count: number; pos: num
 }
 
 function ReviewSheet({ open, review, onSet, onClose }: { open: number; review: string; onSet: (r: string) => void; onClose: () => void }) {
+  const [armed, setArmed] = useState(false);
   const opts: [string, string, string][] = [
     ["APPROVED", "审定并钤印", open > 0 ? `还有 ${open} 处朱批未处理，仍可审定` : "这一期作为学习版本定稿"],
     ["CHANGES_REQUESTED", "需修改", "有地方要改，先不定稿"],
@@ -708,14 +771,35 @@ function ReviewSheet({ open, review, onSet, onClose }: { open: number; review: s
     <Sheet title="审阅这一期" onClose={onClose}>
       <div className="review-opts">
         {opts.map(([k, label, desc]) => (
-          <button key={k} className={`${review === k ? "on" : ""} ${k === "APPROVED" ? "primary" : ""} ${k === "REJECTED" ? "danger" : ""}`}
-            onClick={() => { onSet(k); onClose(); }}>
-            <b>{label}</b><span>{desc}</span>
+          <button key={k} className={`${review === k ? "on" : ""} ${k === "APPROVED" && open === 0 ? "primary" : ""} ${k === "REJECTED" ? "danger" : ""}${k === "REJECTED" && armed ? " armed" : ""}`}
+            onClick={() => { if (k === "REJECTED" && !armed) { setArmed(true); return; } onSet(k); onClose(); }}>
+            <b>{k === "REJECTED" && armed ? "再点一次，确认驳回" : label}</b><span>{desc}</span>
           </button>
         ))}
         {review === "APPROVED" && <button onClick={() => { onSet("IN_REVIEW"); onClose(); }}><b>撤回审定</b><span>回到审阅中</span></button>}
       </div>
     </Sheet>
+  );
+}
+
+/* ───────────────────────────── 牌记: the issue's colophon, set vertically like the end of a woodblock book ───────────────────────────── */
+function Paiji({ kicker, source, units, flags, fresh }: { kicker: string; source: any; units: Unit[]; flags: Flag[]; fresh: boolean }) {
+  const review = flags.filter(isReview);
+  const by = (r: string) => review.filter((f) => f.resolution === r).length;
+  const open = by("OPEN");
+  const must = units.filter((u) => u.learning_priority === 3).length;
+  const pub = parseDay(source.published_at);
+  const approved = source.review === "APPROVED";
+  const judged = [by("ACCEPTED") && `无误${cnNum(by("ACCEPTED"))}`, by("FIXED") && `改${cnNum(by("FIXED"))}`, by("DISMISSED") && `略${cnNum(by("DISMISSED"))}`].filter(Boolean).join("、");
+  return (
+    <div className="paiji" role="note" aria-label="本期牌记">
+      <p>资产刊 · {kicker}</p>
+      {pub && <p>原讲于{cnYear(pub.getFullYear())}年{cnDay(source.published_at)}</p>}
+      <p>{cnNum(units.length)}单元，必学{cnNum(must)}</p>
+      <p>朱批{cnNum(review.length)}处{open ? `，尚余${cnNum(open)}处` : judged ? `：${judged}` : ""}</p>
+      <p className="paiji-last">{approved ? `${cnDay(source.review_at)}审定` : "待审定"}</p>
+      <span className="paiji-seal">{approved ? <Yin size={58} fresh={fresh} /> : <i className="yin-slot" aria-hidden />}</span>
+    </div>
   );
 }
 
@@ -753,6 +837,9 @@ export default function Reader({ id }: { id: string }) {
   const [fresh, setFresh] = useState(false);
   const [playhead, setPlayhead] = useState<number | null>(null);
   const [stuck, setStuck] = useState(false);
+  const [stamp, setStamp] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const inline = useMedia("(max-width: 1240px)");
   const [noteSeen, markNote] = useOnce("az-margin-note");
   const sentinel = useRef<HTMLDivElement>(null);
   const setActive = useCallback((a: Active) => setActiveState(a), []);
@@ -766,9 +853,11 @@ export default function Reader({ id }: { id: string }) {
   const queue: Flag[] = useMemo(() => flags.filter(isOpen).sort((a, b) =>
     (order[a.target_id] ?? -1) - (order[b.target_id] ?? -1) || a.id - b.id), [flags, order]);
 
+  const firstMust = units.find((u) => u.learning_priority === 3);
+  const headline = data?.source ? issueHeadline(data.source.headline, firstMust?.title, data.source.title || data.source.id) : "";
   useEffect(() => {
-    if (data?.source) document.title = `${plainIssueTitle(data.source.title || data.source.id)} · 资产刊`;
-  }, [data?.source?.title]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (headline) document.title = `${headline} · 资产刊`;
+  }, [headline]);
 
   useEffect(() => {
     if (!units.length) return;
@@ -789,9 +878,21 @@ export default function Reader({ id }: { id: string }) {
     return () => io.disconnect();
   }, [!!data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const jump = useCallback((uid: string, smooth = true) => {
-    document.getElementById(`u-${uid}`)?.scrollIntoView({ behavior: smooth && !reduceMotion() ? "smooth" : "auto" });
+  /** units below the fold are lazily laid out (content-visibility) and their stills lazily loaded:
+   *  wake the target first, then scroll, then correct once the real height is known */
+  const land = useCallback((el: HTMLElement | null, opts: ScrollIntoViewOptions) => {
+    if (!el) return;
+    el.closest(".unit")?.querySelectorAll<HTMLImageElement>("img[loading=lazy]").forEach((i) => { i.loading = "eager"; });
+    el.scrollIntoView({ ...opts, behavior: reduceMotion() ? "auto" : opts.behavior });
+    const before = el.getBoundingClientRect().top;
+    setTimeout(() => {
+      const now = el.getBoundingClientRect().top;
+      if (Math.abs(now - before) > 0 && Math.abs(now) > innerHeight) el.scrollIntoView({ ...opts, behavior: "auto" });
+    }, 750);
   }, []);
+  const jump = useCallback((uid: string, smooth = true) => {
+    land(document.getElementById(`u-${uid}`), { behavior: smooth ? "smooth" : "auto" });
+  }, [land]);
 
   // deep link from the home page: /issue/x#u-<unit>
   useEffect(() => {
@@ -804,10 +905,16 @@ export default function Reader({ id }: { id: string }) {
     setFocusFlag(f.id);
     setTimeout(() => setFocusFlag((x) => (x === f.id ? null : x)), 1600);
     const visible = (sel: string) => [...document.querySelectorAll<HTMLElement>(sel)].find((e) => e.offsetParent !== null);
-    const target = visible(`em.quan[data-flag="${f.id}"]`) || visible(`.zhupi[data-flag="${f.id}"]`);
-    if (target) target.scrollIntoView({ block: "center", behavior: reduceMotion() ? "auto" : "smooth" });
+    const quan = visible(`em.quan[data-flag="${f.id}"]`);
+    document.querySelectorAll(`em.quan[data-flag="${f.id}"]`).forEach((e) => {
+      e.classList.add("focus");
+      setTimeout(() => e.classList.remove("focus"), 1800);
+    });
+    // three columns: the circled sentence lands level with the sticky note; stacked layouts centre it
+    const target = (inline ? visible(`.zhupi[data-flag="${f.id}"]`) : quan) || quan || visible(`.zhupi[data-flag="${f.id}"]`);
+    if (target) land(target, { block: inline ? "center" : "start", behavior: "smooth" });
     else if (f.target_id) jump(f.target_id);
-  }, [jump]);
+  }, [jump, land, inline]);
 
   const step = useCallback((d: number) => {
     if (!queue.length) return;
@@ -855,7 +962,7 @@ export default function Reader({ id }: { id: string }) {
     return () => removeEventListener("keydown", on);
   }, [units, current, jump, step]);
 
-  if (!data) return error ? <Fault error={error} retry={reload} /> : <Unroll />;
+  if (!data) return <main className="page">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   const { source, run, assets, sections, playbook, channel } = data;
   const secByUnit: Record<string, any> = {};
   sections.forEach((s: any) => s.unit_ids?.forEach((u: string) => (secByUnit[u] = s)));
@@ -869,26 +976,35 @@ export default function Reader({ id }: { id: string }) {
   const kicker = `${channel?.name || source.channel_title || "未识别频道"} · 第${cnNum(data.no || 1)}期`;
   const setReview = async (r: string) => {
     await post(`/api/sources/${source.id}/review`, { review: r });
-    if (r === "APPROVED") { setFresh(true); try { navigator.vibrate?.(10); } catch { /* ignore */ } }
+    if (r === "APPROVED") {
+      // the seal is pressed where the reader is looking, then settles into the head and the colophon
+      setFresh(true); setStamp(true); setTimeout(() => setStamp(false), 1600);
+      try { navigator.vibrate?.(10); } catch { /* ignore */ }
+    } else if (approved) {
+      setFresh(false); setLeaving(true); setTimeout(() => setLeaving(false), 320);
+    }
     reload();
   };
+  const mustPoster = firstMust && assets.find((a: Asset) => a.kind === "poster" && a.unit_id === firstMust.id);
+  const showYin = approved || leaving;
   const ci = Math.max(0, units.findIndex((u) => u.id === current));
-  const st = splitTitle(source.title || source.id);
+  const orig = originalTitle(source.title || source.id);
+  const must = units.filter((u) => u.learning_priority === 3).length;
 
   return (
     <main className="page reader-page">
       <Progress />
       <Stale error={error} loadedAt={loadedAt} />
       <header className={`reader-head${fresh ? " pressed" : ""}`}>
-        <div className={`head-in${approved ? " has-yin" : ""}`}>
+        <div className={`head-in${showYin ? " has-yin" : ""}${!inline && mustPoster ? " has-fig" : ""}`}>
         <a className="crumb" {...linkProps("/")}><span aria-hidden>←</span> 目录</a>
         <div className="kicker">{kicker}</div>
-        <h1><Words>{st.head}</Words></h1>
-        {st.dek && <p className="dek"><Words>{st.dek}</Words></p>}
+        <h1><Words>{headline}</Words></h1>
+        {orig !== headline && <p className="dek"><span className="dek-k">原题</span><Words>{orig}</Words></p>}
         <div className="reader-meta">
           <span>{cnDay(source.published_at)}</span>
           <span><span className="num">{Math.round((source.duration || 0) / 60)}</span> 分钟</span>
-          <span><span className="num">{units.length}</span> 单元</span>
+          <span><span className="num">{units.length}</span> 单元（必学 <span className="num">{must}</span>）</span>
           <span><span className="num">{clips.length}</span> 段片段</span>
         </div>
         <div className="reader-links">
@@ -899,7 +1015,21 @@ export default function Reader({ id }: { id: string }) {
             <button className="btn sm zhu" onClick={() => setTracking(!tracking)}>加入长期关注</button>
           )}
         </div>
-        {approved && <div className="head-yin"><Yin size={mobile ? 64 : 96} fresh={fresh} /><span className="yin-date">{cnDay(source.review_at)}审定</span></div>}
+        {!inline && mustPoster ? (
+          <div className="head-fig">
+            <a href={`#u-${firstMust.id}`} onClick={(e) => { e.preventDefault(); jump(firstMust.id); }} aria-label={`必学：${firstMust.title}`}>
+              <span className="head-fig-img"><img src={media(mustPoster.id, 640)} alt="" /></span>
+              <span className="head-fig-cap"><span className="label">必学</span><Words>{firstMust.title}</Words></span>
+            </a>
+            {/* the seal presses the frame's lower-left corner */}
+            {showYin && <div className={`head-yin${leaving ? " leaving" : ""}`}><Yin size={92} fresh={fresh} />{approved && <span className="yin-date">{cnDay(source.review_at)}审定</span>}</div>}
+          </div>
+        ) : showYin && (
+          <div className={`head-yin${leaving ? " leaving" : ""}`}>
+            <Yin size={mobile ? 64 : 92} fresh={fresh} />
+            {approved && <span className="yin-date">{cnDay(source.review_at)}审定</span>}
+          </div>
+        )}
         {tracking && <Track source={source} onDone={() => { setTracking(false); reload(); }} />}
         </div>
       </header>
@@ -909,10 +1039,10 @@ export default function Reader({ id }: { id: string }) {
         <div className="rb-inner">
           {mobile ? (
             <button className="rb-count" onClick={() => setIndexOpen(true)} aria-label="打开单元目录">
-              <span className="num">{String(ci + 1).padStart(2, "0")}</span><em className="num">/{units.length}</em>
+              <span><span className="num">{String(ci + 1).padStart(2, "0")}</span><em className="num">/{units.length}</em></span>
             </button>
           ) : (
-            <span className="rb-state">{approved ? <Yin size={26} /> : null}{REVIEW[source.review]}</span>
+            <span className="rb-state">{approved ? <Yin size={26} fresh={fresh} /> : null}{REVIEW[source.review]}</span>
           )}
           <Stepper count={queue.length} pos={queue.length ? Math.min(pos, queue.length - 1) : -1} onStep={step} done={approved} mobile={mobile} />
           {!mobile && (
@@ -964,7 +1094,7 @@ export default function Reader({ id }: { id: string }) {
             {runFlags.filter(isReview).map((f: Flag) => (
               <Zhupi key={f.id} f={f} onSet={onSetFlag} playAt={playAt} focused={focusFlag === f.id} />
             ))}
-            {!mobile && !noteSeen && (
+            {!inline && !noteSeen && !approved && (
               <p className="margin-note">朱批落在这一栏：系统对条件、归属、边界没有把握的地方，会在对应段落旁标出，并在正文里用朱圈圈出原句。
                 <button className="link" onClick={markNote}>知道了</button></p>
             )}
@@ -978,21 +1108,19 @@ export default function Reader({ id }: { id: string }) {
           {units.map((u, i) => (
             <UnitSection key={u.id} n={i + 1} sourceId={source.id} u={u} section={secByUnit[u.id]} assets={assets} facets={playbook?.facets}
               flags={flags.filter((f: Flag) => f.target_id === u.id)} active={active} setActive={setActive} playAt={playAt} onTime={onTime}
-              reload={reload} onShot={(shots, k) => setLb({ shots, i: k })} focusFlag={focusFlag} onSetFlag={onSetFlag} mobile={mobile} />
+              reload={reload} onShot={(shots, k) => setLb({ shots, i: k })} focusFlag={focusFlag} onSetFlag={onSetFlag} mobile={mobile} inline={inline} />
           ))}
           {outro.map((s: any) => (
             <div key={s.id} className="article unit outro"><div className="prose" dangerouslySetInnerHTML={{ __html: s.html }} /></div>
           ))}
           <section className="article end" aria-label="阅毕">
             <div className="end-mark" aria-hidden><span>阅</span><span>毕</span></div>
-            {approved ? (
-              <div className="end-row"><Yin size={72} /><p>这一期已于{cnDay(source.review_at)}审定。</p></div>
-            ) : (
+            <Paiji kicker={kicker} source={source} units={units} flags={flags} fresh={fresh} />
+            {!approved && (
               <div className="end-row">
-                <p>{queue.length > 0 ? <>尚余朱批 <span className="num">{queue.length}</span> 处。</> : "朱批已清，可以审定。"}</p>
-                {queue.length > 0 && <button className="btn" onClick={() => step(1)}>去处理</button>}
+                {queue.length > 0 && <button className="btn" onClick={() => step(1)}>去处理朱批</button>}
                 <Confirm className={`btn${queue.length === 0 ? " solid" : ""}`} needs={queue.length > 0} arm={`还有 ${queue.length} 处，仍然审定？`}
-                  onConfirm={() => { setReview("APPROVED"); window.scrollTo({ top: 0, behavior: reduceMotion() ? "auto" : "smooth" }); }}>审定并钤印</Confirm>
+                  onConfirm={() => setReview("APPROVED")}>审定并钤印</Confirm>
               </div>
             )}
           </section>
@@ -1001,6 +1129,7 @@ export default function Reader({ id }: { id: string }) {
 
       <Dock active={active} setActive={setActive} onTime={onTime} onBack={() => { if (active) { jump(active.unitId); setActive({ ...active, docked: false, seq: Date.now() }); } }} />
       {lb && <Lightbox shots={lb.shots} index={lb.i} onClose={() => setLb(null)} />}
+      {stamp && createPortal(<div className="stamp-overlay" aria-hidden><Yin size={mobile ? 132 : 180} fresh /></div>, document.body)}
     </main>
   );
 }

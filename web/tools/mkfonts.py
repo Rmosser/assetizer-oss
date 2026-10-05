@@ -7,7 +7,7 @@ feats = sorted({fr.FeatureTag for fr in src["GPOS"].table.FeatureList.FeatureRec
 print("GPOS features:", feats)
 print("GSUB features:", sorted({fr.FeatureTag for fr in src["GSUB"].table.FeatureList.FeatureRecord}))
 out = "out"; os.makedirs(out, exist_ok=True)
-PUNCT = "U+3000-3003,U+3008-3011,U+3014-301F,U+FF01-FF0F,U+FF1A-FF20,U+FF3B-FF40,U+FF5B-FF65,U+2014,U+2018-2019,U+201C-201D,U+2026"
+PUNCT = "U+3000-3003,U+3008-3011,U+3014-301F,U+FF01-FF0F,U+FF1A-FF20,U+FF3B-FF40,U+FF5B-FF65,U+2018-2019,U+201C-201D,U+2026"
 WEEKDAY = "〇一二三四五六七八九十月日年星期频道机房刊审定"
 def build(w, unicodes=None, text=None, name=""):
     f = instancer.instantiateVariableFont(TTFont("NotoSerifSC-VF.ttf"), {"wght": w}, updateFontNames=False)
