@@ -1,6 +1,7 @@
 """FastAPI app: JSON API + media + the built SPA."""
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -15,14 +16,43 @@ from ..util import now
 
 app = FastAPI(title="Assetizer", docs_url="/api/docs")
 STATIC = Path(__file__).with_name("static").resolve()
-ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
+PUBLIC_HOST = os.environ.get("ASSETIZER_PUBLIC_HOST", "").lower()          # e.g. kan.example.com
+ACCESS_TEAM = os.environ.get("ASSETIZER_ACCESS_TEAM", "")                  # e.g. example-team
+ACCESS_AUD = os.environ.get("ASSETIZER_ACCESS_AUD", "")
+_certs: dict = {"at": 0.0, "keys": None}
+
+
+def _access_ok(token: str | None) -> bool:
+    """Verify the Cloudflare Access JWT (RS256, aud, issuer, expiry) — defence in depth behind the tunnel."""
+    if not token or not ACCESS_TEAM or not ACCESS_AUD:
+        return False
+    import time
+
+    import jwt
+    issuer = f"https://{ACCESS_TEAM}.cloudflareaccess.com"
+    try:
+        if _certs["keys"] is None or time.time() - _certs["at"] > 3600:
+            _certs["keys"] = jwt.PyJWKClient(f"{issuer}/cdn-cgi/access/certs")
+            _certs["at"] = time.time()
+        key = _certs["keys"].get_signing_key_from_jwt(token).key
+        jwt.decode(token, key, algorithms=["RS256"], audience=ACCESS_AUD, issuer=issuer)
+        return True
+    except Exception:  # noqa: BLE001 — any failure means no access
+        return False
 
 
 @app.middleware("http")
 async def guard(request: Request, call_next):
-    """Loopback app behind an SSH tunnel: block DNS rebinding and cross-site form posts."""
+    """Loopback app: local Host via SSH tunnel, or the public Host only with a valid Access JWT.
+    Also blocks DNS rebinding and cross-site form posts."""
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
-    if host not in ALLOWED_HOSTS:
+    if host in LOCAL_HOSTS:
+        pass
+    elif PUBLIC_HOST and host == PUBLIC_HOST:
+        if not _access_ok(request.headers.get("cf-access-jwt-assertion")):
+            return JSONResponse({"error": "access required"}, status_code=403)
+    else:
         return JSONResponse({"error": "host not allowed"}, status_code=403)
     if request.method == "POST" and not (request.headers.get("content-type") or "").startswith("application/json"):
         return JSONResponse({"error": "json required"}, status_code=415)

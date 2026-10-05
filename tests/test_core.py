@@ -139,3 +139,19 @@ def test_safety_block_detection():
 
 def test_network_errors_are_transient():
     assert classify_error('request failed: read tcp 1.2.3.4:1->5.6.7.8:443: read: connection reset by peer') == "PROVIDER_TRANSIENT"
+
+
+def test_public_host_requires_access_jwt(tmp_path, monkeypatch):
+    import dataclasses
+    from fastapi.testclient import TestClient
+    from assetizer import config
+    from assetizer.web import app as web
+    config.override(dataclasses.replace(config.load(), home=tmp_path))
+    monkeypatch.setattr(web, "PUBLIC_HOST", "kan.example.com")
+    monkeypatch.setattr(web, "ACCESS_TEAM", "example-team")
+    monkeypatch.setattr(web, "ACCESS_AUD", "x" * 64)
+    c = TestClient(web.app)
+    assert c.get("/api/overview", headers={"host": "kan.example.com"}).status_code == 403
+    assert c.get("/api/overview", headers={"host": "kan.example.com", "cf-access-jwt-assertion": "forged"}).status_code == 403
+    assert c.get("/api/overview", headers={"host": "evil.example"}).status_code == 403
+    assert c.get("/api/overview", headers={"host": "127.0.0.1:8770"}).status_code == 200
