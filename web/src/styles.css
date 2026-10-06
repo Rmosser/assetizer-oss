@@ -157,6 +157,11 @@ body {
   hanging-punctuation: allow-end;
 }
 h1, h2, h3, h4, h5, .yaomu-row .t, .musts a, .dek, .toc-title h3, .run-title { text-wrap: balance; }
+/* no text-wrap: pretty on paragraphs — Safari re-balances the whole paragraph (21 → 17 字 per line) and
+   justification then spreads the characters apart */
+/* contextual half-width punctuation from the font (AZ Punct carries chws): Safari has no text-spacing-trim,
+   Chrome does the same squeeze either way. The font shorthand resets feature settings, hence the !important. */
+*, *::before, *::after { font-feature-settings: "chws" 1 !important; }
 
 /* ───────────────────────── utilities ───────────────────────── */
 .num { font-variant-numeric: tabular-nums lining-nums; letter-spacing: 0; }
@@ -186,9 +191,9 @@ h1, h2, h3, h4, h5, .yaomu-row .t, .musts a, .dek, .toc-title h3, .run-title { t
   position: sticky; top: 0; z-index: 30;
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
   height: calc(var(--mh) + var(--safe-t)); padding: var(--safe-t) var(--gutter) 0;
-  background: color-mix(in srgb, var(--paper) 88%, transparent);
-  backdrop-filter: blur(14px) saturate(1.2);
-  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  /* solid paper: the grain is printed above it, so it reads as the same sheet; Safari let content show
+     through a 95% fill and through the blur */
+  background: var(--paper);
   border-bottom: 1px solid var(--rule);
   transition: transform 0.28s var(--ease);
 }
@@ -323,8 +328,7 @@ details[open] > summary .plus { transform: rotate(45deg); }
 .hero-date .yw { display: flex; gap: 1em; margin-top: 20px; font: 400 15px var(--serif); letter-spacing: 0.12em; color: var(--ink-2); }
 .hero-title { margin: 0; font: 900 clamp(56px, 7vw, 104px)/0.95 var(--display); }
 .page-hero { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); }
-.hero-lede { font: 400 18px/1.8 var(--serif); color: var(--ink-2); margin: 0; text-align: justify; text-wrap: pretty; }
-.decision p, .colophon, .state-block p, .zhupi p, .margin-note, .shot figcaption, .facet dd, .why, .rule p { text-wrap: pretty; }
+.hero-lede { font: 400 18px/1.8 var(--serif); color: var(--ink-2); margin: 0; text-align: justify; }
 .hero-lede strong { color: var(--ink); font-weight: 700; }
 .zhupi-link {
   display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
@@ -484,8 +488,7 @@ details[open] > summary .plus { transform: rotate(45deg); }
 .reviewbar {
   position: sticky; top: var(--top); z-index: 20;
   margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter);
-  background: color-mix(in srgb, var(--paper) 90%, transparent);
-  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  background: var(--paper);
   border-bottom: 1px solid transparent;
   transition: border-color 0.3s, top 0.28s var(--ease);
 }
@@ -545,7 +548,7 @@ details[open] > summary .plus { transform: rotate(45deg); }
 .article { min-width: 0; }
 .article.lead { padding-top: var(--s6); }
 .prose { font: 400 18px/1.85 var(--serif); color: var(--ink); }
-.prose p { margin: 0 0 1em; text-align: justify; text-wrap: pretty; }
+.prose p { margin: 0 0 1em; text-align: justify; }
 .prose.lede p:first-child { font-size: 19.5px; line-height: 1.8; }
 .prose h1, .prose h2, .prose h3 { font-family: var(--serif); line-height: 1.4; }
 .prose h2 { font-size: 23px; margin: 1.8em 0 0.6em; font-weight: 700; }
@@ -673,7 +676,7 @@ details[open] > summary .plus { transform: rotate(45deg); }
 .zhupi h5 { margin: var(--s2) 0 var(--s1); font: 700 15.5px/1.6 var(--serif); color: var(--ink); }
 .zhupi p { margin: var(--s1) 0; text-align: justify; }
 .zhupi blockquote { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; align-items: baseline; margin: var(--s3) 0; padding: 2px 0 2px var(--s3); border-left: 2px solid var(--zhu); font: 14px/1.7 var(--serif); color: var(--ink); }
-.zhupi blockquote .q-text { grid-column: -2; text-wrap: pretty; }
+.zhupi blockquote .q-text { grid-column: -2; }
 .zhupi blockquote.clamp .q-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
 .zhupi .ev {
   position: relative; display: inline-flex; align-items: center; gap: 5px; height: 22px; margin-right: 6px; padding: 0 7px; vertical-align: 1px;
@@ -1152,3 +1155,6 @@ dialog { color: var(--ink); }
   .channel-main > .why + .ingest, .channel-main > .why + details.fold { margin-top: var(--s5); }
   .editor-open { margin-top: var(--s4); }
 }
+
+/* Safari hangs a line-end comma outside the text box; a 16px phone gutter is narrower than the 17px glyph */
+@media (max-width: 900px) { body { hanging-punctuation: none; } }
