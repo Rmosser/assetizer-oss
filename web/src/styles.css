@@ -1158,3 +1158,25 @@ dialog { color: var(--ink); }
 
 /* Safari hangs a line-end comma outside the text box; a 16px phone gutter is narrower than the 17px glyph */
 @media (max-width: 900px) { body { hanging-punctuation: none; } }
+
+/* 翻开 — page turn between pages (View Transitions; skipped under reduced motion) */
+::view-transition-old(root) { animation: 0.32s var(--ease) both turn-out; }
+::view-transition-new(root) { animation: 0.42s var(--ease) both turn-in; }
+@keyframes turn-out { to { opacity: 0; transform: translateX(-2.5%); } }
+@keyframes turn-in { from { opacity: 0; transform: translateX(3%); } }
+
+/* archive: issues older than sixty days are a single line */
+.toc-row.compact { grid-template-columns: 3.2em minmax(0, 1fr) auto; min-height: 44px; padding: var(--s2) 0; }
+.toc-row.compact .cover { display: none; }
+.toc-row.compact .toc-title { display: flex; align-items: baseline; gap: var(--s4); min-width: 0; }
+.toc-row.compact .toc-title h3 { font-size: 15.5px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.toc-row.compact .toc-title .meta { margin: 0; white-space: nowrap; }
+@media (max-width: 640px) {
+  .toc-row.compact { grid-template-columns: minmax(0, 1fr) auto; }
+  .toc-row.compact .toc-title h3 { display: block; -webkit-line-clamp: unset; white-space: nowrap; }
+}
+/* Chrome still breaks at <wbr> under white-space: nowrap (WebKit does not); single-line titles drop the phrase joints */
+.toc-row.compact h3 wbr, .dock-title wbr, .sk-bubble wbr { display: none; }
+/* the masthead stays put while the page turns under it */
+.masthead { view-transition-name: masthead; }
+::view-transition-group(masthead), ::view-transition-old(masthead), ::view-transition-new(masthead) { animation: none; }

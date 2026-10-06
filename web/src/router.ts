@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from "react";
+import { flushSync } from "react-dom";
 
 // pages restore their own scroll position once their data is on screen
 if ("scrollRestoration" in history) history.scrollRestoration = "manual";
@@ -11,8 +12,11 @@ export function navigate(to: string, opts: { replace?: boolean } = {}) {
   if (opts.replace) history.replaceState({ y: 0 }, "", to);
   else history.pushState({ y: 0 }, "", to);
   pendingY = null;
-  window.dispatchEvent(new Event("az:nav"));
-  window.scrollTo({ top: 0 });
+  const swap = () => { flushSync(() => window.dispatchEvent(new Event("az:nav"))); window.scrollTo({ top: 0 }); };
+  // 翻开: a page turn between issues and pages where the browser supports view transitions
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+  if (doc.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) doc.startViewTransition(swap);
+  else swap();
 }
 
 export function usePath() {

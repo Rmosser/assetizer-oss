@@ -46,9 +46,9 @@ const headOf = (it: any) => issueHeadline(it.headline, it.musts?.[0]?.title, it.
 const producing = (it: any) => ["QUEUED", "RUNNING", "WAITING", "INTERRUPTED"].includes(it.production) && !it.units;
 const issueHref = (it: any, hash = "") => `/issue/${encodeURIComponent(it.id)}${hash}`;
 
-function State({ it }: { it: any }) {
+function State({ it, small = false }: { it: any; small?: boolean }) {
   if (producing(it)) return <span className="st wip">{it.production === "WAITING" ? "等待中" : it.production === "RUNNING" ? "付印中" : "排队中"}</span>;
-  if (it.review === "APPROVED") return <Yin size={34} />;
+  if (it.review === "APPROVED") return <Yin size={small ? 26 : 34} />;
   if (it.flags > 0) return <span className="st pi">批 <b className="num">{it.flags}</b></span>;
   return <span className="st">待阅</span>;
 }
@@ -92,10 +92,15 @@ function Feature({ it }: { it: any }) {
   );
 }
 
+const SIXTY_DAYS = 60 * 86400 * 1000;
+
 function Row({ it }: { it: any }) {
+  // issues older than sixty days collapse into a single 44px line: no cover, title, date, state
+  const d = parseDay(it.published_at) || parseDay(it.updated_at);
+  const compact = !!d && Date.now() - d.getTime() > SIXTY_DAYS;
   return (
     <li>
-      <a className="toc-row" {...linkProps(issueHref(it))}>
+      <a className={`toc-row${compact ? " compact" : ""}`} {...linkProps(issueHref(it))}>
         <div className="toc-no"><span className="num">{String(it.no).padStart(3, "0")}</span></div>
         <div className="cover">
           {it.cover ? <img src={media(it.cover, 320)} srcSet={srcSet(it.cover, [320, 640])} sizes="120px" alt="" loading="lazy" /> : <span className="ph">刊</span>}
@@ -103,11 +108,11 @@ function Row({ it }: { it: any }) {
         <div className="toc-title">
           <h3><Words>{headOf(it)}</Words></h3>
           <div className="meta">
-            {[it.channel || "未识别频道", cnDay(it.published_at), `${Math.round((it.duration || 0) / 60)} 分钟`, it.units != null && `${it.units} 单元`]
+            {(compact ? [cnDay(it.published_at)] : [it.channel || "未识别频道", cnDay(it.published_at), `${Math.round((it.duration || 0) / 60)} 分钟`, it.units != null && `${it.units} 单元`])
               .filter(Boolean).map((x, i) => <span key={i} className="ph">{i > 0 && " · "}{x}</span>)}
           </div>
         </div>
-        <div className="toc-state"><State it={it} /></div>
+        <div className="toc-state"><State it={it} small={compact} /></div>
       </a>
     </li>
   );
@@ -261,7 +266,7 @@ export default function Issues() {
         </Empty>
       )}
       {issues.length > 0 && (
-        <p className="colophon">已入库原始视频共 {dur(totalMin)}。串行付印：一小时视频约 1.5–2 小时成刊。</p>
+        <p className="colophon">已入库原始视频共 {dur(totalMin)}。串行付印：一小时视频约 <span className="ph">1.5–2 小时</span>成刊。</p>
       )}
     </main>
   );
