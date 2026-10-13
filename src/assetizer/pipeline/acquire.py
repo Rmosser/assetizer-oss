@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .. import config, db, youtube
 from ..media import ffmpeg
-from ..util import fmt_tc, now, sha256_file
+from ..util import fmt_tc, now, read_json, sha256_file, write_json
 from .context import RunContext, Waiting
 
 
@@ -46,8 +46,11 @@ def playbook(ctx: RunContext) -> dict:
         cid = ctx.source.get("channel_id")
         if cid:
             row = db.one("SELECT * FROM playbooks WHERE channel_id=? AND status='ACTIVE' ORDER BY version DESC LIMIT 1", cid)
-            if row is None and db.one("SELECT id FROM playbooks WHERE channel_id=? AND status='NEEDS_CONFIRMATION'", cid):
-                raise Waiting("PLAYBOOK_CONFIRMATION", "频道规程待确认")
+            if row is None:
+                # a channel still in tuning: its videos are samples, run with the newest draft (never delivered before 定稿)
+                row = db.one("SELECT * FROM playbooks WHERE channel_id=? AND status='NEEDS_CONFIRMATION' ORDER BY version DESC LIMIT 1", cid)
+                if row is not None:
+                    db.exec("INSERT OR IGNORE INTO samples(channel_id, source_id, added_at) VALUES (?,?,?)", cid, ctx.source["id"], now())
         if row is None:
             row = db.one("SELECT * FROM playbooks WHERE channel_id IS NULL AND status='ACTIVE' ORDER BY version DESC LIMIT 1")
         db.exec("UPDATE runs SET playbook_id=? WHERE id=?", row["id"], ctx.id)
@@ -93,6 +96,27 @@ def acquire(ctx: RunContext) -> dict:
     return {"bytes": p.stat().st_size, "height": height, "sha256": digest}
 
 
+def _proxy(ctx: RunContext, pid: str, offset: float, length: float) -> tuple[Path, dict]:
+    """The model proxy for one chunk, kept with the source media so later runs of the same video
+    (other playbook versions) reuse it instead of re-encoding; removed with the media by retention."""
+    s = config.get()
+    sha = ctx.source.get("media_sha256")
+    cache = s.media_dir / ctx.source["id"] / "proxies"
+    name = f"{pid}_{offset:.0f}_{length:.0f}_{s.chunk_minutes}_{s.chunk_overlap_minutes}"
+    mp4, meta = cache / f"{name}.mp4", cache / f"{name}.json"
+    if sha and mp4.exists() and meta.exists():
+        m = read_json(meta)
+        if m.get("media_sha256") == sha:
+            return mp4, m.get("encoding") or {}
+    path, enc = ffmpeg.fit_proxy(ctx.media, offset, length, ctx.path("work", "chunks", f"{pid}.mp4"))
+    if not sha:
+        return path, enc
+    cache.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(path), mp4)
+    write_json(meta, {"media_sha256": sha, "encoding": enc, "offset": offset, "length": length})
+    return mp4, enc
+
+
 def chunk(ctx: RunContext) -> dict:
     s = config.get()
     dur = ctx.duration
@@ -111,11 +135,7 @@ def chunk(ctx: RunContext) -> dict:
         # model proxy: 1 fps, full resolution, re-encoded → exact offset and < view_file limit
         offset = st
         length = dur - offset if len(starts) == 1 else min(size, dur - offset)
-        out = ctx.path("work", "chunks", f"{pid}.mp4")
-        try:
-            path, enc = ffmpeg.fit_proxy(ctx.media, offset, length, out)
-        except ffmpeg.MediaError:
-            raise
+        path, enc = _proxy(ctx, pid, offset, length)
         length = ffmpeg.duration(path)
         chunks.append({"part_id": pid, "path": str(path), "offset": offset, "length": length, "encoding": enc,
                        "source_start": fmt_tc(offset), "source_end": fmt_tc(offset + length)})

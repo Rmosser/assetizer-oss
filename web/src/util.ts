@@ -76,20 +76,17 @@ export function bytes(n?: number | null) {
   return `${n.toFixed(n >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
 }
 
-export const REVIEW: Record<string, string> = {
-  UNREVIEWED: "待审阅", IN_REVIEW: "审阅中", APPROVED: "已审定", CHANGES_REQUESTED: "需修改", REJECTED: "已驳回",
-};
 export const PRODUCTION: Record<string, string> = {
   QUEUED: "排队中", RUNNING: "付印中", WAITING: "等待中", INTERRUPTED: "已中断", FAILED: "失败",
   COMPLETE: "已完成", COMPLETE_PARTIAL: "完成 · 有告警", CANCELLED: "已取消", EXPERIMENT: "实验",
 };
 export const WAIT: Record<string, string> = {
   AGY_AUTH_REQUIRED: "模型登录失效", PROVIDER_QUOTA: "模型配额", YOUTUBE_AUTH: "YouTube 需登录",
-  DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "频道规程待确认", LIVE_IN_PROGRESS: "直播未结束",
+  DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "频道待定稿", LIVE_IN_PROGRESS: "直播未结束",
 };
 export const DELIVERY: Record<string, string> = {
   NOT_STARTED: "待交付", BLOCKED: "Notion 未配置", DELIVERING: "交付中", DELIVERED: "已入 Notion",
-  STALE: "待更新", FAILED: "交付失败",
+  STALE: "待更新", FAILED: "交付失败", REGISTERED: "库里已有",
 };
 
 export function clock(iso?: string | null) {

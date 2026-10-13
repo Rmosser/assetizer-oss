@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build"
+    "build": "tsc -b && vite build",
+    "test:cookiecloud": "node tools/test-cookiecloud.mjs"
   },
   "dependencies": {
     "@fontsource/geist-mono": "^5.3.0",

@@ -11,7 +11,13 @@ async function parse(r: Response) {
 
 export async function get<T = any>(path: string): Promise<T> {
   const r = await parse(await fetch(path, { headers: { Accept: "application/json" } }));
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    // FastAPI errors are {"detail": "..."}: show the sentence, not the JSON
+    const t = await r.text();
+    let d = t;
+    try { d = JSON.parse(t).detail || t; } catch { /* not JSON */ }
+    throw new Error(typeof d === "string" ? d : `${r.status} ${t}`);
+  }
   return r.json();
 }
 

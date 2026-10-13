@@ -116,7 +116,7 @@ def run() -> dict:
                               "issue": "「可联想到」的延伸资源与「只依据视频」原则冲突；执行时只保留视频里明确提到的资料。"}],
     }
     wid = _playbook("wang-haibin", wpid, wdata, waudit, "NEEDS_CONFIRMATION", "seed:run-013")
-    db.decision("CONFIRM_PLAYBOOK", str(wid), "确认「王海滨的财经闲谈」的频道规程",
-                "编译结果尚未逐条核对；1 条规则与「只依据视频」原则冲突，以原则为准。确认后，这个频道的视频会自动生产。")
+    db.decision("CONFIRM_PLAYBOOK", str(wid), "为「王海滨的财经闲谈」定稿",
+                "编译结果尚未逐条核对；1 条规则与「只依据视频」原则冲突，以原则为准。定稿后这个频道的新视频会自动收录、生产并写入 Notion。")
     return {"channels": db.q("SELECT id, name, mode FROM channels"),
             "playbooks": db.q("SELECT id, channel_id, version, status FROM playbooks")}

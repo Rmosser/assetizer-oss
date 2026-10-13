@@ -13,6 +13,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -76,11 +78,18 @@ async def guard(request: Request, call_next):
         return JSONResponse({"error": "json required"}, status_code=415)
     return await call_next(request)
 
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError):
+    """FastAPI's default 422 echoes what was submitted (`input`, `ctx`): answer with where and why only."""
+    return JSONResponse({"detail": [{k: e[k] for k in ("type", "loc", "msg") if k in e} for e in exc.errors()]},
+                        status_code=422)
+
 STAGE_LABELS = {
     "RESOLVE": "解析来源", "PLAYBOOK": "绑定频道规则", "ACQUIRE": "获取媒体", "CHUNK": "切分", "UNDERSTAND": "多模态理解",
     "TRANSCRIBE": "全片转写", "MERGE": "合并", "KNOWLEDGE": "知识单元", "ARTICLE": "撰写文章", "SELECT": "选片",
     "SCREENSHOTS": "截图", "BOUNDARY": "边界精修", "CLIPS": "剪辑", "SUBTITLES": "字幕", "MEDIA_QA": "媒体质检",
-    "REVIEW_CHECK": "朱批预审", "COMPOSE": "编排", "PACKAGE": "发布素材包", "CLEANUP": "清理",
+    "REVIEW_CHECK": "校注预审", "COMPOSE": "编排", "PACKAGE": "发布素材包", "CLEANUP": "清理",
 }
 
 
@@ -107,16 +116,18 @@ def _issue(s: dict, n: int) -> dict:
     # experiment runs share the source but are not part of its production history
     latest = db.one("SELECT * FROM runs WHERE source_id=? AND kind!='EXPERIMENT' ORDER BY created_at DESC LIMIT 1", s["id"])
     summ = db.unj(run["summary"], {}) if run else {}
-    flags = db.one("SELECT COUNT(*) n FROM flags WHERE source_id=? AND run_id IS ? AND resolution='OPEN' AND severity!='INFO'",
+    # 校注: what the system doubts in this issue — information, not a to-do (design §R2-3)
+    notes = db.one("SELECT COUNT(*) n FROM flags WHERE source_id=? AND run_id IS ? AND severity!='INFO'",
                    s["id"], s.get("current_run_id"))["n"]
+    ch = db.one("SELECT stage FROM channels WHERE id=?", s["channel_id"]) if s.get("channel_id") else None
     must = db.one("SELECT COUNT(*) n FROM units WHERE run_id IS ? AND learning_priority=3", s.get("current_run_id"))["n"]
     clips = sum(v for k, v in (summ.get("assets") or {}).items() if k == "clip:GENERATED")
     musts = db.q("SELECT id, title FROM units WHERE run_id IS ? AND learning_priority=3 ORDER BY start LIMIT 3",
                  s.get("current_run_id"))
     return {"no": n, "id": s["id"], "title": s.get("title") or s["id"], "headline": s.get("headline"), "channel": s.get("channel_title"),
             "channel_id": s.get("channel_id"), "published_at": s.get("published_at"), "duration": s.get("duration"),
-            "review": s["review"], "delivery": s["delivery"], "notion_url": s.get("notion_url"),
-            "units": summ.get("units"), "must": must, "clips": clips, "flags": flags, "cover": _cover(s.get("current_run_id")), "musts": musts,
+            "delivery": s["delivery"], "notion_url": s.get("notion_url"), "tuning": bool(ch and ch["stage"] == "TUNING"),
+            "units": summ.get("units"), "must": must, "clips": clips, "notes": notes, "cover": _cover(s.get("current_run_id")), "musts": musts,
             "production": latest["production"] if latest else None, "stage": latest["stage"] if latest else None,
             "latest_run": latest["id"] if latest else None, "updated_at": s["updated_at"]}
 
@@ -139,8 +150,6 @@ def overview():
         "alerts": db.q("SELECT * FROM alerts WHERE resolved_at IS NULL ORDER BY created_at DESC"),
         "decisions": db.q("SELECT * FROM decisions WHERE resolved_at IS NULL ORDER BY created_at DESC"),
         "paused": db.setting("queue_paused"),
-        "open_flags": db.one("""SELECT COUNT(*) n FROM flags f JOIN sources s ON s.id=f.source_id AND s.current_run_id=f.run_id
-                                WHERE f.resolution='OPEN' AND f.severity!='INFO'""")["n"],
         "now": now(),
     }
 
@@ -232,7 +241,7 @@ def source(sid: str, run: str | None = None):
         "flags": flags,
         "speakers": db.q("SELECT * FROM speakers WHERE run_id=?", rid),
         "runs": db.q("SELECT id, kind, production, created_at, finished_at FROM runs WHERE source_id=? AND kind!='EXPERIMENT' ORDER BY created_at DESC", sid),
-        "channel": db.one("SELECT id, name, mode FROM channels WHERE id=?", s.get("channel_id")),
+        "channel": db.one("SELECT id, name, mode, stage FROM channels WHERE id=?", s.get("channel_id")),
         "no": db.one("SELECT COUNT(*) n FROM sources WHERE created_at <= ?", s["created_at"])["n"],
     }
 
@@ -248,25 +257,55 @@ def words(sid: str, start: float, end: float):
     return {"words": [x for x in w if x["end"] >= start and x["start"] <= end]}
 
 
+def _playbook_view(p: dict) -> dict:
+    d = db.unj(p.pop("data"), {})
+    p["audit"] = db.unj(p.get("audit"), {}) or {}
+    p["rules"] = d.get("rules", [])
+    p["facets"] = d.get("facets", [])
+    p["identity"] = d.get("identity", {})
+    p["article_style"] = d.get("article_style")
+    return p
+
+
+def _compile_state(cid: str, prompt: dict | None, pbs: list[dict]) -> dict | None:
+    """Is the newest prompt version compiled? (compiles run in the background)"""
+    if not prompt:
+        return None
+    if any(p.get("prompt_id") == prompt["id"] for p in pbs):
+        return {"state": "done"}
+    err = db.one("""SELECT ts, message FROM events WHERE kind='compile' AND level='error' AND ts>=? AND message LIKE ?
+                    ORDER BY id DESC LIMIT 1""", prompt["created_at"], f"%（{cid}）%")
+    return {"state": "failed", "error": err["message"], "at": err["ts"]} if err else {"state": "running", "since": prompt["created_at"]}
+
+
 @app.get("/api/channels")
 def channels():
     out = []
+    pending = {d["ref"]: d for d in db.q("SELECT * FROM decisions WHERE resolved_at IS NULL AND kind='CONFIRM_PLAYBOOK'")}
     for c in db.q("SELECT * FROM channels ORDER BY mode DESC, created_at"):
-        pbs = db.q("SELECT id, version, status, origin, created_at, activated_at, data, audit FROM playbooks WHERE channel_id=? ORDER BY version DESC", c["id"])
-        for p in pbs:
-            d = db.unj(p.pop("data"), {})
-            p["audit"] = db.unj(p["audit"], {})
-            p["rules"] = d.get("rules", [])
-            p["facets"] = d.get("facets", [])
-            p["identity"] = d.get("identity", {})
-            p["article_style"] = d.get("article_style")
-        prompts = db.q("SELECT id, version, sha256, origin, origin_edited_at, created_at, text FROM channel_prompts WHERE channel_id=? ORDER BY version DESC", c["id"])
+        pbs = [_playbook_view(p) for p in db.q("""SELECT id, prompt_id, version, status, origin, created_at, activated_at, data, audit
+                                                   FROM playbooks WHERE channel_id=? ORDER BY version DESC""", c["id"])]
+        prompts = db.q("SELECT id, version, sha256, origin, origin_edited_at, note, created_at, text FROM channel_prompts WHERE channel_id=? ORDER BY version DESC", c["id"])
         stats = db.one("SELECT COUNT(*) n, MAX(created_at) last FROM sources WHERE channel_id=?", c["id"])
+        ncfg = db.setting(f"notion:{c['id']}") or {}
+        busy = db.one("""SELECT COUNT(*) n FROM runs r JOIN samples sm ON sm.source_id=r.source_id AND sm.channel_id=?
+                         WHERE r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')""", c["id"])["n"]
         out.append({**c, "playbooks": pbs, "prompts": prompts, "sources": stats["n"], "last_source": stats["last"],
-                    "ingest": db.setting(f"ingest:{c['id']}") or {"enabled": False}})
-    uni = db.one("SELECT id, version, status FROM playbooks WHERE channel_id IS NULL AND status='ACTIVE'")
-    return {"channels": out, "universal": uni,
+                    "ingest": db.setting(f"ingest:{c['id']}") or {"enabled": False},
+                    "notion": {"configured": bool(ncfg.get("database_id")), "database_title": ncfg.get("database_title"),
+                               "template": ncfg.get("template")},
+                    "samples": db.one("SELECT COUNT(*) n FROM samples WHERE channel_id=?", c["id"])["n"], "samples_busy": busy,
+                    "compile": _compile_state(c["id"], prompts[0] if prompts else None, pbs),
+                    "pending_playbook": next((p["id"] for p in pbs if str(p["id"]) in pending), None)})
+    uni = db.one("SELECT id, prompt_id, version, status, origin, created_at, activated_at, data, audit FROM playbooks "
+                 "WHERE channel_id IS NULL AND status='ACTIVE' ORDER BY version DESC LIMIT 1")
+    return {"channels": out, "universal": _playbook_view(uni) if uni else None,
             "decisions": db.q("SELECT * FROM decisions WHERE resolved_at IS NULL")}
+
+
+def _cookie_status() -> dict:
+    from ..cookies import status
+    return status()
 
 
 @app.get("/api/engine")
@@ -287,7 +326,7 @@ def engine():
         "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
                    "parent": db.setting("notion_parent_page_id")},
         "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
-                    "profile_ok": bool(s.browser_profile and s.browser_profile.exists())},
+                    "profile_ok": bool(s.browser_profile and s.browser_profile.exists()), **_cookie_status()},
         "paused": db.setting("queue_paused"),
         "alerts": db.q("SELECT * FROM alerts ORDER BY resolved_at IS NOT NULL, created_at DESC LIMIT 20"),
         "runs": runs, "calls": calls,
@@ -364,9 +403,6 @@ def flag_update(fid: int, body: FlagUpdate):
         raise HTTPException(400)
     db.exec("UPDATE flags SET resolution=?, resolution_note=?, resolved_at=? WHERE id=?", body.resolution, body.note,
             None if body.resolution == "OPEN" else now(), fid)
-    f = db.one("SELECT source_id FROM flags WHERE id=?", fid)
-    if f:
-        db.exec("UPDATE sources SET review=CASE WHEN review='UNREVIEWED' THEN 'IN_REVIEW' ELSE review END WHERE id=?", f["source_id"])
     return db.one("SELECT * FROM flags WHERE id=?", fid)
 
 
@@ -419,22 +455,6 @@ def nudge(aid: int, body: Nudge):
     return {"ok": True}
 
 
-class Review(BaseModel):
-    review: str
-    notes: str | None = None
-
-
-@app.post("/api/sources/{sid}/review")
-def review(sid: str, body: Review):
-    if body.review not in ("UNREVIEWED", "IN_REVIEW", "APPROVED", "CHANGES_REQUESTED", "REJECTED"):
-        raise HTTPException(400)
-    db.exec("UPDATE sources SET review=?, review_notes=COALESCE(?, review_notes), review_at=?, updated_at=? WHERE id=?",
-            body.review, body.notes, now(), now(), sid)
-    from ..delivery import sync_review
-    threading.Thread(target=sync_review, args=(sid,), daemon=True).start()
-    return db.one("SELECT id, review, review_at FROM sources WHERE id=?", sid)
-
-
 @app.post("/api/sources/{sid}/deliver")
 def redeliver(sid: str):
     db.exec("UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL WHERE id=?", sid)
@@ -464,6 +484,13 @@ def confirm_playbook(pid: int):
     db.exec("UPDATE decisions SET resolved_at=?, outcome='CONFIRMED' WHERE kind='CONFIRM_PLAYBOOK' AND ref=?", now(), str(pid))
     db.exec("""UPDATE runs SET production='QUEUED', wait_reason=NULL WHERE production='WAITING' AND wait_reason='PLAYBOOK_CONFIRMATION'
                AND source_id IN (SELECT id FROM sources WHERE channel_id=?)""", p["channel_id"])
+    # 定稿 (design §R2-1): the channel leaves tuning, its held samples go to Notion, new uploads come in by RSS
+    ch = db.one("SELECT * FROM channels WHERE id=?", p["channel_id"]) if p["channel_id"] else None
+    if ch:
+        db.exec("UPDATE channels SET stage='LOCKED', updated_at=? WHERE id=?", now(), ch["id"])
+        if ch["mode"] == "TRACKED" and ch["youtube_channel_id"]:
+            from ..ingest import set_enabled
+            set_enabled(ch["id"], True)
     return {"ok": True}
 
 
@@ -478,6 +505,49 @@ def remote_browser():
     r = subprocess.run(["bash", script], capture_output=True, text=True, timeout=60)
     return {"ok": r.returncode == 0, "output": (r.stdout + r.stderr)[-500:],
             "tunnel": "ssh -N -L 6080:127.0.0.1:6080 ovh-investment", "url": "http://localhost:6080/vnc.html"}
+
+
+@app.post("/api/cookiecloud/credentials")
+async def cookiecloud_credentials(request: Request):
+    """Set or clear the CookieCloud origin and secrets (docs/cookiecloud-credentials-ui.md). Write-only: the answer is
+    the status, never a value. The body is parsed by hand because a pydantic model's 422 would echo rejected values."""
+    from .. import cookies
+    raw = await request.body()
+    if len(raw) > 16_384:
+        return JSONResponse({"detail": "请求体太大"}, status_code=413)
+    try:
+        body = json.loads(raw or b"null")
+    except ValueError:
+        return JSONResponse({"detail": "请求体必须是 JSON 对象"}, status_code=400)
+    try:
+        await run_in_threadpool(cookies.save_credentials, body)
+    except cookies.CredentialError as e:
+        return JSONResponse({"detail": e.message, "field": e.field}, status_code=e.status)
+    except OSError as e:
+        return JSONResponse({"detail": f"写入服务器上的凭据文件失败（{type(e).__name__}）"}, status_code=500)
+    return _cookie_status()
+
+
+COOKIE_TEST_INTERVAL = 10.0  # seconds: Cloudflare allows 5 reads per 10 s per IP, shared with downloads
+_cookie_test = {"at": float("-inf")}
+_cookie_test_lock = threading.Lock()
+
+
+@app.post("/api/cookiecloud/test")
+def cookiecloud_test():
+    """One CookieCloud read for the 机房 button; at most one every COOKIE_TEST_INTERVAL seconds (429 otherwise)."""
+    import time
+    from .. import cookies
+    with _cookie_test_lock:
+        wait = _cookie_test["at"] + COOKIE_TEST_INTERVAL - time.monotonic()
+        if wait > 0:
+            secs = int(wait) + 1
+            return JSONResponse({"detail": f"测试太频繁：{secs} 秒后再试"}, status_code=429, headers={"Retry-After": str(secs)})
+        _cookie_test["at"] = time.monotonic()
+    out = cookies.probe()
+    db.event("config", f"测试 CookieCloud 连接：读到 {out['count']} 条" if out["ok"]
+             else f"测试 CookieCloud 连接失败（错误码 {out['code']}）", level="info" if out["ok"] else "warn")
+    return out
 
 
 class Ingest(BaseModel):
@@ -502,6 +572,256 @@ def _bg(fn, *args, label: str = "") -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+# ------------------------------------------------------------------ 频道调试台
+def _tuning_error(e: ValueError):
+    raise HTTPException(400, str(e))
+
+
+@app.get("/api/channels/{cid}/workbench")
+def channel_workbench(cid: str):
+    from .. import tuning
+    if not db.one("SELECT id FROM channels WHERE id=?", cid):
+        raise HTTPException(404)
+    return tuning.workbench(cid)
+
+
+@app.get("/api/channels/{cid}/candidates")
+def channel_candidates(cid: str):
+    """Recent uploads from the channel feed, marked 已是样片 / 已生产 / 库里已有."""
+    from ..delivery import registered_many
+    from ..ingest import feed
+    ch = db.one("SELECT * FROM channels WHERE id=?", cid)
+    if not ch or not ch.get("youtube_channel_id"):
+        raise HTTPException(404)
+    try:
+        entries = feed(ch["youtube_channel_id"])
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"读不到频道最近的视频：{e}")
+    samples = {r["source_id"] for r in db.q("SELECT source_id FROM samples WHERE channel_id=?", cid)}
+    try:
+        lib = registered_many({"channel_id": cid}, [e["id"] for e in entries])
+    except Exception:  # noqa: BLE001
+        lib = {}
+    out = []
+    for e in entries:
+        s = db.one("SELECT current_run_id FROM sources WHERE id=?", e["id"])
+        out.append({**e, "sample": e["id"] in samples, "produced": bool(s and s["current_run_id"]), "library": lib.get(e["id"])})
+    return {"candidates": out}
+
+
+class SampleBody(BaseModel):
+    url: str
+    run: bool = False
+    playbook_id: int | None = None
+
+
+@app.post("/api/channels/{cid}/samples")
+def channel_sample_add(cid: str, body: SampleBody):
+    from .. import tuning
+    ch = db.one("SELECT * FROM channels WHERE id=?", cid)
+    if not ch:
+        raise HTTPException(404)
+    if ch["stage"] != "TUNING":
+        raise HTTPException(400, "已定稿的频道请先「回到调试期」再添加样片")
+    try:
+        sid = tuning.add_sample(cid, body.url.strip())
+        runs = []
+        if body.run:
+            pb = body.playbook_id or (tuning.draft_playbook(cid) or {}).get("id")
+            if not pb:
+                raise ValueError("这个频道还没有规程，先写学习目标并编译")
+            runs = tuning.trial(cid, [pb], [sid])
+    except ValueError as e:
+        _tuning_error(e)
+    return {"source_id": sid, "runs": runs, **tuning.workbench(cid)}
+
+
+@app.post("/api/channels/{cid}/samples/{sid}/remove")
+def channel_sample_remove(cid: str, sid: str):
+    from .. import tuning
+    db.exec("DELETE FROM samples WHERE channel_id=? AND source_id=?", cid, sid)
+    return tuning.workbench(cid)
+
+
+class TrialBody(BaseModel):
+    playbook_id: int | None = None
+    playbook_ids: list[int] | None = None
+    source_ids: list[str] | None = None
+
+
+@app.post("/api/channels/{cid}/trial")
+def channel_trial(cid: str, body: TrialBody):
+    from .. import tuning
+    pids = body.playbook_ids or ([body.playbook_id] if body.playbook_id else [])
+    try:
+        runs = tuning.trial(cid, pids, body.source_ids)
+    except ValueError as e:
+        _tuning_error(e)
+    return {"runs": runs, **tuning.workbench(cid)}
+
+
+@app.post("/api/channels/{cid}/trial-queue/clear")
+def channel_trial_clear(cid: str):
+    from .. import tuning
+    n = tuning.clear_queue(cid)
+    return {"cancelled": n, **tuning.workbench(cid)}
+
+
+class VoteBody(BaseModel):
+    liked: bool
+    note: str | None = None
+
+
+@app.post("/api/runs/{rid}/vote")
+def run_vote(rid: str, body: VoteBody):
+    from .. import tuning
+    try:
+        return tuning.vote(rid, body.liked, body.note)
+    except ValueError as e:
+        _tuning_error(e)
+
+
+@app.get("/api/compare")
+def compare_runs(a: str, b: str):
+    from .. import tuning
+    ra, rb = (db.one("SELECT source_id FROM runs WHERE id=?", x) for x in (a, b))
+    if not ra or not rb or ra["source_id"] != rb["source_id"]:
+        raise HTTPException(400, "只能对比同一期视频的两个版本")
+    return tuning.compare(a, b)
+
+
+class AdoptBody(BaseModel):
+    run_id: str
+
+
+@app.post("/api/sources/{sid}/adopt")
+def adopt_run(sid: str, body: AdoptBody):
+    from .. import tuning
+    try:
+        tuning.adopt(sid, body.run_id)
+    except ValueError as e:
+        _tuning_error(e)
+    return {"ok": True}
+
+
+@app.post("/api/channels/{cid}/retune")
+def channel_retune(cid: str):
+    from .. import tuning
+    try:
+        return tuning.retune(cid)
+    except ValueError as e:
+        _tuning_error(e)
+
+
+# ------------------------------------------------------------------ Notion target per channel
+def _notion():
+    from ..delivery import client
+    n = client()
+    if not n:
+        raise HTTPException(409, "还没有配置 Notion token")
+    return n
+
+
+def _notion_view(cid: str, cfg: dict) -> dict:
+    from ..notion import mapping as M
+    from ..notion.client import NotionError
+    n = _notion()
+    try:
+        dbo = n._req("GET", f"/databases/{cfg['database_id']}")
+    except NotionError as e:
+        from ..delivery import TOKEN_FIX, token_invalid
+        if token_invalid(e):
+            raise HTTPException(502, f"Notion token 已失效（401），读不到数据库。{TOKEN_FIX}")
+        if e.status in (403, 404):
+            raise HTTPException(502, f"Integration 没有这个数据库的权限（{e.status}）：在数据库右上角 ··· → Connections 里添加它。")
+        raise HTTPException(502, f"读不到目标数据库：{e}")
+    schema = M.schema_of(dbo)
+    title = "".join(t.get("plain_text", "") for t in dbo.get("title", []))
+    if title and cfg.get("database_title") != title:
+        M.save(cid, {**(M.get(cid) or cfg), "database_title": title})
+    ch = db.one("SELECT * FROM channels WHERE id=?", cid)
+    s = db.one("SELECT * FROM sources WHERE channel_id=? AND current_run_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1", cid)
+    ctx = M.context(s, s["current_run_id"], ch) if s else None
+    view = M.preview(cfg, schema, ctx)
+    titles = {}
+    for r in view["rows"]:
+        m = r.get("mapping") or {}
+        if r["type"] == "relation" and m.get("source") == "fixed":
+            for pid in m.get("value") or []:
+                try:
+                    titles[pid] = _page_title(n.page(pid))
+                except NotionError:
+                    titles[pid] = None
+    return {"database": {"id": dbo["id"], "url": dbo.get("url"), "title": "".join(t.get("plain_text", "") for t in dbo.get("title", []))},
+            "config": {k: cfg.get(k) for k in ("template", "heading", "icon")}, **view, "page_titles": titles,
+            "sample_source": s and {"id": s["id"], "title": s["title"]},
+            "templates": M.TEMPLATES, "source_labels": {k: v[0] for k, v in M.SOURCES.items()},
+            "template_vars": M.TEMPLATE_VARS, "access_labels": M.ACCESS_LABELS}
+
+
+def _page_title(pg: dict) -> str:
+    for p in pg.get("properties", {}).values():
+        if p.get("type") == "title":
+            return "".join(t.get("plain_text", "") for t in p["title"])
+    return ""
+
+
+@app.get("/api/channels/{cid}/notion")
+def channel_notion(cid: str):
+    from ..notion import mapping as M
+    if not db.one("SELECT id FROM channels WHERE id=?", cid):
+        raise HTTPException(404)
+    cfg = M.get(cid)
+    if not cfg or not cfg.get("database_id"):
+        return {"configured": False}
+    return {"configured": True, **_notion_view(cid, cfg)}
+
+
+class NotionMapping(BaseModel):
+    properties: dict
+    template: str = "default"
+    heading: str = ""
+    icon: str = "none"
+
+
+@app.post("/api/channels/{cid}/notion")
+def channel_notion_save(cid: str, body: NotionMapping):
+    from ..notion import mapping as M
+    cfg = M.get(cid)
+    if not cfg or not cfg.get("database_id"):
+        raise HTTPException(409, "这个频道还没有 Notion 目标")
+    if body.template not in M.TEMPLATES:
+        raise HTTPException(400, "unknown template")
+    props = {}
+    for pid, m in body.properties.items():
+        if not m or not m.get("source"):
+            continue  # 不填
+        if m["source"] not in M.SOURCES:
+            raise HTTPException(400, f"unknown source {m['source']}")
+        props[pid] = {k: m[k] for k in ("name", "type", "source", "value") if k in m}
+    cfg = {**cfg, "properties": props, "template": body.template, "heading": body.heading.strip(), "icon": body.icon or "none"}
+    M.save(cid, cfg)
+    # sources paused on the old mapping try again now
+    db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL
+               WHERE channel_id=? AND delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%'""", cid)
+    db.event("notion", f"已更新「{cid}」的 Notion 属性映射")
+    return {"configured": True, **_notion_view(cid, cfg)}
+
+
+@app.get("/api/notion/pages")
+def notion_pages(database: str, q: str = ""):
+    """Pages of a related database for the relation picker (title contains q)."""
+    from ..notion import mapping as M
+    n = _notion()
+    schema = M.schema_of(n._req("GET", f"/databases/{database}"))
+    title = next((v["name"] for v in schema.values() if v["type"] == "title"), None)
+    body: dict = {"page_size": 20}
+    if q.strip() and title:
+        body["filter"] = {"property": title, "title": {"contains": q.strip()}}
+    r = n._req("POST", f"/databases/{database}/query", idempotent=True, json=body)
+    return {"pages": [{"id": p["id"], "title": _page_title(p), "url": p.get("url")} for p in r.get("results", [])]}
+
+
 class PromptBody(BaseModel):
     text: str
     note: str | None = None
@@ -516,7 +836,7 @@ def channel_prompt(cid: str, body: PromptBody):
     if len(body.text.strip()) < 30:
         raise HTTPException(400, "Prompt 太短")
     pid = add_prompt_version(cid, body.text.strip(), "manual", body.note)
-    _bg(compile_prompt, cid, pid, label="Playbook 编译")
+    _bg(compile_prompt, cid, pid, label=f"Playbook 编译（{cid}）")
     db.event("compile", f"{cid} 原始 Prompt 新版本已保存，开始编译")
     return {"prompt_id": pid, "compiling": True}
 
@@ -566,8 +886,26 @@ def channel_track(body: TrackBody):
         db.exec("UPDATE channels SET mode='TRACKED', why=?, updated_at=? WHERE id=?", body.why, now(), cid)
     db.exec("UPDATE sources SET channel_id=? WHERE youtube_channel_id=?", cid, s["youtube_channel_id"])
     pid = add_prompt_version(cid, body.prompt.strip(), "onboarding")
-    _bg(compile_prompt, cid, pid, label="Playbook 编译")
+    _bg(compile_prompt, cid, pid, label=f"Playbook 编译（{cid}）")
     return {"channel_id": cid, "prompt_id": pid}
+
+
+class ChannelInfo(BaseModel):
+    name: str | None = None
+    why: str | None = None
+
+
+@app.post("/api/channels/{cid}")
+def channel_update(cid: str, body: ChannelInfo):
+    if not db.one("SELECT id FROM channels WHERE id=?", cid):
+        raise HTTPException(404)
+    if body.name is not None and not body.name.strip():
+        raise HTTPException(400, "频道名称不能为空")
+    if body.name is not None:
+        db.exec("UPDATE channels SET name=?, updated_at=? WHERE id=?", body.name.strip(), now(), cid)
+    if body.why is not None:
+        db.exec("UPDATE channels SET why=?, updated_at=? WHERE id=?", body.why.strip() or None, now(), cid)
+    return db.one("SELECT id, name, why FROM channels WHERE id=?", cid)
 
 
 @app.post("/api/queue/resume")

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { post } from "../api";
 import { deJargon, issueHeadline } from "../cjk";
+import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
@@ -12,7 +13,7 @@ function Lamp({ state, label }: { state: "ok" | "bad" | "idle"; label: string })
 
 const fmtK = (n?: number | null) => (n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n));
 const SSH = "ssh -N -L 6080:127.0.0.1:6080 ovh-investment";
-const KIND: Record<string, string> = { worker: "机房", stage: "工序", run: "付印", delivery: "交付", review: "审阅", compile: "编译", ingest: "收录", alert: "告警", experiment: "实验" };
+const KIND: Record<string, string> = { worker: "机房", stage: "工序", run: "付印", delivery: "交付", review: "审阅", compile: "编译", ingest: "收录", alert: "告警", experiment: "实验", config: "配置" };
 /** "CLEANUP 完成" → "清理 完成": stage codes in log lines read as their Chinese labels */
 const humanize = (msg: string, labels: Record<string, string>) =>
   deJargon(msg || "").replace(/\b[A-Z][A-Z_]{2,}\b/g, (m) => labels[m] || m).replace(/^Worker /, "机房");
@@ -33,6 +34,133 @@ function Cmd({ text }: { text: string }) {
         {ok ? "已复制" : "复制"}
       </button>
     </span>
+  );
+}
+
+/* YouTube 会话 · CookieCloud credentials. The secrets are write-only: the server never sends one back, the form
+   never refills one, and nothing is kept outside this component's state (no storage, URL or console). */
+type CCField = { configured: boolean; source: "env" | "file" | null; updated_at: string | null };
+const CC_ORIGIN = "https://cookiecloud-read.example.com";
+const CC_SECRETS = [
+  { key: "access_client_id", label: "Access Client ID", hint: "Cloudflare 服务令牌 assetizer-ovh 的 Client ID" },
+  { key: "access_client_secret", label: "Access Client Secret", hint: "同一个服务令牌的 Client Secret" },
+  { key: "app_token", label: "App Token", hint: "CookieCloud Setup 里建的只读令牌，ccat_ 开头" },
+] as const;
+
+const ccState = (f?: CCField) =>
+  f?.source === "env" ? "由环境变量提供（此处不可修改）"
+    : f?.configured ? `已配置 · 文件${f.updated_at ? ` · ${ago(f.updated_at)}更新` : ""}` : "未配置";
+
+/** 清除 asks twice: the first press arms it for a few seconds. */
+function ClearBtn({ onClear, disabled }: { onClear: () => void; disabled?: boolean }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button type="button" className={`btn sm${armed ? " armed" : ""}`} disabled={disabled}
+      onClick={() => { if (armed) { setArmed(false); onClear(); } else setArmed(true); }}>
+      {armed ? "确认清除" : "清除"}
+    </button>
+  );
+}
+
+function CCTestResult({ r }: { r: any }) {
+  const tok = r.token;
+  return (
+    <div className={`cc-result${r.ok ? "" : " bad"}`} role="status">
+      {r.ok ? <>已读到 <span className="num">{r.count}</span> 条{r.hosts?.length ? `（${r.hosts.join("、")}）` : ""}</>
+        : <>{r.fix}<span className="muted">（错误码 {r.code}）</span></>}
+      {tok && <div className="cc-tok">令牌 {tok.name || "—"} · 域名白名单 {tok.allowed_domains?.length ? tok.allowed_domains.join("、") : "—"}</div>}
+    </div>
+  );
+}
+
+function CookieCloudSheet({ cc: polledCc, onClose, reload }: { cc: any; onClose: () => void; reload: () => void }) {
+  const [cc, setCc] = useState(polledCc);
+  useEffect(() => setCc(polledCc), [polledCc]);
+  const [origin, setOrigin] = useState<string>(cc?.origin || CC_ORIGIN);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<"save" | "clear" | "test" | null>(null);
+  const [msg, setMsg] = useState<{ bad: boolean; text: string } | null>(null);
+  const [test, setTest] = useState<any>(null);
+  const fields: Record<string, CCField> = cc?.fields || {};
+  const originDirty = !!origin.trim() && origin.trim().replace(/\/+$/, "") !== (cc?.origin || "");
+  const dirty = originDirty || CC_SECRETS.some((f) => (vals[f.key] || "").trim());
+  const fail = (e: unknown) => setMsg({ bad: true, text: String((e as Error).message || e) });
+
+  const save = async () => {
+    const body: Record<string, string> = {};
+    if (originDirty) body.origin = origin.trim();
+    for (const f of CC_SECRETS) if ((vals[f.key] || "").trim()) body[f.key] = vals[f.key];
+    setBusy("save"); setMsg(null); setTest(null);
+    try {
+      const r = await post("/api/cookiecloud/credentials", body);
+      setCc(r.cookiecloud);
+      setVals({});
+      setOrigin(r.cookiecloud?.origin || "");
+      setMsg({ bad: false, text: "已保存。点「测试连接」确认能读到 cookies。" });
+      reload();
+    } catch (e) { fail(e); }
+    setBusy(null);
+  };
+  const clear = async (key: string) => {
+    setBusy("clear"); setMsg(null); setTest(null);
+    try {
+      const r = await post("/api/cookiecloud/credentials", { clear: [key] });
+      setCc(r.cookiecloud);
+      if (key === "origin") setOrigin("");
+      setVals((v) => ({ ...v, [key]: "" }));
+      setMsg({ bad: false, text: "已清除。" });
+      reload();
+    } catch (e) { fail(e); }
+    setBusy(null);
+  };
+  const runTest = async () => {
+    setBusy("test"); setMsg(null);
+    try { setTest(await post("/api/cookiecloud/test")); reload(); } catch (e) { fail(e); }  // a 429 keeps the last result
+    setBusy(null);
+  };
+
+  return (
+    <Sheet title="配置 CookieCloud" onClose={onClose}>
+      <p className="sheet-lede">服务器从这里读取你 Chrome 里的 YouTube 登录态。密钥只写不读：保存后不会再显示，留空表示不修改。</p>
+      <div className="sheet-form cc-form">
+        <div className="cc-field">
+          <div className="cc-head"><label htmlFor="cc-origin">Origin</label><span className="cc-st">{cc?.origin ? "已配置" : "未配置"}</span></div>
+          <div className="cc-row">
+            <input id="cc-origin" value={origin} onChange={(e) => setOrigin(e.target.value)} inputMode="url"
+              autoComplete="off" spellCheck={false} autoCapitalize="off" disabled={!!busy} />
+            {cc?.origin && <ClearBtn onClear={() => clear("origin")} disabled={!!busy} />}
+          </div>
+        </div>
+        {CC_SECRETS.map((f) => {
+          const st = fields[f.key];
+          const env = st?.source === "env";
+          return (
+            <div className="cc-field" key={f.key}>
+              <div className="cc-head"><label htmlFor={`cc-${f.key}`}>{f.label}</label><span className={`cc-st${env ? " env" : ""}`}>{ccState(st)}</span></div>
+              <div className="cc-row">
+                <input id={`cc-${f.key}`} type="password" autoComplete="off" spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                  data-1p-ignore value={vals[f.key] || ""} disabled={env || !!busy}
+                  placeholder={env ? "由服务器环境变量提供" : st?.configured ? "留空表示不修改" : f.hint}
+                  onChange={(e) => setVals((v) => ({ ...v, [f.key]: e.target.value }))} />
+                {st?.source === "file" && <ClearBtn onClear={() => clear(f.key)} disabled={!!busy} />}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="sheet-row">
+        <button type="button" className="btn" onClick={runTest} disabled={!!busy || dirty}>{busy === "test" ? "测试中…" : "测试连接"}</button>
+        <button type="button" className="btn solid" onClick={save} disabled={!!busy || !dirty}>{busy === "save" ? "保存中…" : "保存"}</button>
+      </div>
+      {dirty && <p className="cc-note">测试用的是已保存的凭据：先保存，再测试。</p>}
+      {msg && <p className={`cc-msg${msg.bad ? " bad" : ""}`} role="status">{msg.text}</p>}
+      {test && <CCTestResult r={test} />}
+    </Sheet>
   );
 }
 
@@ -88,6 +216,8 @@ function Runs({ runs, reload }: { runs: any[]; reload: () => void }) {
 export default function Engine() {
   const { data, error, loadedAt, reload } = usePoll<any>("/api/engine", 10000);
   const phone = useMedia("(max-width: 900px)");
+  const [ccOpen, setCcOpen] = useState(false);
+  const closeCc = useCallback(() => setCcOpen(false), []);
   useRestoreScroll(!!data);
   if (!data) return <main className="page">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   const d = data.disk;
@@ -96,6 +226,8 @@ export default function Engine() {
   const other = Math.max(0, used - d.media - d.runs - d.packages);
   const agy = data.agy;
   const yt = data.alerts.find((a: any) => a.key === "YOUTUBE_AUTH" && !a.resolved_at);
+  const cc = data.youtube.cookiecloud;
+  const ccs = data.youtube.state?.source === "cookiecloud" ? data.youtube.state : null;
   const c = data.calls || {};
   return (
     <main className="page">
@@ -120,13 +252,24 @@ export default function Engine() {
           <div className="sub"><span className="num">{data.model}</span>{agy?.checked_at ? ` · ${ago(agy.checked_at)}检查` : " · 每次付印前自动探测"}</div>
         </div>
         <div className="inst">
-          <Lamp state={yt ? "bad" : data.youtube.profile_ok ? "ok" : "idle"} label="YouTube 会话" />
-          <div className="big">{yt ? "需要登录" : data.youtube.profile_ok ? "已就绪" : "未配置"}</div>
-          {phone ? <div className="sub">需要重新登录时，在电脑上打开机房操作。</div> : (
+          <Lamp state={yt ? "bad" : cc?.configured ? (ccs?.ok ? "ok" : ccs ? "bad" : "idle") : data.youtube.profile_ok ? "ok" : "idle"} label="YouTube 会话" />
+          <div className="big">{yt ? "需要登录" : cc?.configured ? (ccs?.ok ? "已就绪" : ccs ? "读取失败" : "待验证") : data.youtube.profile_ok ? "已就绪" : "未配置"}</div>
+          <div className="sub">
+            {cc?.configured ? <>登录态来自你的 Chrome（CookieCloud）{ccs?.at && <> · {ago(ccs.at)}读取</>}
+              {ccs?.ok ? <> · <span className="num">{ccs.count}</span> 条</> : ccs?.code ? <> · {data.youtube.fix?.[ccs.code] || ccs.code}</> : null}</>
+              : "登录态来自服务器上的 Chromium（未配置 CookieCloud）"}
+          </div>
+          {cc?.configured ? <button className="btn sm inst-act" onClick={() => setCcOpen(true)}>修改</button> : (
             <>
-              <div className="sub">远程屏幕登录需要先在电脑上建隧道：</div>
-              <Cmd text={SSH} />
-              <button className="btn sm inst-act" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
+              <button className="btn sm inst-act" onClick={() => setCcOpen(true)}>配置 CookieCloud</button>
+              {!phone && (
+                <details className="fold mini inst-alt">
+                  <summary><i className="plus" aria-hidden /><span>或者：在服务器的 Chromium 里登录</span></summary>
+                  <div className="sub">远程屏幕登录需要先在电脑上建隧道：</div>
+                  <Cmd text={SSH} />
+                  <button className="btn sm inst-act" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
+                </details>
+              )}
             </>
           )}
         </div>
@@ -175,6 +318,7 @@ export default function Engine() {
           </ol>
         </div>
       </div>
+      {ccOpen && <CookieCloudSheet cc={cc} onClose={closeCc} reload={reload} />}
     </main>
   );
 }

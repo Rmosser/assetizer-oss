@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from . import config
+from .cookies import ytdlp_args
 
 
 class AcquireError(RuntimeError):
@@ -56,22 +57,22 @@ def classify(stderr: str) -> str:
 
 
 def _base(s: config.Settings) -> list[str]:
+    """yt-dlp without the login; callers add cookies.ytdlp_args() (CookieCloud, else the server Chromium)."""
     cmd = [s.ytdlp_bin, "--ignore-config", "--no-playlist", "--no-cache-dir", "--socket-timeout", "30"]
     if s.deno_bin:
         cmd += ["--js-runtimes", f"deno:{s.deno_bin}"]
-    if s.browser_profile:
-        cmd += ["--cookies-from-browser", f"chromium:{s.browser_profile}"]
     return cmd
 
 
 def metadata(url: str) -> dict:
     s = config.get()
-    r = subprocess.run(_base(s) + ["-J", "--skip-download", "--", url], capture_output=True, text=True, timeout=180)
+    with ytdlp_args() as auth:
+        r = subprocess.run(_base(s) + auth + ["-J", "--skip-download", "--", url], capture_output=True, text=True, timeout=180)
     if r.returncode != 0:
         raise AcquireError(classify(r.stderr), r.stderr.strip().splitlines()[-1][:300] if r.stderr.strip() else "")
     info = json.loads(r.stdout)
     keep = ("id", "title", "channel", "channel_id", "uploader", "duration", "upload_date", "live_status",
-            "webpage_url", "description", "thumbnail", "language", "timestamp")
+            "webpage_url", "description", "thumbnail", "language", "timestamp", "was_live", "availability")
     return {k: info.get(k) for k in keep}
 
 
@@ -83,11 +84,12 @@ def download(url: str, dest_dir: Path) -> Path:
     if out.exists() and out.stat().st_size > 0:
         return out
     # §R6: prefer h264/aac ≤1080p (avoids CPU-heavy AV1/VP9 decode and 10-bit sources)
-    cmd = _base(s) + ["-S", "res:1080,vcodec:h264,acodec:aac", "-f", "bv*+ba/b",
-                      "--merge-output-format", "mkv", "--remux-video", "mkv",
-                      "--retries", "5", "--fragment-retries", "5", "--no-part",
-                      "-o", str(dest_dir / "source.%(ext)s"), "--", url]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=6 * 3600)
+    with ytdlp_args() as auth:
+        cmd = _base(s) + auth + ["-S", "res:1080,vcodec:h264,acodec:aac", "-f", "bv*+ba/b",
+                                 "--merge-output-format", "mkv", "--remux-video", "mkv",
+                                 "--retries", "5", "--fragment-retries", "5", "--no-part",
+                                 "-o", str(dest_dir / "source.%(ext)s"), "--", url]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=6 * 3600)
     (dest_dir / "yt-dlp.log").write_text(r.stdout[-20000:] + "\n--- stderr ---\n" + r.stderr[-20000:])
     if not out.exists():
         alt = sorted(p for p in dest_dir.glob("source.*") if p.suffix in (".mp4", ".webm", ".mkv") and p.stat().st_size > 0)

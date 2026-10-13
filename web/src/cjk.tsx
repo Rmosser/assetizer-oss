@@ -82,7 +82,7 @@ export function cnNo(n: number): string {
   return (t > 1 ? CN[t] : "") + "十" + (o ? CN[o] : "");
 }
 
-/** Quoted fragments inside a note: “…” or 「…」 (used to find the sentence a 朱批 is about). */
+/** Quoted fragments inside a note: “…” or 「…」 (used to find the sentence a 校注 is about). */
 export function quotedFragments(s: string): string[] {
   const out: string[] = [];
   for (const m of (s || "").matchAll(/[“「]([^”」]{4,80})[”」]/g)) out.push(m[1]);

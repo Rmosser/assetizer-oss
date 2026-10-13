@@ -155,3 +155,748 @@ def test_public_host_requires_access_jwt(tmp_path, monkeypatch):
     assert c.get("/api/overview", headers={"host": "kan.example.com", "cf-access-jwt-assertion": "forged"}).status_code == 403
     assert c.get("/api/overview", headers={"host": "evil.example"}).status_code == 403
     assert c.get("/api/overview", headers={"host": "127.0.0.1:8770"}).status_code == 200
+
+
+# ---------------------------------------------------------------- design §R2: tuning → locked, 校注, no per-issue review
+@pytest.fixture
+def home(tmp_path):
+    import dataclasses
+    from assetizer import config, db
+    config.override(dataclasses.replace(config.load(), home=tmp_path))
+    db._local.conn = None
+    yield tmp_path
+    db._local.conn = None
+
+
+def test_migration_locks_tuned_channels_and_dates_deliveries(home):
+    from assetizer import db
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, mode, created_at, updated_at) VALUES ('tom','Tom','TRACKED',?,?), ('wang','Wang','TRACKED',?,?)", t, t, t, t)
+    db.exec("INSERT INTO playbooks(channel_id, version, status, data, created_at) VALUES ('tom',1,'ACTIVE','{}',?), ('wang',1,'NEEDS_CONFIRMATION','{}',?)", t, t)
+    db.exec("INSERT INTO sources(id, delivery, notion_page_id, created_at, updated_at) VALUES ('a','DELIVERED','pg',?,'2026-10-01T00:00:00+00:00'), ('b','NOT_STARTED',NULL,?,?)", t, t, t)
+    db.set_setting("notion_database_id", "00000006-0000-8000-a000-000000000006")
+    # a database from before design §R2
+    db.exec("ALTER TABLE channels DROP COLUMN stage")
+    db.exec("ALTER TABLE sources DROP COLUMN delivered_at")
+    db.exec("ALTER TABLE sources DROP COLUMN notion_database_id")
+    db._local.conn = None
+    assert {r["id"]: r["stage"] for r in db.q("SELECT id, stage FROM channels")} == {"tom": "LOCKED", "wang": "TUNING"}
+    assert {r["id"]: r["delivered_at"] for r in db.q("SELECT id, delivered_at FROM sources")} == {"a": "2026-10-01T00:00:00+00:00", "b": None}
+    assert {r["id"]: r["notion_database_id"] for r in db.q("SELECT id, notion_database_id FROM sources")} == \
+        {"a": "00000006-0000-8000-a000-000000000006", "b": None}
+
+
+def test_tuning_samples_wait_for_lock(home, monkeypatch):
+    from assetizer import db, delivery
+    from assetizer.util import now
+    t = now()
+    db.set_setting("notion_database_id", "x")
+    db.exec("INSERT INTO channels(id, name, mode, created_at, updated_at) VALUES ('wang','Wang','TRACKED',?,?)", t, t)
+    db.exec("INSERT INTO sources(id, channel_id, current_run_id, created_at, updated_at) VALUES ('s1','wang','r1',?,?)", t, t)
+    picked = []
+    monkeypatch.setattr(delivery, "client", lambda: object())
+    monkeypatch.setattr(delivery, "deliver", lambda sid: picked.append(sid) or {"status": "DELIVERED"})
+    assert delivery.deliver_pending() is False and picked == []
+    db.exec("UPDATE channels SET stage='LOCKED'")
+    assert delivery.deliver_pending() is True and picked == ["s1"]
+
+
+def test_notes_block_lists_doubts_in_source_order(home):
+    from assetizer import db, delivery
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('s',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('r','s','COMPLETE',?)", t)
+    for uid, title, start in [("u1", "缺口回踩", 95.0), ("u2", "减仓计划", 30.0)]:
+        db.exec("INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, data) VALUES (?,'r','s',?,0,?,?,?,'{}')",
+                uid, uid, title, start, start + 60)
+
+    def flag(uid, sev, title, body="", ev=None):
+        db.exec("""INSERT INTO flags(source_id, run_id, target_kind, target_id, kind, severity, title, body, evidence, origin, created_at)
+                   VALUES ('s','r','UNIT',?,'AI_X',?,?,?,?,'AI_CHECK',?)""", uid, sev, title, body, json.dumps(ev or {}), t)
+    flag("u1", "REVIEW", "「缺口回踩」程度可能被加强", "文中写成建议买入", {"quote": "这个位置可以关注"})
+    flag("u2", "REVIEW", "「减仓计划」归属可能有误")
+    flag("u1", "INFO", "「缺口回踩」片段从半句开始")
+    assert [B.plain(b) for b in delivery._notes("r")] == [
+        "〔00:00:30 减仓计划〕归属可能有误",
+        "〔00:01:35 缺口回踩〕程度可能被加强。文中写成建议买入 原话：「这个位置可以关注」",
+    ]
+
+
+def test_lock_on_confirm_enables_intake(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    t = now()
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, created_at, updated_at) VALUES ('wang','Wang','UCx','TRACKED',?,?)", t, t)
+    pid = db.exec("INSERT INTO playbooks(channel_id, version, status, data, created_at) VALUES ('wang',1,'NEEDS_CONFIRMATION','{}',?)", t)
+    c = TestClient(web.app)
+    assert c.post(f"/api/playbooks/{pid}/confirm", json={}, headers={"host": "127.0.0.1"}).status_code == 200
+    assert db.one("SELECT stage FROM channels WHERE id='wang'")["stage"] == "LOCKED"
+    assert db.setting("ingest:wang")["enabled"] is True
+
+
+# ---------------------------------------------------------------- Notion target per channel (notion/mapping.py)
+LIB = {"properties": {
+    "Name": {"id": "title", "type": "title", "title": {}},
+    "内容所属": {"id": "own", "type": "select", "select": {"options": [{"name": "@交易员汤姆"}, {"name": "王海滨"}]}},
+    "会员/公开": {"id": "acc", "type": "select", "select": {"options": [{"name": n} for n in ("公开直播", "会员直播", "公开视频", "会员视频")]}},
+    "内容发布日期": {"id": "date", "type": "date", "date": {}},
+    "Re-上级 项目": {"id": "up", "type": "relation", "relation": {"database_id": "lib"}},
+    "AI 摘要": {"id": "sum", "type": "rich_text", "rich_text": {}},
+    "收录日期": {"id": "ct", "type": "created_time", "created_time": {}},
+    "视频链接": {"id": "vl", "type": "url", "url": {}},
+}}
+
+
+def test_preset_maps_by_name_and_follows_renames():
+    from assetizer.notion import mapping as M
+    schema = M.schema_of(LIB)
+    cfg = M.preset("trader-tom", "lib", schema, "https://app.notion.com/p/0000000500008000a000000000000005")
+    assert cfg["properties"]["own"] == {"name": "内容所属", "type": "select", "source": "fixed", "value": "@交易员汤姆"}
+    assert cfg["properties"]["up"]["value"] == ["00000005-0000-8000-a000-000000000005"]
+    assert cfg["template"] == "reading-guide" and M.problems(cfg, schema) == {}
+    # renamed in Notion: the id is unchanged, so the mapping still holds
+    renamed = {**schema, "own": {**schema["own"], "name": "作者"}}
+    assert M.problems(cfg, renamed) == {}
+
+
+def test_mapping_problems_pause_instead_of_writing_wrong():
+    from assetizer.notion import mapping as M
+    schema = M.schema_of(LIB)
+    cfg = M.preset("trader-tom", "lib", schema, "0000000500008000a000000000000005")
+    gone = {k: v for k, v in schema.items() if k != "own"}
+    assert "已没有「内容所属」" in M.problems(cfg, gone)["own"]
+    retyped = {**schema, "date": {"name": "内容发布日期", "type": "rich_text"}}
+    assert "类型" in M.problems(cfg, retyped)["date"]
+    no_option = {**schema, "own": {**schema["own"], "options": ["王海滨"]}}
+    assert "没有选项「@交易员汤姆」" in M.problems(cfg, no_option)["own"]
+    assert "已不存在" in M.problems(cfg, schema, page_ok=lambda pid: False)["up"]
+    bad_tpl = {**cfg, "properties": {**cfg["properties"], "title": {**cfg["properties"]["title"], "value": "{nope}"}}}
+    assert "nope" in M.problems(bad_tpl, schema)["title"]
+    assert "标题属性必须配置" in M.problems({"properties": {}}, schema)["title"]
+
+
+def test_properties_payload_for_tom():
+    from assetizer.notion import mapping as M
+    schema = M.schema_of(LIB)
+    cfg = M.preset("trader-tom", "lib", schema, "0000000500008000a000000000000005")
+    cfg["properties"]["sum"] = {"name": "AI 摘要", "type": "rich_text", "source": "fixed", "value": "x"}
+    ctx = {"channel": "交易员汤姆", "date": "2026-09-08", "date8": "20260908", "datetime": "2026-09-08T12:25+00:00",
+           "headline": "MRNA双缺口地量回踩", "video_title": "t", "url": "u", "access": "public_video", "run_id": "r"}
+    p = M.properties(cfg, schema, ctx)
+    assert p["title"]["title"][0]["text"]["content"] == "交易员汤姆-20260908-MRNA双缺口地量回踩"
+    assert p["acc"] == {"select": {"name": "公开视频"}}
+    assert p["date"] == {"date": {"start": "2026-09-08"}}
+    assert p["up"] == {"relation": [{"id": "00000005-0000-8000-a000-000000000005"}]}
+    assert "ct" not in p
+
+
+def test_access_kind():
+    from assetizer.notion.mapping import access_kind
+    assert access_kind({"live_status": "not_live"}) == "public_video"
+    assert access_kind({"live_status": "was_live"}) == "public_live"
+    assert access_kind({"live_status": "was_live", "availability": "subscriber_only"}) == "member_live"
+    assert access_kind({}) == "public_video"
+
+
+def _run_fixture(home):
+    from assetizer import config, db
+    from assetizer.util import now, write_json
+    t = now()
+    db.exec("INSERT INTO channels(id, name, mode, stage, created_at, updated_at) VALUES ('trader-tom','交易员汤姆','TRACKED','LOCKED',?,?)", t, t)
+    db.exec("""INSERT INTO sources(id, url, channel_id, title, headline, published_at, info, created_at, updated_at)
+               VALUES ('v','https://www.youtube.com/watch?v=v','trader-tom','09/08 技术分析','题眼','20260908','{}',?,?)""", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, summary, created_at) VALUES ('r','v','COMPLETE','{}',?)", t)
+    db.exec("""INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, learning_priority, data)
+               VALUES ('u1','r','v','a',0,'MRNA双缺口回踩',60,120,3,?)""", json.dumps({"tickers": ["MRNA"], "why": "复合支撑"}))
+    rd = config.get().runs_dir / "r"
+    shot = rd / "s.jpg"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    shot.write_bytes(b"x")
+    write_json(rd / "composition.json", {"blocks": [
+        {"section_id": "i", "kind": "INTRO", "markdown": "本期导语。\n\n### 学习导航\n\n| 单元 | 看点 |\n|---|---|\n| a | b |", "unit_id": None, "video": None, "screenshots": []},
+        {"section_id": "s1", "kind": "UNIT", "unit_id": "u1", "video": None,
+         "screenshots": [{"path": str(shot), "t": 75, "reason": "缺口"}],
+         "markdown": "## 01. MRNA双缺口回踩\n\n### Ticker\nMRNA\n\n### 推荐截图位置\n01:15\n\n### 老师在讲什么？\n回踩。"}]})
+    write_json(rd / "machine" / "transcript.json", {"segments": [{"start": 50, "end": 70, "text": "这个缺口"}, {"start": 200, "end": 210, "text": "无关"}], "words": []})
+
+
+def test_reading_guide_puts_screenshots_under_their_field(home):
+    from assetizer import templates
+    _run_fixture(home)
+    from assetizer import db
+    plan = templates.reading_guide(db.one("SELECT * FROM sources"), "r", {"heading": "{channel} - {date} 美股市场复盘与读图学习导航"})
+    keys = [it["key"] for it in plan]
+    text = [B.plain(it["block"]) if "block" in it else "[img]" for it in plan]
+    assert text[1] == "交易员汤姆 - 2026-09-08 美股市场复盘与读图学习导航"
+    assert text[2].startswith("复盘背景概述：\n本期导语") and "单元" not in text[2]
+    i = text.index("推荐截图位置")
+    assert text[i + 1] == "01:15" and text[i + 2] == "[img]"
+    assert "二、优先学习清单（Top 推荐精选）" in text and len(keys) == len(set(keys))
+    assert sum(1 for it in plan if it.get("block", {}).get("type") == "table") == 1  # built from units: no closing list
+
+
+def test_reading_guide_uses_the_closing_list_when_present(home):
+    from assetizer import config, db, templates
+    from assetizer.util import read_json, write_json
+    _run_fixture(home)
+    p = config.get().runs_dir / "r" / "composition.json"
+    comp = read_json(p)
+    comp["blocks"].append({"section_id": "o", "kind": "OUTRO", "markdown": "### 优先学习清单\n\n| 优先级 | 单元 |\n|---|---|\n| ★★★ | a |",
+                           "unit_id": None, "video": None, "screenshots": []})
+    write_json(p, comp)
+    plan = templates.reading_guide(db.one("SELECT * FROM sources"), "r", {})
+    text = [B.plain(it["block"]) if "block" in it else "" for it in plan]
+    tables = [it for it in plan if it.get("block", {}).get("type") == "table"]
+    assert text.count("二、优先学习清单（Top 推荐精选）") == 1 and len(tables) == 1
+    assert "三、本期可带走的要点" not in text
+
+
+def test_chapters_quotes_transcript_within_span(home):
+    from assetizer import db, templates
+    _run_fixture(home)
+    plan = templates.chapters(db.one("SELECT * FROM sources"), "r", {})
+    text = [B.plain(it["block"]) if "block" in it else "[img]" for it in plan]
+    assert plan[0]["block"]["type"] == "embed" and "视频发布于2026年09月08日" in text
+    assert "第一章：MRNA双缺口回踩" in text
+    assert "[00:01:00] 这个缺口" in text and not any("无关" in t for t in text)
+
+
+def test_broken_mapping_blocks_delivery_with_alert(home, monkeypatch):
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    _run_fixture(home)
+    db.exec("UPDATE sources SET current_run_id='r'")
+    cfg = M.preset("trader-tom", "lib", M.schema_of(LIB), "0000000500008000a000000000000005")
+    M.save("trader-tom", cfg)
+    renamed_option = json.loads(json.dumps(LIB))
+    renamed_option["properties"]["内容所属"]["select"]["options"] = [{"name": "Tom"}]
+    calls = []
+
+    class Fake:
+        def _req(self, method, path, **kw):
+            calls.append((method, path))
+            return renamed_option
+
+        def page(self, pid):
+            return {"archived": False}
+    monkeypatch.setattr(delivery, "client", lambda: Fake())
+    assert delivery.deliver("v")["status"] == "BLOCKED"
+    s = db.one("SELECT delivery, delivery_reason FROM sources")
+    assert s["delivery"] == "BLOCKED" and s["delivery_reason"].startswith("NOTION_MAPPING")
+    assert db.one("SELECT title FROM alerts WHERE key='notion-mapping:trader-tom' AND resolved_at IS NULL")
+    assert all(m == "GET" for m, _ in calls)  # nothing was written
+    # paused sources are not retried every loop
+    assert delivery.deliver_pending() is False and len(calls) == 1
+
+
+def test_video_already_in_library_is_registered_not_written(home, monkeypatch):
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    _run_fixture(home)
+    db.exec("UPDATE sources SET current_run_id='r'")
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), "0000000500008000a000000000000005"))
+    assert M.get("trader-tom")["properties"]["vl"]["source"] == "video_url"
+    calls = []
+
+    class Fake:
+        def _req(self, method, path, **kw):
+            calls.append((method, path, kw.get("json")))
+            if path.endswith("/query"):
+                return {"results": [{"id": "hand", "url": "https://notion/hand", "archived": False,
+                                     "properties": {"Name": {"type": "title", "title": [{"plain_text": "手工整理的那期"}]}}}]}
+            return LIB
+
+        def page(self, pid):
+            return {"archived": False, "icon": None}
+    monkeypatch.setattr(delivery, "client", lambda: Fake())
+    assert delivery.deliver("v")["status"] == "REGISTERED"
+    q = next(c for c in calls if c[1].endswith("/query"))
+    assert q[2]["filter"] == {"property": "视频链接", "url": {"contains": "v"}}
+    assert not any(m == "POST" and p == "/pages" for m, p, _ in calls)
+    s = db.one("SELECT delivery, delivery_reason, notion_url, notion_page_id FROM sources")
+    assert s == {"delivery": "REGISTERED", "delivery_reason": "库里已有：手工整理的那期", "notion_url": "https://notion/hand", "notion_page_id": None}
+    assert delivery.deliver_pending() is False  # not retried
+
+
+# ---------------------------------------------------------------- 频道调试台 (tuning.py)
+def _tuning_fixture():
+    from assetizer import db
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, stage, created_at, updated_at) VALUES ('w','王','UCw','TRACKED','TUNING',?,?)", t, t)
+    v1 = db.exec("INSERT INTO playbooks(channel_id, version, status, data, created_at) VALUES ('w',1,'NEEDS_CONFIRMATION',?,?)",
+                 json.dumps({"rules": [{"rule": "按章节写"}]}), t)
+    v2 = db.exec("INSERT INTO playbooks(channel_id, version, status, data, created_at) VALUES ('w',2,'NEEDS_CONFIRMATION',?,?)",
+                 json.dumps({"rules": [{"rule": "按章节写"}, {"rule": "附原话"}]}), t)
+    return v1, v2
+
+
+def test_trials_queue_video_by_video_and_run_one_at_a_time(home):
+    from assetizer import db, tuning
+    v1, v2 = _tuning_fixture()
+    assert tuning.draft_playbook("w")["id"] == v2
+    tuning.add_sample("w", "https://youtu.be/AAAAAAAAAAA")
+    tuning.add_sample("w", "BBBBBBBBBBB")
+    out = tuning.trial("w", [v1, v2])
+    assert [(x["source_id"], x["playbook_id"]) for x in out] == [
+        ("AAAAAAAAAAA", v1), ("AAAAAAAAAAA", v2), ("BBBBBBBBBBB", v1), ("BBBBBBBBBBB", v2)]
+    # the first one went out at once; the rest wait, and nothing more goes out while a run is queued
+    assert [(r["source_id"], r["playbook_id"]) for r in db.q("SELECT source_id, playbook_id FROM runs")] == [("AAAAAAAAAAA", v1)]
+    assert tuning.dispatch_next() is None
+    # asking again for the same pairs queues nothing new
+    assert all(x.get("skipped") for x in tuning.trial("w", [v1, v2]))
+    db.exec("UPDATE runs SET production='COMPLETE'")
+    assert tuning.dispatch_next() == "AAAAAAAAAAA-r2"
+    assert db.one("SELECT playbook_id FROM runs WHERE id='AAAAAAAAAAA-r2'")["playbook_id"] == v2
+    # a login problem holds the whole queue (it would hit every video the same way)
+    db.exec("UPDATE runs SET production='WAITING', wait_reason='YOUTUBE_AUTH' WHERE id='AAAAAAAAAAA-r2'")
+    tuning.trial("w", [v1], ["AAAAAAAAAAA"])
+    assert not db.one("SELECT 1 FROM runs WHERE source_id='BBBBBBBBBBB'")
+    # a video waiting on something of its own lets the next video go first
+    db.exec("UPDATE runs SET wait_reason='LIVE_IN_PROGRESS' WHERE id='AAAAAAAAAAA-r2'")
+    assert tuning.dispatch_next() == "BBBBBBBBBBB-r1"
+    wb = tuning.workbench("w")
+    assert [(q["source_id"], q["version"]) for q in wb["queue"]] == [("BBBBBBBBBBB", 2), ("AAAAAAAAAAA", 1)]
+    assert tuning.clear_queue("w") == 2 and tuning.workbench("w")["queue"] == []
+    db.exec("UPDATE channels SET stage='LOCKED'")
+    with pytest.raises(ValueError):
+        tuning.trial("w", [v2])
+
+
+def test_votes_feed_the_preference_summary(home):
+    from assetizer import db, tuning
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    for sid in ("AAAAAAAAAAA", "BBBBBBBBBBB"):
+        tuning.add_sample("w", sid)
+        for n, pb in ((1, v1), (2, v2)):
+            db.exec("INSERT INTO runs(id, source_id, playbook_id, production, summary, created_at) VALUES (?,?,?,'COMPLETE','{}',?)",
+                    f"{sid}-r{n}", sid, pb, now())
+    tuning.vote("AAAAAAAAAAA-r2", True, "章节清楚")
+    tuning.vote("BBBBBBBBBBB-r2", True, None)
+    tuning.vote("BBBBBBBBBBB-r1", False, "太长")
+    summ = {x["version"]: x for x in tuning.workbench("w")["summary"]}
+    assert (summ[2]["liked"], summ[2]["done"], summ[2]["notes"]) == (2, 2, 1)
+    assert (summ[1]["liked"], summ[1]["notes"]) == (0, 1)
+    run = next(r for sm in tuning.workbench("w")["samples"] for r in sm["runs"] if r["id"] == "AAAAAAAAAAA-r2")
+    assert run["liked"] is True and run["note"] == "章节清楚"
+
+
+def test_tuning_channel_runs_on_the_draft_instead_of_waiting(home):
+    from assetizer import db
+    from assetizer.pipeline import acquire
+    from assetizer.util import now
+    _, v2 = _tuning_fixture()
+    db.exec("INSERT INTO sources(id, channel_id, created_at, updated_at) VALUES ('CCCCCCCCCCC','w',?,?)", now(), now())
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('c-r1','CCCCCCCCCCC','RUNNING',?)", now())
+
+    class Ctx:
+        id = "c-r1"
+        run = {"id": "c-r1"}
+        source = {"id": "CCCCCCCCCCC", "channel_id": "w"}
+        def save(self, *a): pass
+    out = acquire.playbook(Ctx())
+    assert out["playbook_id"] == v2
+    assert db.one("SELECT 1 x FROM samples WHERE channel_id='w' AND source_id='CCCCCCCCCCC'")
+
+
+def test_compare_aligns_units_by_time_and_diffs_rules(home):
+    from assetizer import db, tuning
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('s',?,?)", now(), now())
+    for rid, pb in (("s-r1", v1), ("s-r2", v2)):
+        db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at) VALUES (?,?,?,'COMPLETE',?)", rid, "s", pb, now())
+    for uid, rid, title, a, b in [("a1", "s-r1", "通胀", 0, 100), ("a2", "s-r1", "汇率", 100, 200),
+                                  ("b1", "s-r2", "通胀与利率", 5, 110), ("b2", "s-r2", "地产", 300, 400)]:
+        db.exec("INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, data) VALUES (?,?,'s',?,0,?,?,?,'{}')",
+                uid, rid, uid, title, a, b)
+    c = tuning.compare("s-r1", "s-r2")
+    rows = [((p["a"] or {}).get("title"), (p["b"] or {}).get("title")) for p in c["pairs"]]
+    assert rows == [("通胀", "通胀与利率"), ("汇率", None), (None, "地产")]
+    assert c["matched"] == 1 and c["rules_added"] == ["附原话"] and c["rules_removed"] == []
+    tuning.adopt("s", "s-r1")
+    assert db.one("SELECT current_run_id, delivery FROM sources WHERE id='s'") == {"current_run_id": "s-r1", "delivery": "NOT_STARTED"}
+    db.exec("UPDATE runs SET production='RUNNING' WHERE id='s-r2'")
+    with pytest.raises(ValueError):
+        tuning.adopt("s", "s-r2")
+
+
+def test_retune_pauses_intake(home):
+    from assetizer import db, tuning
+    from assetizer.ingest import set_enabled
+    _tuning_fixture()
+    with pytest.raises(ValueError):
+        tuning.retune("w")  # still tuning
+    db.exec("UPDATE channels SET stage='LOCKED'")
+    set_enabled("w", True)
+    assert tuning.retune("w") == {"stage": "TUNING", "ingest_paused": True}
+    assert db.setting("ingest:w")["enabled"] is False
+
+
+
+def test_intake_falls_back_to_channel_listing_and_compares_approx_dates_by_day(home, monkeypatch):
+    from assetizer import db, ingest
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, stage, created_at, updated_at) VALUES ('t','Tom','UCt','TRACKED','LOCKED',?,?)", t, t)
+    db.set_setting("ingest:t", {"enabled": True, "since": "2026-10-09T15:00:00+00:00", "min_minutes": 10})
+    monkeypatch.setattr(ingest, "rss", lambda cid: (_ for _ in ()).throw(RuntimeError("404")))
+    monkeypatch.setattr(ingest, "listing", lambda cid, limit=15: [
+        {"id": "AAAAAAAAAAA", "title": "same day", "published": "2026-10-09T00:00:00+00:00", "duration": 3600, "approx": True},
+        {"id": "BBBBBBBBBBB", "title": "short", "published": "2026-10-10T00:00:00+00:00", "duration": 120, "approx": True},
+        {"id": "CCCCCCCCCCC", "title": "older", "published": "2026-10-08T00:00:00+00:00", "duration": 3600, "approx": True}])
+    import assetizer.delivery as d
+    monkeypatch.setattr(d, "registered_in_target", lambda src: None)
+    assert ingest.poll()["queued"] == ["AAAAAAAAAAA"]
+
+
+def test_channel_info_update_and_fixed_routes_win(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    _tuning_fixture()
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    r = c.post("/api/channels/w", json={"name": " 王海滨 ", "why": "宏观框架"}, headers=h)
+    assert r.status_code == 200 and r.json() == {"id": "w", "name": "王海滨", "why": "宏观框架"}
+    assert c.post("/api/channels/w", json={"name": "  "}, headers=h).status_code == 400
+    # /api/channels/track is its own endpoint, not a channel called "track"
+    r = c.post("/api/channels/track", json={"name": "x", "why": "y", "prompt": "z", "source_id": "nope"}, headers=h)
+    assert r.status_code == 400 and "频道信息" in r.json()["detail"]
+
+
+def test_channels_api_reports_compile_state(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    _tuning_fixture()
+    p1 = db.exec("INSERT INTO channel_prompts(channel_id, version, text, sha256, created_at) VALUES ('w',1,'a','x','2026-10-01T00:00:00+00:00')")
+    db.exec("UPDATE playbooks SET prompt_id=? WHERE version=1", p1)
+    c = TestClient(web.app)
+    state = lambda: next(x for x in c.get("/api/channels", headers={"host": "127.0.0.1"}).json()["channels"] if x["id"] == "w")["compile"]
+    assert state() == {"state": "done"}
+    db.exec("INSERT INTO channel_prompts(channel_id, version, text, sha256, created_at) VALUES ('w',2,'b','y',?)", now())
+    assert state()["state"] == "running"
+    db.event("compile", "Playbook 编译（w）失败：CONTENT_FAILURE", level="error")
+    assert state()["state"] == "failed" and "CONTENT_FAILURE" in state()["error"]
+
+
+# ---------------------------------------------------------------- YouTube login via CookieCloud (cookies.py)
+class _Resp:
+    def __init__(self, status, text="", ctype="text/plain", data=None):
+        self.status_code, self.text, self.headers, self._data = status, text, {"content-type": ctype}, data
+
+    def json(self):
+        if self._data is None:
+            raise ValueError
+        return self._data
+
+
+NETSCAPE = "# Netscape HTTP Cookie File\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx\n.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\ty\n"
+
+
+def _cc(home, monkeypatch, resp):
+    from assetizer import cookies, db
+    db.set_setting("cookiecloud_origin", "https://cc.example.net/")
+    monkeypatch.setenv("ASSETIZER_COOKIECLOUD_TOKEN", "ccat_test")
+    monkeypatch.setenv("ASSETIZER_CF_ACCESS_CLIENT_ID", "id.access")
+    monkeypatch.setenv("ASSETIZER_CF_ACCESS_CLIENT_SECRET", "sec")
+    seen = {}
+
+    def get(url, params=None, headers=None, **kw):
+        seen.update(url=url, params=params, headers=headers)
+        return resp
+    monkeypatch.setattr(cookies.httpx, "get", get)
+    return seen
+
+
+def test_cookiecloud_fetch_sends_both_credentials_and_counts_httponly(home, monkeypatch):
+    from assetizer import cookies
+    seen = _cc(home, monkeypatch, _Resp(200, NETSCAPE))
+    text = cookies.fetch()
+    assert seen["url"] == "https://cc.example.net/api/v3/cookies"
+    assert seen["params"] == {"format": "netscape", "domains": "youtube.com"}
+    assert seen["headers"]["Authorization"] == "Bearer ccat_test" and seen["headers"]["CF-Access-Client-Id"] == "id.access"
+    assert len(cookies._cookie_lines(text)) == 2
+
+
+@pytest.mark.parametrize("resp,code", [
+    (_Resp(403, "<html>Access</html>", "text/html"), "access_denied"),
+    (_Resp(302, ""), "access_denied"),
+    (_Resp(401, "", "application/json", {"code": "token_revoked"}), "token_revoked"),
+    (_Resp(404, "", "application/json", {"code": "cookie_payload_missing"}), "cookie_payload_missing"),
+    (_Resp(200, "# Netscape HTTP Cookie File\n.google.com\tTRUE\t/\tTRUE\t0\tSID\tx\n"), "no_youtube_cookies"),
+])
+def test_cookiecloud_errors_have_codes(home, monkeypatch, resp, code):
+    from assetizer import cookies
+    _cc(home, monkeypatch, resp)
+    with pytest.raises(cookies.CookieError) as e:
+        cookies.fetch()
+    assert e.value.code == code and code in cookies.FIX
+
+
+def test_ytdlp_args_uses_a_private_temp_file_and_removes_it(home, monkeypatch):
+    import os
+    import stat
+    from assetizer import cookies, db
+    _cc(home, monkeypatch, _Resp(200, NETSCAPE))
+    with cookies.ytdlp_args() as args:
+        assert args[0] == "--cookies"
+        path = args[1]
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600 and "SID" in open(path).read()
+    assert not os.path.exists(path)
+    st = db.setting("youtube_cookies_state")
+    assert st["ok"] is True and st["source"] == "cookiecloud" and st["count"] == 2
+
+
+def test_ytdlp_args_falls_back_to_the_server_browser_with_an_alert(home, monkeypatch):
+    import dataclasses
+    from pathlib import Path
+    from assetizer import config, cookies, db
+    config.override(dataclasses.replace(config.get(), browser_profile=Path("/srv/profile")))
+    _cc(home, monkeypatch, _Resp(401, "", "application/json", {"code": "token_revoked"}))
+    with cookies.ytdlp_args() as args:
+        assert args == ["--cookies-from-browser", "chromium:/srv/profile"]
+    assert db.setting("youtube_cookies_state")["code"] == "token_revoked"
+    assert db.one("SELECT body FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")["body"].endswith("（错误码 token_revoked）")
+    # not configured at all: the browser profile, quietly
+    db.set_setting("cookiecloud_origin", None)
+    with cookies.ytdlp_args() as args:
+        assert args == ["--cookies-from-browser", "chromium:/srv/profile"]
+
+
+@pytest.mark.parametrize("failure", ["chmod", "record"])
+def test_ytdlp_temp_file_is_removed_when_preparation_fails(home, monkeypatch, failure):
+    from assetizer import config, cookies
+    _cc(home, monkeypatch, _Resp(200, NETSCAPE))
+    chmod = cookies.os.chmod
+
+    def fail_cookie_file(path, mode, **kw):
+        if str(path).endswith(".txt"):
+            raise OSError("simulated filesystem failure")
+        return chmod(path, mode, **kw)
+
+    if failure == "chmod":
+        monkeypatch.setattr(cookies.os, "chmod", fail_cookie_file)
+    else:
+        def fail_record(*args, **kw):
+            raise OSError("simulated state failure")
+        monkeypatch.setattr(cookies, "_record", fail_record)
+    with cookies.ytdlp_args() as args:
+        assert "--cookies" not in args
+        assert not list((config.get().secrets_dir / "run").glob("yt-cookies-*"))
+
+
+# ---------------------------------------------------------------- 机房: CookieCloud credentials (docs/cookiecloud-credentials-ui.md)
+# synthetic values in the accepted formats; a leak is any 6-character piece of them in an answer or a log
+CC_ID = "9f86d081884c7d659a2feaa0c55ad015.access"
+CC_SECRET = "Kx7Qp2Lm9Vb4Nz8Rt6Yh1Wd5Jf0Gc_Ua-Se3Ti!"
+CC_TOKEN = "ccat_Q7mK2pV9xL4bN8zR1tY6hW3dJ5fG0cUaE2sT4vB8nM"
+CC_TOKEN_2 = "ccat_Z1yX2wV3uT4sR5qP6oN7mL8kJ9iH0gF1eD2cB3aZ4y"
+CC_URL = "/api/cookiecloud/credentials"
+
+
+def _no_secret_in(text: str) -> None:
+    t = text.lower()
+    for s in (CC_ID[:32], CC_SECRET.lower(), CC_TOKEN[5:].lower(), CC_TOKEN_2[5:].lower()):
+        assert not [s[i:i + 6] for i in range(len(s) - 5) if s[i:i + 6] in t]
+
+
+@pytest.fixture
+def cc_api(home, monkeypatch):
+    """A loopback client for the 机房 API, with no CookieCloud secret coming from the environment."""
+    from fastapi.testclient import TestClient
+    from assetizer.web import app as web
+    for n in ("COOKIECLOUD_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
+        monkeypatch.delenv("ASSETIZER_" + n, raising=False)
+    monkeypatch.setitem(web._cookie_test, "at", float("-inf"))
+    return TestClient(web.app, base_url="http://127.0.0.1:8770")
+
+
+def test_credentials_are_written_0600_atomically_and_partially(cc_api, home):
+    import stat
+    from assetizer import config, db
+    d = config.get().secrets_dir
+    d.mkdir(parents=True)
+    d.chmod(0o755)
+    r = cc_api.post(CC_URL, json={"origin": "https://CookieCloud-Read.Example.net/", "access_client_id": CC_ID,
+                                  "access_client_secret": CC_SECRET, "app_token": f"  {CC_TOKEN}\n"})
+    assert r.status_code == 200, r.text
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+    files = {"cf-access-client-id": CC_ID, "cf-access-client-secret": CC_SECRET, "cookiecloud-token": CC_TOKEN}
+    for name, value in files.items():
+        assert stat.S_IMODE((d / name).stat().st_mode) == 0o600 and (d / name).read_text() == value
+    assert sorted(p.name for p in d.iterdir()) == sorted(files)  # no temp file left behind
+    assert db.setting("cookiecloud_origin") == "https://cookiecloud-read.example.net"
+    cc = r.json()["cookiecloud"]
+    assert cc["configured"] and cc["fields"]["app_token"]["source"] == "file" and cc["fields"]["app_token"]["updated_at"]
+    _no_secret_in(r.text)
+
+    # a partial update leaves the other fields alone; an empty string means "unchanged"
+    r = cc_api.post(CC_URL, json={"app_token": CC_TOKEN_2, "access_client_id": ""})
+    assert r.status_code == 200
+    assert (d / "cookiecloud-token").read_text() == CC_TOKEN_2 and (d / "cf-access-client-id").read_text() == CC_ID
+    assert db.setting("cookiecloud_origin") == "https://cookiecloud-read.example.net"
+
+    # clear deletes the file (or the origin setting)
+    r = cc_api.post(CC_URL, json={"clear": ["access_client_secret", "origin"]})
+    assert r.status_code == 200
+    assert not (d / "cf-access-client-secret").exists() and db.setting("cookiecloud_origin") is None
+    assert r.json()["cookiecloud"]["fields"]["access_client_secret"] == {"configured": False, "source": None, "updated_at": None}
+    assert (d / "cf-access-client-id").read_text() == CC_ID
+    log = " ".join(e["message"] for e in db.q("SELECT message FROM events WHERE kind='config'"))
+    assert "App Token" in log and "已清除" in log
+    _no_secret_in(log)
+
+
+@pytest.mark.parametrize("body", [
+    {"access_client_id": CC_ID.upper()},
+    {"access_client_id": CC_SECRET + ".access"},
+    {"access_client_secret": CC_SECRET[:20] + " " + CC_SECRET[20:]},
+    {"access_client_secret": CC_SECRET[:20]},
+    {"app_token": "ccat_" + CC_SECRET},
+    {"app_token": CC_TOKEN[5:]},
+    {"origin": f"https://u:{CC_SECRET}@cc.example.net"},
+    {"origin": f"https://cc.example.net/{CC_TOKEN}"},
+    {"origin": f"http://cc.example.net?{CC_TOKEN}"},
+    {"origin": "https://cc.example.net:8443"},
+    {"origin": f"https://@cc.example.net/#{CC_TOKEN}"},
+    {"app_token": CC_TOKEN, "clear": ["app_token"]},
+    {"clear": [CC_SECRET]},
+    {CC_SECRET: CC_TOKEN},
+    {"app_token": {"v": CC_TOKEN}},
+    [CC_TOKEN],
+])
+def test_invalid_credentials_get_400_without_echo(cc_api, home, caplog, body):
+    import logging
+    from assetizer import config
+    caplog.set_level(logging.DEBUG)
+    r = cc_api.post(CC_URL, json=body)
+    assert r.status_code == 400 and r.json()["detail"]
+    _no_secret_in(r.text)
+    _no_secret_in(caplog.text)
+    assert not (config.get().secrets_dir / "cookiecloud-token").exists()
+
+
+def test_malformed_or_oversized_bodies_are_refused_without_echo(cc_api):
+    r = cc_api.post(CC_URL, content=b'{"app_token": "' + CC_TOKEN.encode(), headers={"content-type": "application/json"})
+    assert r.status_code == 400
+    _no_secret_in(r.text)
+    r = cc_api.post(CC_URL, content=b'{"app_token": "' + CC_TOKEN.encode() * 400 + b'"}', headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    _no_secret_in(r.text)
+
+
+def test_validation_errors_never_echo_the_input(cc_api):
+    r = cc_api.post("/api/submit", json={"url": {"token": CC_TOKEN}})
+    assert r.status_code == 422
+    err = r.json()["detail"][0]
+    assert err["loc"] == ["body", "url"] and "input" not in err and "ctx" not in err
+    _no_secret_in(r.text)
+
+
+def test_secrets_from_the_environment_are_refused_with_409(cc_api, home, monkeypatch):
+    from assetizer import config
+    monkeypatch.setenv("ASSETIZER_COOKIECLOUD_TOKEN", CC_TOKEN)
+    d = config.get().secrets_dir
+    for body in ({"app_token": CC_TOKEN_2}, {"clear": ["app_token"]}, {"app_token": CC_TOKEN_2, "access_client_secret": CC_SECRET}):
+        r = cc_api.post(CC_URL, json=body)
+        assert r.status_code == 409 and "ASSETIZER_COOKIECLOUD_TOKEN" in r.json()["detail"]
+        _no_secret_in(r.text)
+    # nothing was written, not even the other field of the mixed request
+    assert not (d / "cookiecloud-token").exists() and not (d / "cf-access-client-secret").exists()
+    assert cc_api.post(CC_URL, json={"access_client_id": CC_ID}).status_code == 200
+    eng = cc_api.get("/api/engine")
+    fields = eng.json()["youtube"]["cookiecloud"]["fields"]
+    assert fields["app_token"] == {"configured": True, "source": "env", "updated_at": None}
+    assert fields["access_client_id"]["source"] == "file"
+    _no_secret_in(eng.text)
+
+
+def test_status_tells_where_each_secret_comes_from_but_not_what_it_is(home, monkeypatch):
+    from assetizer import cookies
+    for n in ("COOKIECLOUD_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
+        monkeypatch.delenv("ASSETIZER_" + n, raising=False)
+    cookies.save_credentials({"origin": "https://cc.example.net", "access_client_id": CC_ID, "access_client_secret": CC_SECRET})
+    monkeypatch.setenv("ASSETIZER_COOKIECLOUD_TOKEN", CC_TOKEN)
+    st = cookies.status()
+    f = st["cookiecloud"]["fields"]
+    assert f["access_client_id"]["source"] == "file" and f["access_client_id"]["updated_at"].endswith("+00:00")
+    assert f["app_token"] == {"configured": True, "source": "env", "updated_at": None}
+    assert st["cookiecloud"]["configured"] and st["cookiecloud"]["access_token"]
+    _no_secret_in(json.dumps(st))
+
+
+@pytest.mark.parametrize("resp,code", [
+    (_Resp(401, "<html>Unauthorized</html>", "text/html"), "access_denied"),  # Cloudflare: no service token
+    (_Resp(403, "<html>Forbidden</html>", "text/html"), "access_denied"),     # Cloudflare: wrong IP or bad token
+    (_Resp(429, "error code: 1015", "text/plain"), "rate_limited"),            # Cloudflare edge rate limit
+    (_Resp(429, "", "application/json", {"error": "Too Many Requests", "code": "ingress_rate_limited"}), "ingress_rate_limited"),
+    (_Resp(404, "", "application/json", {"error": "Not Found", "code": "not_found"}), "not_found"),
+    (_Resp(502, "", "application/json", {"error": "Bad Gateway", "code": "upstream_unavailable"}), "upstream_unavailable"),
+    (_Resp(504, "", "application/json", {"error": "Gateway Timeout", "code": "upstream_timeout"}), "upstream_timeout"),
+    (_Resp(401, "", "application/json", {"error": "Unauthorized", "code": "token_revoked"}), "token_revoked"),
+    (_Resp(403, "", "application/json", {"error": "Forbidden", "code": "domain_not_allowed"}), "domain_not_allowed"),
+    (_Resp(530, "<html>Argo Tunnel error</html>", "text/html"), "unreachable"),  # Cloudflare: tunnel down
+    (_Resp(200, "<html>another site</html>", "text/html"), "not_found"),         # the origin points elsewhere
+])
+def test_cookiecloud_test_maps_every_ingress_error(cc_api, home, monkeypatch, resp, code):
+    from assetizer import cookies, db
+    _cc(home, monkeypatch, resp)
+    r = cc_api.post("/api/cookiecloud/test", json={})
+    assert r.status_code == 200
+    out = r.json()
+    assert out["ok"] is False and out["code"] == code and out["fix"] == cookies.FIX[code]
+    assert db.setting("youtube_cookies_state")["code"] == code
+
+
+def test_cookiecloud_test_reports_cookies_and_token_then_throttles(cc_api, home, monkeypatch):
+    from assetizer import cookies, db
+    from assetizer.web import app as web
+    _cc(home, monkeypatch, None)
+    calls = []
+
+    def get(url, params=None, headers=None, **kw):
+        calls.append(url)
+        if url.endswith("/api/v3/token/introspect"):
+            return _Resp(200, "", "application/json", {"status": "ok", "auth_type": "token", "token": {
+                "token_id": "tk_internal", "name": "assetizer", "scopes": ["cookies:read"], "allowed_domains": ["youtube.com"]}})
+        return _Resp(200, NETSCAPE)
+    monkeypatch.setattr(cookies.httpx, "get", get)
+    db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态")
+    r = cc_api.post("/api/cookiecloud/test", json={})
+    assert r.json() == {"ok": True, "count": 2, "hosts": [".youtube.com"],
+                        "token": {"name": "assetizer", "scopes": ["cookies:read"], "allowed_domains": ["youtube.com"]}}
+    assert "tk_internal" not in r.text and "SID" not in r.text
+    assert db.setting("youtube_cookies_state")["ok"] is True
+    assert db.one("SELECT resolved_at FROM alerts WHERE key='cookiecloud'")["resolved_at"]
+    # a second test within 10 seconds is refused before it reaches CookieCloud
+    r = cc_api.post("/api/cookiecloud/test", json={})
+    assert r.status_code == 429 and 1 <= int(r.headers["retry-after"]) <= 10
+    assert len(calls) == 2
+    monkeypatch.setitem(web._cookie_test, "at", float("-inf"))  # ten seconds later
+    assert cc_api.post("/api/cookiecloud/test", json={}).status_code == 200
+
+
+def test_cookiecloud_endpoints_stay_behind_the_guard(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import config
+    from assetizer.web import app as web
+    monkeypatch.setattr(web, "PUBLIC_HOST", "kan.example.com")
+    monkeypatch.setattr(web, "ACCESS_TEAM", "example-team")
+    monkeypatch.setattr(web, "ACCESS_AUD", "x" * 64)
+    c = TestClient(web.app)
+    for path in (CC_URL, "/api/cookiecloud/test"):
+        assert c.post(path, json={"app_token": CC_TOKEN}, headers={"host": "kan.example.com"}).status_code == 403
+        assert c.post(path, json={"app_token": CC_TOKEN},
+                      headers={"host": "kan.example.com", "cf-access-jwt-assertion": "forged"}).status_code == 403
+        assert c.post(path, json={"app_token": CC_TOKEN}, headers={"host": "evil.example"}).status_code == 403
+        assert c.post(path, content=f"app_token={CC_TOKEN}",
+                      headers={"host": "127.0.0.1:8770", "content-type": "application/x-www-form-urlencoded"}).status_code == 415
+    assert not (config.get().secrets_dir / "cookiecloud-token").exists()

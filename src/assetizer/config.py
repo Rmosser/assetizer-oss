@@ -15,6 +15,11 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def secret_env(name: str) -> str:
+    """The environment variable that takes precedence over ``secrets/<name>`` (e.g. ASSETIZER_COOKIECLOUD_TOKEN)."""
+    return "ASSETIZER_" + name.upper().replace("-", "_")
+
+
 @dataclass(frozen=True)
 class Settings:
     home: Path
@@ -60,7 +65,7 @@ class Settings:
         return self.home / "secrets"
 
     def secret(self, name: str) -> str | None:
-        env = os.environ.get("ASSETIZER_" + name.upper().replace("-", "_"))
+        env = os.environ.get(secret_env(name))
         if env:
             return env.strip()
         p = self.secrets_dir / name

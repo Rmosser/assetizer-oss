@@ -6,12 +6,14 @@ if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 let pendingY: number | null = null;
 addEventListener("popstate", (e) => { pendingY = (e.state && typeof e.state.y === "number") ? e.state.y : 0; });
 
-export function navigate(to: string, opts: { replace?: boolean } = {}) {
+export function navigate(to: string, opts: { replace?: boolean; quiet?: boolean } = {}) {
   if (to === location.pathname + location.search) return;
   try { history.replaceState({ ...(history.state || {}), y: scrollY }, ""); } catch { /* ignore */ }
-  if (opts.replace) history.replaceState({ y: 0 }, "", to);
+  if (opts.replace) history.replaceState({ y: opts.quiet ? scrollY : 0 }, "", to);
   else history.pushState({ y: 0 }, "", to);
   pendingY = null;
+  // quiet: moving inside one tool page (a tab, a list item) — no page turn, keep the scroll position
+  if (opts.quiet) { flushSync(() => window.dispatchEvent(new Event("az:nav"))); return; }
   const swap = () => { flushSync(() => window.dispatchEvent(new Event("az:nav"))); window.scrollTo({ top: 0 }); };
   // 翻开: a page turn between issues and pages where the browser supports view transitions
   const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };

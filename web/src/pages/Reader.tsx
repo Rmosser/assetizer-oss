@@ -1,16 +1,14 @@
 import DOMPurify from "dompurify";
 import { marked, type Token, type Tokens } from "marked";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { media, post, srcSet } from "../api";
 import { cleanUnitTitle, cnNo, deJargon, endStop, issueHeadline, originalTitle, quotedFragments, typeset, Words } from "../cjk";
 import { Lightbox } from "../components/Lightbox";
 import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll, Empty } from "../components/States";
-import { Yin } from "../components/Yin";
 import { useMedia, useOnce, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDay, cnNum, cnYear, DELIVERY, mins, parseDay, REVIEW, tc } from "../util";
+import { cnDay, cnNum, cnYear, DELIVERY, mins, parseDay, tc } from "../util";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -292,7 +290,7 @@ function IssueIndex({ units, flags, current, onJump, mobile, full = false }: {
     <nav className={`yaomu${open ? " open" : ""}`} aria-label="要目">
       <button className="yaomu-head" onClick={() => setOpen(!open)} aria-expanded={open} disabled={!mobile}>
         <h2>要目</h2>
-        <span className="yaomu-sum"><span className="num">{units.length}</span> 单元 · 必学 <span className="num">{must}</span>{pi > 0 && <> · 朱批 <span className="num">{pi}</span></>}</span>
+        <span className="yaomu-sum"><span className="num">{units.length}</span> 单元 · 必学 <span className="num">{must}</span>{pi > 0 && <> · 校注 <span className="num">{pi}</span></>}</span>
         {mobile && <i className="chev" aria-hidden />}
       </button>
       {open && (
@@ -305,7 +303,7 @@ function IssueIndex({ units, flags, current, onJump, mobile, full = false }: {
                   <span className="no">{cnNo(i + 1)}</span>
                   <span className="t"><span className="tt"><Words>{u.title}</Words></span></span>
                   <span className="tc num">{tc(u.start)}</span>
-                  {openBy[u.id] ? <span className="pi">批 <span className="num">{openBy[u.id]}</span></span> : <span className="pi none" />}
+                  {openBy[u.id] ? <span className="pi">校 <span className="num">{openBy[u.id]}</span></span> : <span className="pi none" />}
                 </a>
               </li>
             ))}
@@ -356,7 +354,7 @@ function Film({ unit, clip, sub, poster, active, setActive, onTime, eager }: {
     return <div className="film-note">这一段与「{clip.meta.shared_title}」落在同一段视频里，片段见该单元。</div>;
   }
   if (clip.status !== "GENERATED") {
-    return <div className="film-note">这一段的视频片段没有生成：{clip.meta?.error || "原因见朱批"}。文字与截图照常保留。</div>;
+    return <div className="film-note">这一段的视频片段没有生成：{clip.meta?.error || "原因见校注"}。文字与截图照常保留。</div>;
   }
   const secs = Math.round(clip.end - clip.start);
   return (
@@ -415,7 +413,7 @@ function Dock({ active, setActive, onBack, onTime }: { active: Active; setActive
   );
 }
 
-/* ───────────────────────────── 朱批 ───────────────────────────── */
+/* ───────────────────────────── 校注 ───────────────────────────── */
 function Gou({ play }: { play: boolean }) {
   return (
     <svg className={`gou${play ? " play" : ""}`} width="18" height="18" viewBox="0 0 24 24" aria-hidden>
@@ -455,12 +453,12 @@ function Zhupi({ f, needle, onSet, playAt, focused, compact }: {
       onMouseEnter={() => quan(true)} onMouseLeave={() => quan(false)}>
       {compact ? (
         <button className="zp-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
-          <span className="k"><i className="pi-mark" aria-hidden>批</i><span>{flagKind(f.kind)}</span>{src && <span className="src">{src}</span>}<i className={`chev${open ? " up" : ""}`} aria-hidden /></span>
+          <span className="k"><i className="pi-mark" aria-hidden>校</i><span>{flagKind(f.kind)}</span>{src && <span className="src">{src}</span>}<i className={`chev${open ? " up" : ""}`} aria-hidden /></span>
           <h5><Words>{head}</Words></h5>
         </button>
       ) : (
         <>
-          <div className="k"><i className="pi-mark" aria-hidden>{info ? "注" : "批"}</i><span>{flagKind(f.kind)}</span>{src && <span className="src">{src}</span>}</div>
+          <div className="k"><i className="pi-mark" aria-hidden>{info ? "注" : "校"}</i><span>{flagKind(f.kind)}</span>{src && <span className="src">{src}</span>}</div>
           <h5><Words>{head}</Words></h5>
         </>
       )}
@@ -625,7 +623,6 @@ function UnitSection({ n, u, section, assets, flags, facets, active, setActive, 
     setNeedles((prev) => (JSON.stringify(prev) === JSON.stringify(found) ? prev : found));
   }, [html, flags]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const setDecision = async (d: string | null) => { await post(`/api/units/${u.id}`, { decision: d }); reload(); };
   const setPub = async (p: string) => { await post(`/api/assets/${clip.id}`, { publication_priority: p }); reload(); };
   const setEmbed = async (v: boolean) => { await post(`/api/assets/${clip.id}`, { embed: v }); reload(); };
   const zp = (f: Flag, compact = false) => (
@@ -634,7 +631,7 @@ function UnitSection({ n, u, section, assets, flags, facets, active, setActive, 
 
   return (
     <>
-      <article className={`unit${u.decision === "REJECTED" ? " rejected" : ""}${anyOpen ? " has-pi" : ""}`} id={`u-${u.id}`} data-unit={u.id} data-no={cnNo(n)}>
+      <article className={`unit${anyOpen ? " has-pi" : ""}`} id={`u-${u.id}`} data-unit={u.id} data-no={cnNo(n)}>
         <div className="unit-meta">
           <span className="no">{cnNo(n)}</span>
           <span className="num">{tc(u.start)}<span className="to">–</span>{tc(u.end)}</span>
@@ -667,17 +664,13 @@ function UnitSection({ n, u, section, assets, flags, facets, active, setActive, 
             ))}
           </dl>
         )}
-        <div className="unit-actions">
-          <span className="seg wide" role="group" aria-label="是否采用">
-            <button className={u.decision === "APPROVED" ? "on" : ""} aria-pressed={u.decision === "APPROVED"} onClick={() => setDecision(u.decision === "APPROVED" ? null : "APPROVED")}>采用</button>
-            <button className={u.decision === "REJECTED" ? "on" : ""} aria-pressed={u.decision === "REJECTED"} onClick={() => setDecision(u.decision === "REJECTED" ? null : "REJECTED")}>不采用</button>
-          </span>
-          {clip?.status === "GENERATED" && (mobile ? (
+        {clip?.status === "GENERATED" && <div className="unit-actions">
+          {mobile ? (
             <button className="iconbtn more" onClick={() => setMore(true)} aria-label="片段设置">
               <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden><circle cx="5" cy="12" r="1.6" fill="currentColor" /><circle cx="12" cy="12" r="1.6" fill="currentColor" /><circle cx="19" cy="12" r="1.6" fill="currentColor" /></svg>
             </button>
-          ) : <UnitControls clip={clip} setPub={setPub} setEmbed={setEmbed} nudging={nudging} onNudge={() => setNudging(!nudging)} />)}
-        </div>
+          ) : <UnitControls clip={clip} setPub={setPub} setEmbed={setEmbed} nudging={nudging} onNudge={() => setNudging(!nudging)} />}
+        </div>}
         {!mobile && nudging && clip && <Nudge sourceId={sourceId} clip={clip} onDone={() => { setNudging(false); reload(); }} />}
         {mobile && more && clip && (
           <Sheet title="片段设置" onClose={() => { setMore(false); setNudging(false); }} tall={nudging}>
@@ -686,7 +679,7 @@ function UnitSection({ n, u, section, assets, flags, facets, active, setActive, 
           </Sheet>
         )}
       </article>
-      <aside className="margin" aria-label="朱批">
+      <aside className="margin" aria-label="校注">
         {!inline && review.length > 0 && <div className="margin-stack">{review.map((f) => zp(f))}</div>}
         {notes.length > 0 && (
           <details className="notes">
@@ -732,73 +725,37 @@ function Track({ source, onDone }: { source: any; onDone: () => void }) {
   );
 }
 
-/* ───────────────────────────── review controls ───────────────────────────── */
-/** Two-step button: the first press arms it ("再点一次…"), the second commits. */
-function Confirm({ className = "", arm, children, onConfirm, needs }: {
-  className?: string; arm: string; children: React.ReactNode; onConfirm: () => void; needs: boolean;
-}) {
-  const [armed, setArmed] = useState(false);
-  useEffect(() => { if (!armed) return; const t = setTimeout(() => setArmed(false), 3500); return () => clearTimeout(t); }, [armed]);
+/* ───────────────────────────── 校注 stepper ───────────────────────────── */
+/** 校注 are information, not a to-do (design §R2-3): step through the ones not yet looked at. */
+function Stepper({ count, total, pos, onStep }: { count: number; total: number; pos: number; onStep: (d: number) => void }) {
+  if (count === 0) return <span className="rb-clear">{total ? "校注已看完" : "本期无校注"}</span>;
   return (
-    <button className={`${className}${armed ? " armed" : ""}`} onClick={() => { if (needs && !armed) setArmed(true); else { setArmed(false); onConfirm(); } }}>
-      {armed ? arm : children}
-    </button>
-  );
-}
-
-function Stepper({ count, pos, onStep, done, mobile }: { count: number; pos: number; onStep: (d: number) => void; done: boolean; mobile: boolean }) {
-  if (count === 0) return <span className="rb-clear">朱批已清{!done && !mobile && " · 可以审定"}</span>;
-  return (
-    <span className="stepper" role="group" aria-label="逐条处理朱批">
-      <button onClick={() => onStep(-1)} aria-label="上一处朱批">‹</button>
+    <span className="stepper" role="group" aria-label="逐条查看校注">
+      <button onClick={() => onStep(-1)} aria-label="上一处校注">‹</button>
       <button className="stepper-mid" onClick={() => onStep(pos < 0 ? 1 : 0)} title="快捷键 n / Shift+n">
-        <span className="pi-mark" aria-hidden>批</span>
-        {pos < 0 ? <><span className="num">{count}</span><span className="u">处待判断</span></> : <><span className="num">{pos + 1}</span><span className="u">/</span><span className="num">{count}</span></>}
+        <span className="pi-mark" aria-hidden>校</span>
+        {pos < 0 ? <><span className="num">{count}</span><span className="u">处</span></> : <><span className="num">{pos + 1}</span><span className="u">/</span><span className="num">{count}</span></>}
       </button>
-      <button onClick={() => onStep(1)} aria-label="下一处朱批">›</button>
+      <button onClick={() => onStep(1)} aria-label="下一处校注">›</button>
     </span>
   );
 }
 
-function ReviewSheet({ open, review, onSet, onClose }: { open: number; review: string; onSet: (r: string) => void; onClose: () => void }) {
-  const [armed, setArmed] = useState(false);
-  const opts: [string, string, string][] = [
-    ["APPROVED", "审定并钤印", open > 0 ? `还有 ${open} 处朱批未处理，仍可审定` : "这一期作为学习版本定稿"],
-    ["CHANGES_REQUESTED", "需修改", "有地方要改，先不定稿"],
-    ["REJECTED", "驳回", "这一期不采用"],
-  ];
-  return (
-    <Sheet title="审阅这一期" onClose={onClose}>
-      <div className="review-opts">
-        {opts.map(([k, label, desc]) => (
-          <button key={k} className={`${review === k ? "on" : ""} ${k === "APPROVED" && open === 0 ? "primary" : ""} ${k === "REJECTED" ? "danger" : ""}${k === "REJECTED" && armed ? " armed" : ""}`}
-            onClick={() => { if (k === "REJECTED" && !armed) { setArmed(true); return; } onSet(k); onClose(); }}>
-            <b>{k === "REJECTED" && armed ? "再点一次，确认驳回" : label}</b><span>{desc}</span>
-          </button>
-        ))}
-        {review === "APPROVED" && <button onClick={() => { onSet("IN_REVIEW"); onClose(); }}><b>撤回审定</b><span>回到审阅中</span></button>}
-      </div>
-    </Sheet>
-  );
-}
-
 /* ───────────────────────────── 牌记: the issue's colophon, set vertically like the end of a woodblock book ───────────────────────────── */
-function Paiji({ kicker, source, units, flags, fresh }: { kicker: string; source: any; units: Unit[]; flags: Flag[]; fresh: boolean }) {
+function Paiji({ kicker, source, units, flags, tuning }: { kicker: string; source: any; units: Unit[]; flags: Flag[]; tuning: boolean }) {
   const review = flags.filter(isReview);
   const by = (r: string) => review.filter((f) => f.resolution === r).length;
   const open = by("OPEN");
   const must = units.filter((u) => u.learning_priority === 3).length;
   const pub = parseDay(source.published_at);
-  const approved = source.review === "APPROVED";
   const judged = [by("ACCEPTED") && `无误${cnNum(by("ACCEPTED"))}`, by("FIXED") && `改${cnNum(by("FIXED"))}`, by("DISMISSED") && `略${cnNum(by("DISMISSED"))}`].filter(Boolean).join("、");
   return (
     <div className="paiji" role="note" aria-label="本期牌记">
       <p>资产刊 · {kicker}</p>
       {pub && <p>原讲于{cnYear(pub.getFullYear())}年{cnDay(source.published_at)}</p>}
       <p>{cnNum(units.length)}单元，必学{cnNum(must)}</p>
-      <p>朱批{cnNum(review.length)}处{open ? `，尚余${cnNum(open)}处` : judged ? `：${judged}` : ""}</p>
-      <p className="paiji-last">{approved ? `${cnDay(source.review_at)}审定` : "待审定"}</p>
-      <span className="paiji-seal">{approved ? <Yin size={58} fresh={fresh} /> : <i className="yin-slot" aria-hidden />}</span>
+      <p>校注{cnNum(review.length)}处{open ? `，未看${cnNum(open)}处` : judged ? `：${judged}` : ""}</p>
+      <p className="paiji-last">{tuning ? "调试样片，定稿后入 Notion" : source.delivery === "DELIVERED" ? `${source.delivered_at ? cnDay(source.delivered_at) : ""}入 Notion` : "尚未入 Notion"}</p>
     </div>
   );
 }
@@ -824,21 +781,20 @@ function Progress() {
 }
 
 export default function Reader({ id }: { id: string }) {
-  const { data, error, loadedAt, reload, setData } = usePoll<any>(`/api/sources/${encodeURIComponent(id)}`, 0);
+  // 频道调试台 links to one version of an issue: /issue/<id>?run=<run id>
+  const runParam = new URLSearchParams(location.search).get("run");
+  const { data, error, loadedAt, reload, setData } = usePoll<any>(
+    `/api/sources/${encodeURIComponent(id)}${runParam ? `?run=${encodeURIComponent(runParam)}` : ""}`, 0);
   const mobile = useMedia("(max-width: 900px)");
   const [active, setActiveState] = useState<Active>(null);
   const [current, setCurrent] = useState<string | null>(null);
   const [lb, setLb] = useState<{ shots: Asset[]; i: number } | null>(null);
   const [tracking, setTracking] = useState(false);
   const [indexOpen, setIndexOpen] = useState(false);
-  const [reviewOpen, setReviewOpen] = useState(false);
   const [pos, setPos] = useState(-1);
   const [focusFlag, setFocusFlag] = useState<number | null>(null);
-  const [fresh, setFresh] = useState(false);
   const [playhead, setPlayhead] = useState<number | null>(null);
   const [stuck, setStuck] = useState(false);
-  const [stamp, setStamp] = useState(false);
-  const [leaving, setLeaving] = useState(false);
   const inline = useMedia("(max-width: 1240px)");
   const [noteSeen, markNote] = useOnce("az-margin-note");
   const sentinel = useRef<HTMLDivElement>(null);
@@ -972,21 +928,9 @@ export default function Reader({ id }: { id: string }) {
   const clips = assets.filter((a: Asset) => a.kind === "clip" && a.status === "GENERATED");
   const missing = new Set<string>(units.filter((u) => !clips.some((c: Asset) => c.unit_id === u.id)).map((u) => u.id));
   const duration = source.duration || units[units.length - 1]?.end || 1;
-  const approved = source.review === "APPROVED";
+  const tuning = channel?.stage === "TUNING";
   const kicker = `${channel?.name || source.channel_title || "未识别频道"} · 第${cnNum(data.no || 1)}期`;
-  const setReview = async (r: string) => {
-    await post(`/api/sources/${source.id}/review`, { review: r });
-    if (r === "APPROVED") {
-      // the seal is pressed where the reader is looking, then settles into the head and the colophon
-      setFresh(true); setStamp(true); setTimeout(() => setStamp(false), 1600);
-      try { navigator.vibrate?.(10); } catch { /* ignore */ }
-    } else if (approved) {
-      setFresh(false); setLeaving(true); setTimeout(() => setLeaving(false), 320);
-    }
-    reload();
-  };
   const mustPoster = firstMust && assets.find((a: Asset) => a.kind === "poster" && a.unit_id === firstMust.id);
-  const showYin = approved || leaving;
   const ci = Math.max(0, units.findIndex((u) => u.id === current));
   const orig = originalTitle(source.title || source.id);
   const must = units.filter((u) => u.learning_priority === 3).length;
@@ -995,9 +939,12 @@ export default function Reader({ id }: { id: string }) {
     <main className="page reader-page">
       <Progress />
       <Stale error={error} loadedAt={loadedAt} />
-      <header className={`reader-head${fresh ? " pressed" : ""}`}>
-        <div className={`head-in${showYin ? " has-yin" : ""}${!inline && mustPoster ? " has-fig" : ""}`}>
-        <a className="crumb" {...linkProps("/")}><span aria-hidden>←</span> 目录</a>
+      <header className="reader-head">
+        <div className={`head-in${!inline && mustPoster ? " has-fig" : ""}`}>
+        <a className="crumb" {...linkProps(runParam ? `/channels/${channel?.id || ""}/workbench` : "/")}><span aria-hidden>←</span> {runParam ? "调试台" : "目录"}</a>
+        {runParam && data.run && data.run.id !== source.current_run_id && (
+          <p className="version-note">正在看试跑版本{playbook ? ` · 规程 v${playbook.version}` : ""}，不是这一期当前采用的版本。</p>
+        )}
         <div className="kicker">{kicker}</div>
         <h1><Words>{headline}</Words></h1>
         {orig !== headline && <p className="dek"><span className="dek-k">原题</span><Words>{orig}</Words></p>}
@@ -1010,7 +957,7 @@ export default function Reader({ id }: { id: string }) {
         <div className="reader-links">
           {source.url && <a href={source.url} target="_blank" rel="noreferrer">原视频 ↗</a>}
           {source.notion_url && <a href={source.notion_url} target="_blank" rel="noreferrer">Notion ↗</a>}
-          {playbook && <a {...linkProps("/channels")}>规程 v{playbook.version}{playbook.channel_id ? "" : "（通用）"}</a>}
+          {playbook && <a {...linkProps(`/channels/${playbook.channel_id || "universal"}/playbook`)}>规程 v{playbook.version}{playbook.channel_id ? "" : "（通用）"}</a>}
           {(!channel || channel.mode !== "TRACKED") && source.youtube_channel_id && (
             <button className="btn sm zhu" onClick={() => setTracking(!tracking)}>加入长期关注</button>
           )}
@@ -1021,15 +968,8 @@ export default function Reader({ id }: { id: string }) {
               <span className="head-fig-img"><img src={media(mustPoster.id, 640)} alt="" /></span>
               <span className="head-fig-cap"><span className="label">必学</span><Words>{firstMust.title}</Words></span>
             </a>
-            {/* the seal presses the frame's lower-left corner */}
-            {showYin && <div className={`head-yin${leaving ? " leaving" : ""}`}><Yin size={92} fresh={fresh} />{approved && <span className="yin-date">{cnDay(source.review_at)}审定</span>}</div>}
           </div>
-        ) : showYin && (
-          <div className={`head-yin${leaving ? " leaving" : ""}`}>
-            <Yin size={mobile ? 64 : 92} fresh={fresh} />
-            {approved && <span className="yin-date">{cnDay(source.review_at)}审定</span>}
-          </div>
-        )}
+        ) : null}
         {tracking && <Track source={source} onDone={() => { setTracking(false); reload(); }} />}
         </div>
       </header>
@@ -1042,9 +982,9 @@ export default function Reader({ id }: { id: string }) {
               <span><span className="num">{String(ci + 1).padStart(2, "0")}</span><em className="num">/{units.length}</em></span>
             </button>
           ) : (
-            <span className="rb-state">{approved ? <Yin size={26} fresh={fresh} /> : null}{REVIEW[source.review]}</span>
+            <span className="rb-state">{tuning ? "调试样片" : "自动出刊"}</span>
           )}
-          <Stepper count={queue.length} pos={queue.length ? Math.min(pos, queue.length - 1) : -1} onStep={step} done={approved} mobile={mobile} />
+          <Stepper count={queue.length} total={flags.filter(isReview).length} pos={queue.length ? Math.min(pos, queue.length - 1) : -1} onStep={step} />
           {!mobile && (
             <span className="rb-deliv" title={source.delivery_reason || ""}>
               {DELIVERY[source.delivery] || source.delivery}
@@ -1054,17 +994,7 @@ export default function Reader({ id }: { id: string }) {
             </span>
           )}
           <div className="rb-acts">
-            {mobile ? (
-              <button className={`btn sm ${approved ? "" : queue.length === 0 ? "solid" : ""}`} onClick={() => setReviewOpen(true)}>{approved ? "已审定" : "审定"}</button>
-            ) : approved ? (
-              <button className="btn sm ghost" onClick={() => setReview("IN_REVIEW")}>撤回审定</button>
-            ) : (
-              <>
-                <Confirm className={`btn sm${queue.length === 0 ? " solid" : ""}`} needs={queue.length > 0} arm={`还有 ${queue.length} 处，仍然审定？`} onConfirm={() => setReview("APPROVED")}>审定</Confirm>
-                <button className={`btn sm${source.review === "CHANGES_REQUESTED" ? " on" : ""}`} onClick={() => setReview("CHANGES_REQUESTED")}>需修改</button>
-                <Confirm className={`btn sm${source.review === "REJECTED" ? " on" : ""}`} needs arm="确认驳回？" onConfirm={() => setReview("REJECTED")}>驳回</Confirm>
-              </>
-            )}
+            {source.notion_url && <a className="btn sm" href={source.notion_url} target="_blank" rel="noreferrer">Notion ↗</a>}
           </div>
         </div>
         {mobile && units.length > 0 && <Shukou duration={duration} units={units} flags={flags} current={current} onJump={jump} />}
@@ -1075,7 +1005,6 @@ export default function Reader({ id }: { id: string }) {
           <IssueIndex units={units} flags={flags} current={current} mobile={false} full onJump={(uid) => { setIndexOpen(false); setTimeout(() => jump(uid, false), 60); }} />
         </Sheet>
       )}
-      {reviewOpen && <ReviewSheet open={queue.length} review={source.review} onSet={setReview} onClose={() => setReviewOpen(false)} />}
 
       {!run || !units.length ? (
         <Empty title="这一期还在付印">完成后会自动出现在这里。可以在「机房」查看进度。</Empty>
@@ -1090,12 +1019,12 @@ export default function Reader({ id }: { id: string }) {
             {intro.map((s: any) => <div key={s.id} className="prose lede" dangerouslySetInnerHTML={{ __html: renderMd(s.markdown) }} />)}
             <IssueIndex units={units} flags={flags} current={current} onJump={jump} mobile={mobile} />
           </div>
-          <aside className="margin" aria-label="本期朱批">
+          <aside className="margin" aria-label="本期校注">
             {runFlags.filter(isReview).map((f: Flag) => (
               <Zhupi key={f.id} f={f} onSet={onSetFlag} playAt={playAt} focused={focusFlag === f.id} />
             ))}
-            {!inline && !noteSeen && !approved && (
-              <p className="margin-note">朱批落在这一栏：系统对条件、归属、边界没有把握的地方，会在对应段落旁标出，并在正文里用朱圈圈出原句。
+            {!inline && !noteSeen && (
+              <p className="margin-note">校注落在这一栏：系统对条件、归属、边界没有把握的地方，会在对应段落旁标出，并在正文里圈出原句。仅供参考，不需要逐条处理。
                 <button className="link" onClick={markNote}>知道了</button></p>
             )}
             {runFlags.some((f: Flag) => !isReview(f)) && (
@@ -1115,21 +1044,14 @@ export default function Reader({ id }: { id: string }) {
           ))}
           <section className="article end" aria-label="阅毕">
             <div className="end-mark" aria-hidden><span>阅</span><span>毕</span></div>
-            <Paiji kicker={kicker} source={source} units={units} flags={flags} fresh={fresh} />
-            {!approved && (
-              <div className="end-row">
-                {queue.length > 0 && <button className="btn" onClick={() => step(1)}>去处理朱批</button>}
-                <Confirm className={`btn${queue.length === 0 ? " solid" : ""}`} needs={queue.length > 0} arm={`还有 ${queue.length} 处，仍然审定？`}
-                  onConfirm={() => setReview("APPROVED")}>审定并钤印</Confirm>
-              </div>
-            )}
+            <Paiji kicker={kicker} source={source} units={units} flags={flags} tuning={tuning} />
+            {queue.length > 0 && <div className="end-row"><button className="btn" onClick={() => step(1)}>逐条看校注</button></div>}
           </section>
         </div>
       )}
 
       <Dock active={active} setActive={setActive} onTime={onTime} onBack={() => { if (active) { jump(active.unitId); setActive({ ...active, docked: false, seq: Date.now() }); } }} />
       {lb && <Lightbox shots={lb.shots} index={lb.i} onClose={() => setLb(null)} />}
-      {stamp && createPortal(<div className="stamp-overlay" aria-hidden><Yin size={mobile ? 132 : 180} fresh /></div>, document.body)}
     </main>
   );
 }

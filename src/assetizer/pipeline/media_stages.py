@@ -40,6 +40,14 @@ def transcribe(ctx: RunContext) -> dict:
     if out.exists():
         t = read_json(out)
         return {"words": len(t["words"]), "cached": True}
+    # the same video transcribed by an earlier run (another playbook version): speech does not depend on the
+    # playbook, and sharing one transcript keeps the compared versions on identical subtitles and quotes
+    prev = ctx.source.get("transcript_path")
+    if prev and prev != str(out) and Path(prev).exists():
+        t = read_json(Path(prev))
+        if t.get("media_sha256") and t["media_sha256"] == ctx.source.get("media_sha256"):
+            write_json(out, t)
+            return {"words": len(t["words"]), "reused": prev}
     from ..media import asr
 
     tickers = []
@@ -63,6 +71,7 @@ def transcribe(ctx: RunContext) -> dict:
             w["word"] = cc.convert(w["word"])
     except ImportError:
         pass
+    r["media_sha256"] = ctx.source.get("media_sha256")
     write_json(out, r)
     db.exec("UPDATE sources SET transcript_path=? WHERE id=?", str(out), ctx.source["id"])
     return {"words": len(r["words"]), "segments": len(r["segments"])}

@@ -144,7 +144,7 @@ export default function App() {
     addEventListener("az:paste", on);
     return () => removeEventListener("az:paste", on);
   }, []);
-  const flags = data?.open_flags ?? 0;
+  const decisions = data?.decisions?.length ?? 0;
   const alerts = data?.alerts?.length ?? 0;
   const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : "issues";
 
@@ -171,9 +171,11 @@ export default function App() {
         </a>
         <nav className="nav" aria-label="主导航">
           <a {...linkProps("/")} className={tab === "issues" ? "on" : ""} aria-current={tab === "issues" ? "page" : undefined}>
-            刊{flags > 0 && <sup className="count" aria-label={`${flags} 处朱批`}>{flags}</sup>}
+            刊
           </a>
-          <a {...linkProps("/channels")} className={tab === "channels" ? "on" : ""} aria-current={tab === "channels" ? "page" : undefined}>频道</a>
+          <a {...linkProps("/channels")} className={tab === "channels" ? "on" : ""} aria-current={tab === "channels" ? "page" : undefined}>
+            频道{decisions > 0 && <sup className="count" aria-label={`${decisions} 件待你拍板`}>{decisions}</sup>}
+          </a>
           <a {...linkProps("/engine")} className={tab === "engine" ? "on" : ""} aria-current={tab === "engine" ? "page" : undefined}>
             机房{alerts > 0 && <sup className="count" aria-label={`${alerts} 条告警`}>!</sup>}
           </a>
@@ -187,7 +189,8 @@ export default function App() {
         </div>
       </header>
       {pasting && <PasteSheet onClose={() => setPasting(false)} />}
-      <div key={path} id="main">{page}</div>
+      {/* the 频道 tool keeps its state (and unsaved edits) while moving between its channels and tabs */}
+      <div key={tab === "channels" ? "/channels" : path} id="main">{page}</div>
     </>
   );
 }

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { media, post, srcSet } from "../api";
 import { IssueTitle, issueHeadline, originalTitle, typeset, Words } from "../cjk";
-import { Yin } from "../components/Yin";
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
@@ -46,14 +45,17 @@ const headOf = (it: any) => issueHeadline(it.headline, it.musts?.[0]?.title, it.
 const producing = (it: any) => ["QUEUED", "RUNNING", "WAITING", "INTERRUPTED"].includes(it.production) && !it.units;
 const issueHref = (it: any, hash = "") => `/issue/${encodeURIComponent(it.id)}${hash}`;
 
-function State({ it, small = false }: { it: any; small?: boolean }) {
+/** Quiet when all is well (the issue is in Notion); speaks only for samples, production and delivery trouble. */
+function State({ it }: { it: any }) {
   if (producing(it)) return <span className="st wip">{it.production === "WAITING" ? "等待中" : it.production === "RUNNING" ? "付印中" : "排队中"}</span>;
-  if (it.review === "APPROVED") return <Yin size={small ? 26 : 34} />;
-  if (it.flags > 0) return <span className="st pi">批 <b className="num">{it.flags}</b></span>;
-  return <span className="st">待阅</span>;
+  if (it.tuning) return <span className="st" title="调试中频道的样片，定稿后写入 Notion">样片</span>;
+  if (it.delivery === "FAILED") return <span className="st pi">交付失败</span>;
+  if (it.delivery === "REGISTERED") return <span className="st" title="Notion 里已有这个视频的页面，没有重复写入">已登记</span>;
+  if (it.delivery !== "DELIVERED") return <span className="st">未入 Notion</span>;
+  return null;
 }
 
-/** The newest issue, set like a feature page: cover, title, the three must-reads, and what needs a decision. */
+/** The newest issue, set like a feature page: cover, title, the three must-reads, and where to read it. */
 function Feature({ it }: { it: any }) {
   return (
     <section className="feature" aria-label="本期">
@@ -78,14 +80,10 @@ function Feature({ it }: { it: any }) {
           </div>
         )}
         <div className="feature-foot">
-          {it.review === "APPROVED" ? (
-            <span className="approved"><Yin size={36} />已审定</span>
-          ) : it.flags > 0 ? (
-            <a className="go zhu" {...linkProps(issueHref(it))}>朱批 <span className="num">{it.flags}</span> 处待判断 <span className="arrow">→</span></a>
-          ) : (
-            <a className="go" {...linkProps(issueHref(it))}>开卷阅读 <span className="arrow">→</span></a>
-          )}
-          {it.delivery === "DELIVERED" && <span className="muted">已入 Notion</span>}
+          {it.notion_url ? (
+            <a className="go" href={it.notion_url} target="_blank" rel="noreferrer">在 Notion 阅读 <span className="arrow">↗</span></a>
+          ) : <span className="muted">{it.tuning ? "调试样片，定稿后写入 Notion" : "尚未写入 Notion"}</span>}
+          <a className="go quiet" {...linkProps(issueHref(it))}>对照原视频 <span className="arrow">→</span></a>
         </div>
       </div>
     </section>
@@ -112,17 +110,13 @@ function Row({ it }: { it: any }) {
               .filter(Boolean).map((x, i) => <span key={i} className="ph">{i > 0 && " · "}{x}</span>)}
           </div>
         </div>
-        <div className="toc-state"><State it={it} small={compact} /></div>
+        <div className="toc-state"><State it={it} /></div>
       </a>
     </li>
   );
 }
 
-const FILTERS: [string, string, (it: any) => boolean][] = [
-  ["all", "全部", () => true],
-  ["flags", "有朱批", (it) => it.flags > 0],
-  ["unreviewed", "未审", (it) => it.units != null && it.review !== "APPROVED"],
-];
+const FILTERS: [string, string, (it: any) => boolean][] = [["all", "全部", () => true]];
 
 function Archive({ issues }: { issues: any[] }) {
   const [f, setF] = useState("all");
@@ -140,10 +134,10 @@ function Archive({ issues }: { issues: any[] }) {
     <>
       <div className="rule-title">
         <h2>往期</h2>
-        {issues.length >= 4 && (
+        {issues.length >= 4 && channels.length > 1 && (
           <div className="chips" role="group" aria-label="筛选">
             {FILTERS.map(([k, label]) => <button key={k} className={f === k ? "on" : ""} onClick={() => setF(k)}>{label}</button>)}
-            {channels.length > 1 && channels.map((c) => <button key={c} className={f === c ? "on" : ""} onClick={() => setF(c)}>{c}</button>)}
+            {channels.map((c) => <button key={c} className={f === c ? "on" : ""} onClick={() => setF(c)}>{c}</button>)}
           </div>
         )}
       </div>
@@ -164,7 +158,7 @@ function mockIssues(issues: any[]): any[] {
   const base = issues[0];
   return Array.from({ length: n }, (_, i) => {
     const d = new Date(2026, 8, 8 - i * 3);
-    return { ...base, id: `${base.id}`, no: n - i, flags: i % 3 ? 0 : base.flags, review: i % 4 === 1 ? "APPROVED" : base.review,
+    return { ...base, id: `${base.id}`, no: n - i, tuning: i % 7 === 2, delivery: i % 9 === 4 ? "FAILED" : base.delivery,
       published_at: `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}` };
   });
 }
@@ -183,7 +177,6 @@ export default function Issues() {
   const ready = issues.filter((i) => i.units != null);
   const totalUnits = ready.reduce((a, i) => a + (i.units || 0), 0);
   const totalClips = ready.reduce((a, i) => a + (i.clips || 0), 0);
-  const firstFlagged = issues.find((i) => i.flags > 0);
   const feature = ready[0] || issues.find((i) => !producing(i));
   const rest = issues.filter((i) => i !== feature && !(producing(i) && data.producing?.source_id === i.id));
   const totalMin = issues.reduce((a, i) => a + (i.duration || 0), 0);
@@ -203,12 +196,12 @@ export default function Issues() {
               {data.queue.length > 0 && <> 另有 <strong className="num">{data.queue.length}</strong> 期在排队。</>}
             </p>
           ) : <p className="hero-lede">一份只为你编的刊：视频进来，知识单元、片段与文章出去。</p>}
-          {data.open_flags > 0 && firstFlagged ? (
-            <a className="zhupi-link" {...linkProps(issueHref(firstFlagged))}>
-              <span>朱批 <span className="num">{data.open_flags}</span> 处，待你判断</span><span className="arrow" aria-hidden>→</span>
+          {data.decisions.length > 0 ? (
+            <a className="zhupi-link" href="#decisions">
+              <span>待你拍板 <span className="num">{data.decisions.length}</span> 件</span><span className="arrow" aria-hidden>→</span>
             </a>
           ) : ready.length > 0 ? (
-            <div className="zhupi-quiet">无待判断事项，可以安心阅读。</div>
+            <div className="zhupi-quiet">没有需要你处理的事。新的一期会自动写入 Notion。</div>
           ) : null}
         </div>
       </section>
@@ -228,7 +221,7 @@ export default function Issues() {
       )}
 
       {data.decisions.length > 0 && (
-        <section className="decisions" aria-label="待你拍板">
+        <section className="decisions" id="decisions" aria-label="待你拍板">
           <div className="rule-title"><h2>待你拍板</h2></div>
           {data.decisions.map((x: any) => (
             <div className="decision" key={x.id}>
@@ -237,7 +230,7 @@ export default function Issues() {
                 <h4><Words>{x.title}</Words></h4>
                 <p>{typeset(x.body.replace(/Run-\d+\s*/g, ""))}</p>
               </div>
-              {x.kind === "CONFIRM_PLAYBOOK" ? <a className="btn" {...linkProps("/channels")}>查看并确认</a> : null}
+              {x.kind === "CONFIRM_PLAYBOOK" ? <a className="btn" {...linkProps("/channels")}>查看并定稿</a> : null}
             </div>
           ))}
         </section>

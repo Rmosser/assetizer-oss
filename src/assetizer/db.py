@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS channels (
   name TEXT NOT NULL,
   youtube_channel_id TEXT UNIQUE,
   mode TEXT NOT NULL DEFAULT 'DISCOVERY',            -- TRACKED | DISCOVERY
-  delivery_policy TEXT NOT NULL DEFAULT 'auto',       -- auto | after_approval
+  delivery_policy TEXT NOT NULL DEFAULT 'auto',       -- superseded by stage (design §R2-5); kept for old databases
+  stage TEXT NOT NULL DEFAULT 'TUNING',               -- TUNING | LOCKED (design §R2-1)
   notion_parent_id TEXT,
   why TEXT,
   created_at TEXT NOT NULL,
@@ -66,13 +67,15 @@ CREATE TABLE IF NOT EXISTS sources (
   media_state TEXT NOT NULL DEFAULT 'ABSENT',         -- ABSENT | CACHED | PURGED
   transcript_path TEXT,
   current_run_id TEXT,
-  delivery TEXT NOT NULL DEFAULT 'NOT_STARTED',      -- NOT_STARTED | BLOCKED | DELIVERING | DELIVERED | STALE | FAILED
+  delivery TEXT NOT NULL DEFAULT 'NOT_STARTED',      -- NOT_STARTED | BLOCKED | DELIVERING | DELIVERED | STALE | FAILED | REGISTERED
   delivery_reason TEXT,
+  delivered_at TEXT,
   notion_page_id TEXT,
   notion_url TEXT,
   notion_synced_run TEXT,
+  notion_database_id TEXT,                             -- where notion_page_id lives (channel targets can move)
   package_path TEXT,
-  review TEXT NOT NULL DEFAULT 'UNREVIEWED',          -- UNREVIEWED | IN_REVIEW | APPROVED | CHANGES_REQUESTED | REJECTED
+  review TEXT NOT NULL DEFAULT 'UNREVIEWED',          -- legacy per-issue review; no longer drives UI or delivery (design §R2-4)
   review_notes TEXT,
   review_at TEXT,
   created_at TEXT NOT NULL,
@@ -224,6 +227,30 @@ CREATE TABLE IF NOT EXISTS decisions (
   resolved_at TEXT,
   outcome TEXT
 );
+CREATE TABLE IF NOT EXISTS samples (                 -- 频道调试台: the videos a channel is tuned on
+  channel_id TEXT NOT NULL REFERENCES channels(id),
+  source_id TEXT NOT NULL REFERENCES sources(id),
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (channel_id, source_id)
+);
+CREATE TABLE IF NOT EXISTS trial_queue (             -- 调试台: trial runs waiting their turn (a video has one active run at a time)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  playbook_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',              -- PENDING | DISPATCHED | CANCELLED
+  run_id TEXT,
+  created_at TEXT NOT NULL,
+  dispatched_at TEXT
+);
+CREATE TABLE IF NOT EXISTS run_votes (               -- 调试台: the user's preference for one version of a sample
+  run_id TEXT PRIMARY KEY,
+  channel_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  liked INTEGER NOT NULL DEFAULT 0,
+  note TEXT,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS notion_blocks (
   source_id TEXT NOT NULL,
   block_key TEXT NOT NULL,
@@ -271,6 +298,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(sources)")}
     if "headline" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN headline TEXT")
+    if "delivered_at" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN delivered_at TEXT")
+        conn.execute("UPDATE sources SET delivered_at=updated_at WHERE delivery='DELIVERED'")
+    if "notion_database_id" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN notion_database_id TEXT")
+        r = conn.execute("SELECT value FROM settings WHERE key='notion_database_id'").fetchone()
+        if r and json.loads(r[0]):  # pages delivered so far live in the Assetizer database
+            conn.execute("UPDATE sources SET notion_database_id=? WHERE notion_page_id IS NOT NULL", (json.loads(r[0]),))
+    if "stage" not in {r[1] for r in conn.execute("PRAGMA table_info(channels)")}:
+        conn.execute("ALTER TABLE channels ADD COLUMN stage TEXT NOT NULL DEFAULT 'TUNING'")
+        # a channel whose playbook is already confirmed has been through tuning
+        conn.execute("""UPDATE channels SET stage='LOCKED'
+                        WHERE id IN (SELECT channel_id FROM playbooks WHERE status='ACTIVE' AND channel_id IS NOT NULL)""")
 
 
 @contextmanager

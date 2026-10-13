@@ -51,8 +51,10 @@ ALERT_TEXT = {
     "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
                           "在本机终端执行 `ssh -t ovh-investment /home/debian/.local/bin/agy`，按提示完成 Google 登录。恢复后队列自动继续。"),
     "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
-    "YOUTUBE_AUTH": ("YouTube 需要重新登录",
-                     "建立隧道 `ssh -L 6080:127.0.0.1:6080 ovh-investment`，浏览器打开 http://localhost:6080/vnc.html ，在远程 Chromium 中登录 YouTube。系统每 30 分钟自动重试。"),
+    "YOUTUBE_AUTH": ("YouTube 需要登录或会员权限",
+                     "用了 CookieCloud 时：确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次。"
+                     "没用 CookieCloud 时：建立隧道 `ssh -L 6080:127.0.0.1:6080 ovh-investment`，浏览器打开 http://localhost:6080/vnc.html ，"
+                     "在远程 Chromium 中登录 YouTube。系统每 30 分钟自动重试。"),
     "DISK_LOW": ("磁盘空间不足，暂停下载", "系统会先清理过期原始媒体；仍不足时请在「机房」查看占用。"),
 }
 
@@ -230,9 +232,9 @@ def _execute(run_id: str) -> str:
     state = "COMPLETE_PARTIAL" if warned else "COMPLETE"
     summary = _summary(run_id)
     db.exec("UPDATE runs SET production=?, stage=NULL, finished_at=?, summary=? WHERE id=?", state, now(), db.j(summary), run_id)
+    from ..delivery import has_target
     token = config.get().secret("notion-token")
-    target = db.setting("notion_database_id") or db.setting("notion_parent_page_id")
-    delivery = "NOT_STARTED" if token and target else "BLOCKED"
+    delivery = "NOT_STARTED" if token and has_target(source) else "BLOCKED"
     db.exec("""UPDATE sources SET current_run_id=?, delivery=CASE WHEN ? = 'BLOCKED' THEN 'BLOCKED'
                WHEN notion_page_id IS NOT NULL THEN 'STALE' ELSE 'NOT_STARTED' END,
                delivery_reason=?, review=CASE WHEN review='APPROVED' THEN 'UNREVIEWED' ELSE review END, updated_at=? WHERE id=?""",
@@ -338,6 +340,9 @@ class Worker:
             if state.startswith("COMPLETE"):
                 deliver_pending()
             return True
+        from ..tuning import dispatch_next
+        if dispatch_next():  # 调试台: the next queued trial run
+            return True
         return deliver_pending()
 
     def loop(self) -> None:
@@ -372,8 +377,10 @@ def retention() -> dict:
                    (SELECT 1 FROM runs r WHERE r.source_id=s.id AND r.production IN ('QUEUED','RUNNING','WAITING'))""")
     import datetime as dt
     for r in rows:
-        ref = r["review_at"] if r["review"] in ("APPROVED", "REJECTED") else r["updated_at"]
-        days = s.source_retention_days if r["review"] not in ("APPROVED", "REJECTED") else 2
+        # delivered issues are done with their media; tuning samples (never delivered) keep it for re-runs
+        delivered = r["delivery"] == "DELIVERED" and r["delivered_at"]
+        ref = r["delivered_at"] if delivered else r["updated_at"]
+        days = 2 if delivered else s.source_retention_days
         try:
             age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(ref)).days
         except (TypeError, ValueError):

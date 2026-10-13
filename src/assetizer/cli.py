@@ -51,6 +51,32 @@ def cmd_deliver(a) -> None:
     _print(deliver(a.source_id))
 
 
+def cmd_notion_target(a) -> None:
+    """Point a channel at a Notion database and fill the mapping from its preset (names → property ids)."""
+    from .delivery import client
+    from .notion import mapping as M
+    n = client()
+    if not n:
+        sys.exit("no Notion token")
+    if a.clear:
+        db.exec("DELETE FROM settings WHERE key=?", M.key(a.channel))
+        _print({"cleared": a.channel})
+        return
+    dbid = M.norm_id(a.database)
+    dbo = n._req("GET", f"/databases/{dbid}")
+    schema = M.schema_of(dbo)
+    cfg = M.preset(a.channel, dbid, schema, a.parent)
+    cfg["database_title"] = "".join(t.get("plain_text", "") for t in dbo.get("title", []))
+    M.save(a.channel, cfg)
+    _print({"channel": a.channel, **cfg, "problems": M.problems(cfg, schema)})
+
+
+def cmd_cookies(a) -> None:
+    """Read YouTube cookies from CookieCloud once and report what came back (never the values)."""
+    from . import cookies as C
+    _print({"configured": C.configured(), "origin": C.origin(), "domains": C.domains(), **C.probe()})
+
+
 def cmd_set(a) -> None:
     v = a.value
     try:
@@ -93,6 +119,10 @@ def main(argv: list[str] | None = None) -> None:
     x = sub.add_parser("run"); x.add_argument("run_id"); x.set_defaults(fn=cmd_run)
     x = sub.add_parser("web"); x.add_argument("--host"); x.add_argument("--port", type=int); x.set_defaults(fn=cmd_web)
     x = sub.add_parser("deliver"); x.add_argument("source_id"); x.set_defaults(fn=cmd_deliver)
+    x = sub.add_parser("notion-target"); x.add_argument("channel"); x.add_argument("database", nargs="?", default="")
+    x.add_argument("--parent", help="上级页面（关联属性的固定值）"); x.add_argument("--clear", action="store_true")
+    x.set_defaults(fn=cmd_notion_target)
+    sub.add_parser("cookies").set_defaults(fn=cmd_cookies)
     x = sub.add_parser("set"); x.add_argument("key"); x.add_argument("value"); x.set_defaults(fn=cmd_set)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     x = sub.add_parser("doctor"); x.add_argument("--agy", action="store_true"); x.set_defaults(fn=cmd_doctor)

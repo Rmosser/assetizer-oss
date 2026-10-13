@@ -186,9 +186,13 @@ def compile_prompt(channel_id: str, prompt_id: int) -> int:
     pid = db.exec("""INSERT INTO playbooks(channel_id, prompt_id, version, status, data, audit, origin, created_at)
                      VALUES (?,?,?,?,?,?,?,?)""", channel_id, prompt_id, v + 1, "NEEDS_CONFIRMATION", db.j(data), db.j(audit),
                   f"compiler:p{pr['version']}", now())
-    db.decision("CONFIRM_PLAYBOOK", str(pid), f"确认「{ch['name']}」的频道规程 v{v + 1}",
+    # one pending 定稿 per channel: a newer draft replaces the older request (the drafts themselves stay)
+    db.exec("""UPDATE decisions SET resolved_at=?, outcome='SUPERSEDED' WHERE kind='CONFIRM_PLAYBOOK' AND resolved_at IS NULL
+               AND ref IN (SELECT CAST(id AS TEXT) FROM playbooks WHERE channel_id=?)""", now(), channel_id)
+    db.decision("CONFIRM_PLAYBOOK", str(pid), f"为「{ch['name']}」定稿：规程 v{v + 1}",
                 f"{audit['coverage'] * 100:.0f}% 的条款有去处；{audit['core_partial']} 条规则部分保留、{audit['core_dropped']} 条丢失；"
-                f"{len(audit['policy_conflicts'])} 处与「只依据视频」原则冲突，以原则为准。")
+                f"{len(audit['policy_conflicts'])} 处与「只依据视频」原则冲突，以原则为准。"
+                "定稿后这个频道的新视频会自动收录、生产并写入 Notion。")
     db.event("compile", f"{ch['name']} Playbook v{v + 1} 编译完成，待确认")
     return pid
 
