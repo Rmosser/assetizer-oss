@@ -806,6 +806,36 @@ dialog { color: var(--ink); }
 .cc-result { margin: var(--s3) 0 0; font: 14px/1.7 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
 .cc-msg.bad, .cc-result.bad { color: var(--zhu); }
 .cc-tok { font-size: 13px; color: var(--ink-2); }
+/* the four setup steps: number (✓ once done), title, where it stands; then why, fields and a foldable how-to */
+.cc-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s5); }
+.cc-step { display: grid; gap: var(--s3); }
+/* minmax(0, …): a long one-line command scrolls inside its box instead of widening the sheet */
+.cc-steps, .cc-step, .cc-step-body { grid-template-columns: minmax(0, 1fr); }
+.cc-step-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.cc-step-head h4 { flex: 1; min-width: 8em; margin: 0; font: 600 15px var(--sans); color: var(--ink); }
+.cc-n { display: inline-grid; place-items: center; flex: none; width: 22px; height: 22px; border: 1px solid var(--rule-2); border-radius: 50%;
+  font: 600 12px var(--sans); color: var(--ink-2); }
+.cc-n.ok { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.cc-n.bad { border-color: var(--zhu); color: var(--zhu); }
+.cc-step-body { display: grid; gap: var(--s3); padding-left: 30px; min-width: 0; }
+.cc-step-body > * { margin-top: 0; margin-bottom: 0; }
+.cc-why { margin: 0; font: 13.5px/1.75 var(--sans); color: var(--ink-2); }
+.cc-why strong { color: var(--ink); }
+details.cc-help { padding: var(--s2) var(--s3); border: 1px solid var(--rule); border-radius: 6px; background: color-mix(in srgb, var(--paper) 60%, var(--paper-2)); }
+details.cc-help summary { cursor: pointer; font: 600 13px var(--sans); color: var(--ink-2); }
+details.cc-help p, .cc-how { margin: var(--s2) 0 0; font: 13px/1.8 var(--sans); color: var(--ink); }
+.cc-how { padding-left: 1.3em; }
+.cc-help a, .cc-how a { color: var(--zhu); text-underline-offset: 2px; }
+.cc-help code { font: 12px var(--mono); }
+details.cc-help .cmd { margin-top: var(--s2); }
+.cc-save { display: grid; gap: 6px; justify-items: start; }
+.cc-save .btn { height: 44px; padding: 0 22px; }
+.cc-save .cc-msg { margin: 0; }
+.cc-test { display: grid; gap: var(--s2); }
+.cc-test .cc-result { margin: 0; }
+.cc-steps input:disabled { background: var(--paper-2); color: var(--ink-3); cursor: not-allowed; }
+.cc-said { margin-top: 2px; font: 12px/1.6 var(--mono); color: var(--ink-3); overflow-wrap: anywhere; }
+@media (max-width: 640px) { .cc-step-body { padding-left: 0; } }
 
 .lightbox {
   width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0;

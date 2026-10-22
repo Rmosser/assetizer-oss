@@ -322,7 +322,7 @@ def engine():
                       SUM(thinking_tokens) think, MAX(peak_rss_kib) rss FROM model_calls""")
     return {
         "disk": {"total": du.total, "free": du.free, "media": size(s.media_dir), "runs": size(s.runs_dir), "packages": size(s.packages_dir)},
-        "agy": db.setting("agy_health"), "model": s.agy_model,
+        "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model,
         "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
                    "parent": db.setting("notion_parent_page_id")},
         "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
@@ -529,25 +529,64 @@ async def cookiecloud_credentials(request: Request):
 
 
 COOKIE_TEST_INTERVAL = 10.0  # seconds: Cloudflare allows 5 reads per 10 s per IP, shared with downloads
-_cookie_test = {"at": float("-inf")}
-_cookie_test_lock = threading.Lock()
+VIDEO_TEST_INTERVAL = 20.0   # seconds: each video test is a CookieCloud read plus a YouTube page from the server
+_throttle_at: dict[str, float] = {}
+_throttle_lock = threading.Lock()
+_video_test_lock = threading.Lock()
+
+
+def _throttled(key: str, interval: float) -> JSONResponse | None:
+    """A 429 when `key` last ran less than `interval` seconds ago; otherwise None, and this run is recorded."""
+    import time
+    with _throttle_lock:
+        wait = _throttle_at.get(key, float("-inf")) + interval - time.monotonic()
+        if wait > 0:
+            secs = int(wait) + 1
+            return JSONResponse({"detail": f"测试太频繁：{secs} 秒后再试"}, status_code=429, headers={"Retry-After": str(secs)})
+        _throttle_at[key] = time.monotonic()
+    return None
 
 
 @app.post("/api/cookiecloud/test")
 def cookiecloud_test():
     """One CookieCloud read for the 机房 button; at most one every COOKIE_TEST_INTERVAL seconds (429 otherwise)."""
-    import time
     from .. import cookies
-    with _cookie_test_lock:
-        wait = _cookie_test["at"] + COOKIE_TEST_INTERVAL - time.monotonic()
-        if wait > 0:
-            secs = int(wait) + 1
-            return JSONResponse({"detail": f"测试太频繁：{secs} 秒后再试"}, status_code=429, headers={"Retry-After": str(secs)})
-        _cookie_test["at"] = time.monotonic()
+    if busy := _throttled("connection", COOKIE_TEST_INTERVAL):
+        return busy
     out = cookies.probe()
     db.event("config", f"测试 CookieCloud 连接：读到 {out['count']} 条" if out["ok"]
              else f"测试 CookieCloud 连接失败（错误码 {out['code']}）", level="info" if out["ok"] else "warn")
     return out
+
+
+class VideoTest(BaseModel):
+    url: str
+
+
+@app.post("/api/cookiecloud/test-video")
+def cookiecloud_test_video(body: VideoTest):
+    """The 机房 video test: does YouTube accept the CookieCloud login for this video (ideally a members-only one)?
+    A pass also wakes the runs waiting for a YouTube login instead of leaving them to the 30-minute retry."""
+    from .. import youtube
+    url = body.url.strip()
+    if not youtube.video_id(url):
+        return JSONResponse({"detail": "请粘贴一个 YouTube 视频链接（watch、youtu.be、shorts、live 链接都可以）"}, status_code=400)
+    if not _video_test_lock.acquire(blocking=False):
+        return JSONResponse({"detail": "上一次视频测试还没结束"}, status_code=429)
+    try:
+        if busy := _throttled("video", VIDEO_TEST_INTERVAL):
+            return busy
+        out = youtube.probe_video(url)
+        if out["ok"]:
+            out["woken"] = db.connect().execute(
+                "UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason='YOUTUBE_AUTH'").rowcount
+        db.set_setting("youtube_video_test", out)
+        title = (out["video"] or {}).get("title") or out["url"]
+        db.event("config", (f"视频测试通过：{title}" + (f"；{out['woken']} 个等待登录的视频已重新排队" if out.get("woken") else ""))
+                 if out["ok"] else f"视频测试未通过（{out['verdict']}）：{title}", level="info" if out["ok"] else "warn")
+        return out
+    finally:
+        _video_test_lock.release()
 
 
 class Ingest(BaseModel):

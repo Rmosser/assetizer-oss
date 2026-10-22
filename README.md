@@ -23,7 +23,7 @@ open http://localhost:8770                       # 打开「资产刊」
 | 情况 | 你会看到 | 怎么做 |
 |---|---|---|
 | agy 登录失效 | 首页红色告警，队列自动暂停 | `ssh -t ovh-investment /home/debian/.local/bin/agy` 按提示完成 Google 登录；恢复后队列自动继续 |
-| YouTube 需要登录 | 首页红色告警，该期进入等待 | 推荐用 CookieCloud（服务器直接用你 Chrome 里的登录态）：「机房」→「YouTube 会话」→「配置 CookieCloud」，填 origin、Access Client ID / Secret、App Token，保存后点「测试连接」。密钥只写不读，手机上也能填。没配 CookieCloud 时，用远程 Chromium：服务器上运行 `~/video-jobs/start-browser.sh`，本机 `ssh -N -L 6080:127.0.0.1:6080 ovh-investment`，打开 http://localhost:6080/vnc.html 登录 YouTube。系统每 30 分钟自动重试 |
+| YouTube 需要登录 | 首页红色告警，该期进入等待 | 推荐用 CookieCloud（服务器直接用你 Chrome 里的登录态）：「机房」→「YouTube 会话」→「配置 CookieCloud」（配好后叫「配置与测试」），按面板里的 4 步做：配对 Chrome 插件 → 填 Access 服务令牌 → 填 App Token → 测试。每一步都写了值从哪里来。最后用「视频测试」填一个会员视频：读得到就说明 YouTube 认这份登录态，等待登录的视频会立刻重试。密钥只写不读，手机上也能填。卡片显示「读不到 CookieCloud」时，问题在 CookieCloud 那头（比如只读入口的隧道断了，HTTP 530），不是你的登录。没配 CookieCloud 时，用远程 Chromium：服务器上运行 `~/video-jobs/start-browser.sh`，本机 `ssh -N -L 6080:127.0.0.1:6080 ovh-investment`，打开 http://localhost:6080/vnc.html 登录 YouTube。系统每 30 分钟自动重试 |
 | 新频道待定稿 | 首页「待你拍板」、导航「频道」角标 | 在「频道」页的**调试台**：选 2–3 期样片 → 用某个规程版本试跑 → 点「对照视图」看结果与校注 → 改学习目标重新编译 → 用新版本重跑、点「对比两个版本」→ 满意后「定稿并开启自动收录」。样片在定稿前不写 Notion；定稿时交付每期样片「采用中」的那一版 |
 | 想调整已定稿频道 | — | 调试台「回到调试期」：自动收录暂停、新的一期等重新定稿后才写 Notion，然后按上面的流程试跑和定稿 |
 

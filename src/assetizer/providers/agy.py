@@ -4,16 +4,21 @@ Contract learned in Run-003…014:
 
 * one call = one isolated working directory holding prompt, schema, raw
   stream, response and an ``invocation.json`` receipt;
-* media calls may use exactly one tool — ``view_file`` on the allowed file(s);
-  any other tool is a MODALITY_ROUTING_DEVIATION and the call is killed;
+* media calls may use exactly one tool — the media read (``MEDIA_READ``) on the
+  allowed file(s); any other tool is a MODALITY_ROUTING_DEVIATION and the call
+  is killed;
 * prompts larger than ~120 KB go through stream-json stdin (Linux argv limit);
 * every call leaves ~600 MB of conversation state under
   ``~/.gemini/antigravity-cli``; it is deleted once the receipt is on disk.
+
+agy updates itself. ``media_health`` checks after each update that a video can
+still be read the allowed way (pipeline.runner pauses production when not).
 """
 from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -28,6 +33,11 @@ from .. import config
 from ..util import now, read_json, write_json, write_text
 
 ARGV_LIMIT = 120_000
+# How agy reports the model reading a media file: tool name → the parameter holding the path. agy ≤ 1.2 reported
+# view_file(AbsolutePath); 1.4 reports the same tool as read_file(Path) (2026-10-22: verified on a clip, the
+# description matched the video). A new spelling first shows up as a deviation that names the allowed file; the
+# media self-test then pauses production, and its alert says which tool and parameters to add here.
+MEDIA_READ = {"view_file": "AbsolutePath", "read_file": "Path"}
 LIVE_PGIDS: set[int] = set()  # process groups of in-flight agy calls (killed on worker shutdown)
 
 
@@ -59,15 +69,17 @@ _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sig
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
 
 
-_BENIGN_CMD = re.compile(r"^\s*(ls(\s+-[a-zA-Z]+)*(\s+[./~\w-]+)?|pwd)\s*$")
+_BENIGN_CMD = re.compile(r"\s*(ls(\s+-[a-zA-Z]+)*(\s+[./~\w-]+)*|pwd)\s*")
 
 
 def _benign(name: str | None, params: dict) -> bool:
-    """Read-only directory listing in the empty workspace — no fidelity or safety impact."""
+    """Read-only directory listings — no fidelity or safety impact. agy 1.4 models list a few directories in one
+    command, one `ls` per line, after reading the media (2026-10-22); each line must be a plain `ls` or `pwd`."""
     if name == "list_dir":
         return True
     if name == "run_command":
-        return bool(_BENIGN_CMD.match(params.get("CommandLine") or ""))
+        lines = [ln for ln in (params.get("CommandLine") or "").split("\n") if ln.strip()]
+        return bool(lines) and all(_BENIGN_CMD.fullmatch(ln) for ln in lines)
     return False
 
 
@@ -127,19 +139,20 @@ def classify_error(text: str) -> str:
 class AgyProvider:
     name = "agy"
 
-    _version: str | None = None
+    _version: tuple[float, str] | None = None  # (when looked up, version); agy updates itself, so look again
 
     def __init__(self, settings: config.Settings | None = None):
         self.s = settings or config.get()
 
     def version(self) -> str:
-        if AgyProvider._version is None:
+        if AgyProvider._version is None or time.monotonic() - AgyProvider._version[0] > 600:
             try:
-                AgyProvider._version = subprocess.run([self.s.agy_bin, "--version"], capture_output=True, text=True,
-                                                      timeout=30).stdout.strip() or "unknown"
+                v = subprocess.run([self.s.agy_bin, "--version"], capture_output=True, text=True,
+                                   timeout=30).stdout.strip() or "unknown"
             except (OSError, subprocess.TimeoutExpired):
-                AgyProvider._version = "unknown"
-        return AgyProvider._version
+                v = "unknown"
+            AgyProvider._version = (time.monotonic(), v)
+        return AgyProvider._version[1]
 
     # ------------------------------------------------------------------ call
     def call(
@@ -255,8 +268,10 @@ class AgyProvider:
                 elif su.get("step_type") == "tool":
                     name = su.get("tool_name")
                     params = (su.get("tool_info") or {}).get("parameters") or {}
-                    path = params.get("AbsolutePath")
-                    ok = name == "view_file" and path and str(Path(path).resolve()) in allowed
+                    path = params.get(MEDIA_READ[name]) if name in MEDIA_READ else None
+                    ok = bool(path) and str(Path(path).resolve()) in allowed
+                    if ok:
+                        receipt["media_tool"] = name
                     if not ok and _benign(name, params):
                         receipt.setdefault("benign_tools", []).append({"tool": name, "parameters": params})
                         continue
@@ -365,3 +380,39 @@ class AgyProvider:
                     "wall_seconds": r.receipt.get("wall_seconds"), "checked_at": now()}
         except ProviderError as e:
             return {"ok": False, "error": e.kind, "checked_at": now()}
+
+    def media_health(self) -> dict:
+        """Can agy still read a video the way the watchdog allows? A 3-second clip with a random number drawn in its
+        middle: the answer must be that number, so the model really saw the frames. When it cannot, the answer names
+        the tool and parameters agy used instead (what MEDIA_READ would need)."""
+        d = self.s.home / "health" / "agy-media"
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+        out = {"ok": False, "version": self.version(), "tool": None, "parameters": None, "error": None, "checked_at": now()}
+        code = str(random.randint(1000, 9999))
+        clip = d / "canary.mp4"
+        try:
+            _canary_clip(clip, code)
+        except (OSError, subprocess.SubprocessError) as e:
+            return {**out, "error": "CANARY_UNAVAILABLE", "detail": type(e).__name__}
+        prompt = f"用 view_file 读取视频 {clip}（只读一次）。只回复画面中央的数字，不要别的文字。读完后不要再调用任何工具。"
+        try:
+            r = self.call(d / "call", prompt, kind="media-health", media=[str(clip)], timeout="3m")
+        except ProviderError as e:
+            dev = e.receipt.get("deviation") or {}
+            return {**out, "error": e.kind, "tool": dev.get("tool"), "parameters": sorted(dev.get("parameters") or {})}
+        right = re.sub(r"\D", "", r.text) == code
+        return {**out, "ok": right, "tool": r.receipt.get("media_tool"), "error": None if right else "WRONG_ANSWER"}
+
+
+def _canary_clip(path: Path, code: str) -> None:
+    """3 seconds, 640×360, the number in black on white, with a tone (proxies always carry audio)."""
+    font = next((f for f in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                             "/System/Library/Fonts/Supplemental/Arial Bold.ttf") if Path(f).exists()), None)
+    if font is None:
+        font = subprocess.run(["fc-match", "-f", "%{file}", "sans:bold"], capture_output=True, text=True, timeout=30).stdout.strip()
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=640x360:d=3:r=10",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-vf",
+                    f"drawtext=fontfile={font}:text={code}:fontsize=140:fontcolor=black:x=(w-text_w)/2:y=(h-text_h)/2",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path)],
+                   check=True, capture_output=True, timeout=60)

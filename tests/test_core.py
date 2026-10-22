@@ -119,8 +119,16 @@ def test_benign_tools_only_readonly_listings():
     from assetizer.providers.agy import _benign
     assert _benign("run_command", {"CommandLine": "ls -la .."})
     assert _benign("list_dir", {"DirectoryPath": "."})
+    # agy 1.4: several listings in one command, one per line (what 4_IxK7QS1tc-r4 did after reading the video)
+    assert _benign("run_command", {"CommandLine": "ls -la /data/runs/r4/calls/understand-CH01/\nls -la /data/runs/r4/calls/understand-CH01/attempt-1/ws/\n"})
+    assert _benign("run_command", {"CommandLine": "ls -la a b\npwd"})
+    assert not _benign("run_command", {"CommandLine": "ls -la a\ncat prompt.md"})
     assert not _benign("run_command", {"CommandLine": "ls; rm -rf /"})
+    assert not _benign("run_command", {"CommandLine": "ls -la a && curl http://x"})
+    assert not _benign("run_command", {"CommandLine": "ls $(cat x)"})
+    assert not _benign("run_command", {"CommandLine": "ls > out.txt"})
     assert not _benign("run_command", {"CommandLine": "ffmpeg -i x.mp4 out.wav"})
+    assert not _benign("run_command", {"CommandLine": ""})
     assert not _benign("view_file", {"AbsolutePath": "/etc/passwd"})
 
 
@@ -607,6 +615,7 @@ def _cc(home, monkeypatch, resp):
     monkeypatch.setenv("ASSETIZER_COOKIECLOUD_TOKEN", "ccat_test")
     monkeypatch.setenv("ASSETIZER_CF_ACCESS_CLIENT_ID", "id.access")
     monkeypatch.setenv("ASSETIZER_CF_ACCESS_CLIENT_SECRET", "sec")
+    monkeypatch.setattr(cookies.time, "sleep", lambda s: None)  # the one retry after a dropped connection or a 530
     seen = {}
 
     def get(url, params=None, headers=None, **kw):
@@ -715,7 +724,7 @@ def cc_api(home, monkeypatch):
     from assetizer.web import app as web
     for n in ("COOKIECLOUD_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
         monkeypatch.delenv("ASSETIZER_" + n, raising=False)
-    monkeypatch.setitem(web._cookie_test, "at", float("-inf"))
+    monkeypatch.setattr(web, "_throttle_at", {})
     return TestClient(web.app, base_url="http://127.0.0.1:8770")
 
 
@@ -843,7 +852,12 @@ def test_status_tells_where_each_secret_comes_from_but_not_what_it_is(home, monk
     (_Resp(504, "", "application/json", {"error": "Gateway Timeout", "code": "upstream_timeout"}), "upstream_timeout"),
     (_Resp(401, "", "application/json", {"error": "Unauthorized", "code": "token_revoked"}), "token_revoked"),
     (_Resp(403, "", "application/json", {"error": "Forbidden", "code": "domain_not_allowed"}), "domain_not_allowed"),
-    (_Resp(530, "<html>Argo Tunnel error</html>", "text/html"), "unreachable"),  # Cloudflare: tunnel down
+    (_Resp(530, "<html>Argo Tunnel error</html>", "text/html"), "tunnel_down"),  # Cloudflare 1033: no connector
+    (_Resp(502, "<html>Bad gateway</html>", "text/html"), "proxy_down"),         # cloudflared up, read-proxy not
+    # Cloudflare answers in JSON when JSON was asked for; it is still Cloudflare's own error, not the box's
+    (_Resp(502, "", "application/json", {"cloudflare_error": True, "error_name": "origin_bad_gateway", "error_code": 502}), "proxy_down"),
+    (_Resp(530, "", "application/json", {"cloudflare_error": True, "error_code": 1033}), "tunnel_down"),
+    (_Resp(503, "<html>Service unavailable</html>", "text/html"), "unreachable"),
     (_Resp(200, "<html>another site</html>", "text/html"), "not_found"),         # the origin points elsewhere
 ])
 def test_cookiecloud_test_maps_every_ingress_error(cc_api, home, monkeypatch, resp, code):
@@ -880,7 +894,7 @@ def test_cookiecloud_test_reports_cookies_and_token_then_throttles(cc_api, home,
     r = cc_api.post("/api/cookiecloud/test", json={})
     assert r.status_code == 429 and 1 <= int(r.headers["retry-after"]) <= 10
     assert len(calls) == 2
-    monkeypatch.setitem(web._cookie_test, "at", float("-inf"))  # ten seconds later
+    monkeypatch.setattr(web, "_throttle_at", {})  # ten seconds later
     assert cc_api.post("/api/cookiecloud/test", json={}).status_code == 200
 
 
@@ -892,7 +906,7 @@ def test_cookiecloud_endpoints_stay_behind_the_guard(home, monkeypatch):
     monkeypatch.setattr(web, "ACCESS_TEAM", "example-team")
     monkeypatch.setattr(web, "ACCESS_AUD", "x" * 64)
     c = TestClient(web.app)
-    for path in (CC_URL, "/api/cookiecloud/test"):
+    for path in (CC_URL, "/api/cookiecloud/test", "/api/cookiecloud/test-video"):
         assert c.post(path, json={"app_token": CC_TOKEN}, headers={"host": "kan.example.com"}).status_code == 403
         assert c.post(path, json={"app_token": CC_TOKEN},
                       headers={"host": "kan.example.com", "cf-access-jwt-assertion": "forged"}).status_code == 403
@@ -900,3 +914,294 @@ def test_cookiecloud_endpoints_stay_behind_the_guard(home, monkeypatch):
         assert c.post(path, content=f"app_token={CC_TOKEN}",
                       headers={"host": "127.0.0.1:8770", "content-type": "application/x-www-form-urlencoded"}).status_code == 415
     assert not (config.get().secrets_dir / "cookiecloud-token").exists()
+
+
+# ---------------------------------------------------------------- 机房: video test (does YouTube accept the CookieCloud login?)
+SIGNED_IN = ("# Netscape HTTP Cookie File\n"
+             ".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tsapisid-value-7Qp2Lm\n"
+             "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tLOGIN_INFO\tlogin-value-K2pV9x\n")
+VT_URL = "/api/cookiecloud/test-video"
+MEMBER = "https://youtu.be/-PM846taOS4?si=shared"
+
+
+def _yt(monkeypatch, returncode=0, info=None, stderr=""):
+    """Stub yt-dlp; remember its command and what the cookie file looked like while it ran."""
+    import os
+    import stat
+    import subprocess
+    from assetizer import youtube
+    seen = {}
+
+    def run(cmd, **kw):
+        path = cmd[cmd.index("--cookies") + 1]
+        seen.update(cmd=cmd, path=path, mode=stat.S_IMODE(os.stat(path).st_mode), signed_in="SAPISID" in open(path).read())
+        return subprocess.CompletedProcess(cmd, returncode, json.dumps(info or {}), stderr)
+    monkeypatch.setattr(youtube.subprocess, "run", run)
+    return seen
+
+
+def _waiting_run():
+    from assetizer import db
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, wait_reason, created_at) VALUES ('v-r1','v','WAITING','YOUTUBE_AUTH',?)", t)
+
+
+def test_video_test_passes_on_a_members_only_video_and_wakes_waiting_runs(cc_api, home, monkeypatch):
+    import os
+    from assetizer import db
+    _cc(home, monkeypatch, _Resp(200, SIGNED_IN))
+    seen = _yt(monkeypatch, info={"id": "-PM846taOS4", "title": "会员专享", "channel": "王海滨的财经闲谈",
+                                  "availability": "subscriber_only", "duration": 600})
+    _waiting_run()
+    r = cc_api.post(VT_URL, json={"url": MEMBER})
+    out = r.json()
+    assert r.status_code == 200 and out["ok"] and out["verdict"] == "member_ok" and out["woken"] == 1
+    assert out["url"] == "https://www.youtube.com/watch?v=-PM846taOS4" and out["video"]["title"] == "会员专享"
+    assert out["cookies"] == {"count": 2, "signed_in": True}
+    # yt-dlp saw only the CookieCloud cookies, in a private file that is gone afterwards
+    assert seen["cmd"][-1] == out["url"] and "--cookies-from-browser" not in seen["cmd"] and "--skip-download" in seen["cmd"]
+    assert seen["mode"] == 0o600 and seen["signed_in"] and not os.path.exists(seen["path"])
+    assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
+    assert db.setting("youtube_video_test")["verdict"] == "member_ok"
+    shown = r.text + json.dumps(db.setting("youtube_video_test")) + cc_api.get("/api/engine").text
+    assert "sapisid-value" not in shown and "login-value" not in shown
+
+
+@pytest.mark.parametrize("returncode,stderr,verdict", [
+    (1, "ERROR: [youtube] -PM846taOS4: Join this channel to get access to members-only content like this video, and other exclusive perks.", "not_member"),
+    (1, "ERROR: [youtube] -PM846taOS4: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication.", "bot_challenge"),
+    (0, "WARNING: [youtube] The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser as a security measure.", "cookies_rejected"),
+    (1, "ERROR: [youtube] -PM846taOS4: Sign in to confirm your age. This video may be inappropriate for some users.", "age_restricted"),
+    (1, "ERROR: [youtube] -PM846taOS4: Private video. Sign in if you've been granted access to this video", "private"),
+    (1, "ERROR: [youtube] -PM846taOS4: Video unavailable. This video has been removed by the uploader", "unavailable"),
+    (1, "ERROR: unable to download API page: HTTP Error 429: Too Many Requests", "rate_limited"),
+])
+def test_video_test_explains_why_youtube_refused(cc_api, home, monkeypatch, returncode, stderr, verdict):
+    from assetizer import db, youtube
+    _cc(home, monkeypatch, _Resp(200, SIGNED_IN))
+    _yt(monkeypatch, returncode, {"id": "-PM846taOS4", "title": "t", "availability": "public"}, stderr)
+    _waiting_run()
+    out = cc_api.post(VT_URL, json={"url": MEMBER}).json()
+    assert out["ok"] is False and out["verdict"] == verdict and out["message"] == youtube.VERDICT[verdict]
+    assert out["detail"] == stderr[:300] and "woken" not in out
+    assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "WAITING"  # a failed test wakes nothing
+
+
+def test_video_test_does_not_ask_youtube_without_a_sign_in(cc_api, home, monkeypatch):
+    _cc(home, monkeypatch, _Resp(200, NETSCAPE))  # SID and PREF only: no SAPISID, so YouTube would see a visitor
+    seen = _yt(monkeypatch)
+    out = cc_api.post(VT_URL, json={"url": MEMBER}).json()
+    assert out["verdict"] == "not_signed_in" and out["ok"] is False and out["cookies"] == {"count": 2, "signed_in": False}
+    assert "cmd" not in seen
+
+
+def test_video_test_reports_cookiecloud_failures_without_asking_youtube(cc_api, home, monkeypatch):
+    from assetizer import cookies, db
+    _cc(home, monkeypatch, _Resp(403, "<html>Forbidden</html>", "text/html"))
+    seen = _yt(monkeypatch)
+    out = cc_api.post(VT_URL, json={"url": MEMBER}).json()
+    assert out["verdict"] == "cookiecloud" and out["code"] == "access_denied" and out["message"] == cookies.FIX["access_denied"]
+    assert out["detail"] == "HTTP 403"
+    assert "cmd" not in seen and db.setting("youtube_cookies_state")["code"] == "access_denied"
+
+
+def test_video_test_needs_a_youtube_link_and_is_throttled(cc_api, home, monkeypatch):
+    _cc(home, monkeypatch, _Resp(200, SIGNED_IN))
+    _yt(monkeypatch, info={"id": "-PM846taOS4", "title": "t", "availability": "public"})
+    assert cc_api.post(VT_URL, json={"url": "随便写的几个字"}).status_code == 400
+    assert cc_api.post(VT_URL, json={"url": MEMBER}).json()["verdict"] == "login_ok"  # the bad link used no quota
+    r = cc_api.post(VT_URL, json={"url": MEMBER})
+    assert r.status_code == 429 and 1 <= int(r.headers["retry-after"]) <= 20
+
+
+def test_changing_credentials_clears_the_last_video_test_but_keeps_its_video(cc_api, home):
+    from assetizer import db
+    db.set_setting("youtube_video_test", {"ok": True, "verdict": "member_ok", "url": "https://www.youtube.com/watch?v=-PM846taOS4"})
+    assert cc_api.post(CC_URL, json={"app_token": CC_TOKEN}).status_code == 200
+    assert db.setting("youtube_video_test") == {"url": "https://www.youtube.com/watch?v=-PM846taOS4"}
+
+
+def test_a_dropped_connection_is_tried_once_more_and_the_failure_is_named(home, monkeypatch):
+    import httpx
+    from assetizer import cookies, db
+    _cc(home, monkeypatch, None)
+    monkeypatch.setattr(cookies.time, "sleep", lambda s: None)
+    calls = []
+
+    def blip(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectError("connection reset by peer")
+        return _Resp(200, NETSCAPE)
+    monkeypatch.setattr(cookies.httpx, "get", blip)
+    assert cookies.fetch() and len(calls) == 2
+
+    def down(url, **kw):
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setattr(cookies.httpx, "get", down)
+    with cookies.ytdlp_args():
+        pass
+    st = db.setting("youtube_cookies_state")
+    assert st["code"] == "unreachable" and st["detail"] == "ConnectError"
+    assert db.one("SELECT body FROM alerts WHERE key='cookiecloud'")["body"].endswith("（错误码 unreachable，ConnectError）")
+
+    def slow(url, **kw):
+        calls.append(url)
+        raise httpx.ReadTimeout("read timed out")
+    calls.clear()
+    monkeypatch.setattr(cookies.httpx, "get", slow)
+    with pytest.raises(cookies.CookieError):
+        cookies.fetch()
+    assert len(calls) == 1  # a timeout is not tried again: it already waited 30 seconds
+
+
+def test_a_flapping_tunnel_gets_one_more_try(home, monkeypatch):
+    from assetizer import cookies
+    _cc(home, monkeypatch, None)
+    answers = [_Resp(530, "<html>error code: 1033</html>", "text/html"), _Resp(200, NETSCAPE)]
+    monkeypatch.setattr(cookies.httpx, "get", lambda url, **kw: answers.pop(0))
+    assert len(cookies._cookie_lines(cookies.fetch())) == 2 and not answers
+    answers[:] = [_Resp(502, "", "application/json", {"cloudflare_error": True, "error_name": "origin_bad_gateway"}),
+                  _Resp(200, NETSCAPE)]
+    assert cookies.fetch() and not answers  # Cloudflare's JSON error page is retried as well
+    # the ingress proxy's own JSON errors are answers from the box, not a flapping tunnel: no retry
+    answers[:] = [_Resp(502, "", "application/json", {"code": "upstream_unavailable"}), _Resp(200, NETSCAPE)]
+    with pytest.raises(cookies.CookieError) as e:
+        cookies.fetch()
+    assert e.value.code == "upstream_unavailable" and len(answers) == 1
+
+
+# ---------------------------------------------------------------- agy media reads survive agy updating itself
+FAKE_AGY = """#!{python}
+import json, os, sys, time
+if "--version" in sys.argv:
+    print(os.environ.get("FAKE_AGY_VERSION", "1.4.5"))
+    sys.exit(0)
+tool, param, path, answer = (os.environ.get(k, "") for k in ("FAKE_AGY_TOOL", "FAKE_AGY_PARAM", "FAKE_AGY_PATH", "FAKE_AGY_ANSWER"))
+if path == "@clip":  # the media self-test: the clip in its one --add-dir
+    path = os.path.join(sys.argv[sys.argv.index("--add-dir") + 1], "canary.mp4")
+cid = "fake-conversation-0001"
+print(json.dumps({"event": "init", "init": {"model": sys.argv[sys.argv.index("--model") + 1], "tools": ["view_file"]}}), flush=True)
+for state in ("ACTIVE", "DONE") if tool else ():
+    print(json.dumps({"step_update": {"conversation_id": cid, "step_index": 2, "step_type": "tool", "tool_name": tool,
+                                      "state": state, "tool_info": {"name": tool, "parameters": {param: path}}}}), flush=True)
+    time.sleep(0.3)  # still running when the watchdog kills a deviation
+print(json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": answer, "conversation_id": cid, "usage": {}}}), flush=True)
+"""
+
+
+@pytest.fixture
+def fake_agy(home, monkeypatch):
+    """agy replaced by a script that reports one tool step (name, parameter, path) and then answers."""
+    import dataclasses
+    import sys
+    from assetizer import config
+    from assetizer.providers.agy import AgyProvider
+    exe = home / "agy"
+    exe.write_text(FAKE_AGY.replace("{python}", sys.executable))
+    exe.chmod(0o755)
+    config.override(dataclasses.replace(config.get(), agy_bin=str(exe), agy_state_dir=home / "agy-state"))
+    monkeypatch.setattr(AgyProvider, "_version", None)
+
+    def use(tool="", param="", path="", answer="", version="1.4.5"):
+        for k, v in (("TOOL", tool), ("PARAM", param), ("PATH", path), ("ANSWER", answer), ("VERSION", version)):
+            monkeypatch.setenv(f"FAKE_AGY_{k}", v)
+    return use
+
+
+@pytest.fixture
+def canary(monkeypatch):
+    from assetizer.providers import agy
+    monkeypatch.setattr(agy, "_canary_clip", lambda path, code: path.write_bytes(b"clip"))
+    monkeypatch.setattr(agy.random, "randint", lambda a, b: 4721)
+
+
+@pytest.mark.parametrize("tool,param", [("view_file", "AbsolutePath"), ("read_file", "Path")])
+def test_both_spellings_of_the_agy_media_read_are_accepted(fake_agy, home, tool, param):
+    from assetizer.providers.agy import AgyProvider
+    clip = home / "clip.mp4"
+    clip.write_bytes(b"x")
+    fake_agy(tool, param, str(clip), '{"ok": true}')
+    r = AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
+    assert r.receipt["status"] == "SUCCESS" and r.receipt["view_file_count"] == 1 and r.receipt["media_tool"] == tool
+
+
+def test_reading_any_other_file_is_still_a_deviation(fake_agy, home):
+    from assetizer.providers.agy import AgyProvider, ProviderError
+    clip = home / "clip.mp4"
+    clip.write_bytes(b"x")
+    fake_agy("read_file", "Path", "/etc/hosts", "{}")
+    with pytest.raises(ProviderError) as e:
+        AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
+    assert e.value.kind == "MODALITY_ROUTING_DEVIATION" and e.value.receipt["deviation"]["tool"] == "read_file"
+
+
+def test_the_media_self_test_needs_the_number_drawn_in_the_clip(fake_agy, canary):
+    from assetizer.providers.agy import AgyProvider
+    fake_agy("read_file", "Path", "@clip", "4721")
+    h = AgyProvider().media_health()
+    assert h["ok"] and h["tool"] == "read_file" and h["version"] == "1.4.5"
+    fake_agy("read_file", "Path", "@clip", "1234")
+    h = AgyProvider().media_health()
+    assert not h["ok"] and h["error"] == "WRONG_ANSWER"
+
+
+def test_the_media_self_test_names_the_tool_agy_used_instead(fake_agy, canary):
+    from assetizer.providers.agy import AgyProvider
+    fake_agy("open_media", "FilePath", "@clip", "4721")
+    h = AgyProvider().media_health()
+    assert not h["ok"] and h["error"] == "MODALITY_ROUTING_DEVIATION"
+    assert h["tool"] == "open_media" and h["parameters"] == ["FilePath"]
+
+
+def test_an_agy_update_that_breaks_media_reads_pauses_production_until_the_self_test_passes(home, monkeypatch):
+    import time
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import AgyProvider
+    result = {"ok": False, "version": "1.5.0", "tool": "open_media", "parameters": ["FilePath"],
+              "error": "MODALITY_ROUTING_DEVIATION", "checked_at": "t"}
+    monkeypatch.setattr(AgyProvider, "media_health", lambda self: dict(result))
+    monkeypatch.setattr(AgyProvider, "version", lambda self: "1.5.0")
+    monkeypatch.setattr(runner, "MEDIA_CHECK_EVERY", 0)
+    monkeypatch.setattr(runner, "MEDIA_RECHECK_PAUSED", 0)
+    db.set_setting("agy_media_version", "1.4.5")
+    w = runner.Worker()
+    t = time.monotonic()
+    w.last.update(retry=t, retention=t, ingest=t, probe=t, health=t)  # only the media check is due
+    w.housekeeping()
+    assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
+    body = db.one("SELECT body FROM alerts WHERE key='AGY_MEDIA_READ' AND resolved_at IS NULL")["body"]
+    assert "1.5.0" in body and "open_media" in body and "FilePath" in body
+    # still broken: stays paused (a text-only health probe must not resume it)
+    w.housekeeping()
+    assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
+    # fixed: production resumes and the run held for it is retried
+    _waiting_run()
+    db.exec("UPDATE runs SET wait_reason='AGY_MEDIA_READ' WHERE id='v-r1'")
+    result.update(ok=True, tool="open_media", error=None)
+    w.housekeeping()
+    assert db.setting("queue_paused") is None and db.setting("agy_media_version") == "1.5.0"
+    assert db.one("SELECT resolved_at FROM alerts WHERE key='AGY_MEDIA_READ'")["resolved_at"]
+    assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
+
+
+def test_a_run_whose_media_reads_all_deviate_waits_only_when_agy_itself_cannot_read(home, monkeypatch):
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import AgyProvider, ProviderError
+    _waiting_run()
+    db.exec("UPDATE runs SET production='RUNNING', wait_reason=NULL WHERE id='v-r1'")
+    e = ProviderError("MODALITY_ROUTING_DEVIATION", "read_file", {"deviation": {"tool": "read_file"}})
+    monkeypatch.setattr(AgyProvider, "media_health", lambda self: {"ok": True, "version": "1.4.5", "tool": "read_file"})
+    assert runner._hold_if_agy_cannot_read_media("v-r1", e) is False  # agy reads the self-test clip: this run's own problem
+    assert db.setting("queue_paused") is None
+    monkeypatch.setattr(AgyProvider, "media_health", lambda self: {"ok": False, "version": "1.5.0", "tool": "open_media",
+                                                                    "parameters": ["FilePath"], "error": "MODALITY_ROUTING_DEVIATION"})
+    assert runner._hold_if_agy_cannot_read_media("v-r1", e) is True
+    run = db.one("SELECT production, wait_reason FROM runs WHERE id='v-r1'")
+    assert run["production"] == "WAITING" and run["wait_reason"] == "AGY_MEDIA_READ"
+    assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
+    assert runner._hold_if_agy_cannot_read_media("v-r1", ProviderError("PROVIDER_FAILURE")) is False

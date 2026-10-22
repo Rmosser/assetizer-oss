@@ -20,6 +20,7 @@ import os
 import re
 import secrets
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Iterator
@@ -33,6 +34,8 @@ from .util import now
 FIX: dict[str, str] = {
     "not_configured": "还没有配置 CookieCloud。",
     "unreachable": "连不上 CookieCloud 的公网入口：检查 Cloudflare Tunnel 与 ingress 是否在线。",
+    "tunnel_down": "Cloudflare 连不上 CookieCloud 只读入口背后的隧道（HTTP 530）：懒猫微服上给只读入口用的 cloudflared 可能断了，检查它是否在线。",
+    "proxy_down": "隧道在线，但连不上懒猫微服上的只读代理（read-proxy，HTTP 502）：检查 CookieCloud 应用里的 read-proxy 是否在运行。",
     "access_denied": "Cloudflare Access 拒绝了请求：检查 Access Client ID / Client Secret 和 IP 白名单。",
     "rate_limited": "Cloudflare 限流（每个 IP 每 10 秒 5 次，与正常下载共用）：等十几秒再试。",
     "ingress_rate_limited": "CookieCloud 只读入口限流（每分钟 30 次）：等一分钟再试。",
@@ -51,12 +54,25 @@ FIX: dict[str, str] = {
 _TOKEN_HINT = {"domain_not_allowed", "missing_scope", "sync_source_not_configured", "cookie_payload_missing",
                "no_youtube_cookies"}
 _REDIRECT = (301, 302, 303, 307, 308)
+# statuses Cloudflare itself answers with when it cannot reach the origin behind the tunnel
+_CLOUDFLARE_ORIGIN = {502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530}
+
+
+def _cloudflare_error(r) -> bool:
+    """Whether this is Cloudflare's own error rather than an answer from the box: an HTML or text page, or, when JSON
+    was asked for, JSON marked ``cloudflare_error``. The ingress proxy's and CookieCloud's JSON errors are not."""
+    if "json" not in r.headers.get("content-type", ""):
+        return True
+    try:
+        return (r.json() or {}).get("cloudflare_error") is True
+    except (ValueError, AttributeError):
+        return False
 
 
 class CookieError(RuntimeError):
     def __init__(self, code: str, message: str = ""):
         super().__init__(f"{code}: {message}" if message else code)
-        self.code = code
+        self.code, self.detail = code, message or None  # detail: an exception class or "HTTP 403", never a value
 
 
 def fix(code: str) -> str:
@@ -91,18 +107,29 @@ def _headers(accept: str = "text/plain") -> dict:
 
 
 def _get(path: str, params: dict | None, timeout: float, accept: str = "text/plain"):
-    try:
-        return httpx.get(f"{origin()}{path}", params=params, headers=_headers(accept), timeout=timeout,
-                         follow_redirects=False)
-    except httpx.HTTPError as e:
-        raise CookieError("unreachable", type(e).__name__) from None
+    """GET through the read-only ingress. A dropped connection, or Cloudflare's own page for an origin it cannot reach
+    (the tunnel to the box flaps), is tried once more two seconds later: one blip used to send a download to the
+    logged-out server Chromium. A timeout is not tried again."""
+    for attempt in (1, 2):
+        try:
+            r = httpx.get(f"{origin()}{path}", params=params, headers=_headers(accept), timeout=timeout,
+                          follow_redirects=False)
+        except httpx.TimeoutException as e:
+            raise CookieError("unreachable", type(e).__name__) from None
+        except httpx.HTTPError as e:
+            if attempt == 2:
+                raise CookieError("unreachable", type(e).__name__) from None
+        else:
+            if attempt == 2 or r.status_code not in _CLOUDFLARE_ORIGIN or not _cloudflare_error(r):
+                return r
+        time.sleep(2)
 
 
 def _error_code(r) -> str:
-    """Name a non-200 answer. JSON bodies come from the ingress proxy or CookieCloud and carry their own `code`;
-    anything else is Cloudflare in front of them (docs/cookiecloud-credentials-ui.md §3.2)."""
+    """Name a non-200 answer. JSON from the ingress proxy or CookieCloud carries its own `code`; everything else is
+    Cloudflare in front of them (docs/cookiecloud-credentials-ui.md §3.2, docs/cookiecloud-read-tunnel-530.md)."""
     status = r.status_code
-    if "json" in r.headers.get("content-type", ""):
+    if not _cloudflare_error(r):
         try:
             code = (r.json() or {}).get("code")
         except (ValueError, AttributeError):
@@ -115,6 +142,10 @@ def _error_code(r) -> str:
         return "rate_limited"   # Cloudflare's edge rate limit
     if status == 404:
         return "not_found"
+    if status == 530:
+        return "tunnel_down"    # no healthy cloudflared connector for the tunnel (Cloudflare 1033)
+    if status == 502:
+        return "proxy_down"     # cloudflared is connected but got no valid answer from read-proxy
     if status >= 500:
         return "unreachable"    # Cloudflare's own error page: tunnel or ingress down
     return f"http_{status}"
@@ -163,8 +194,9 @@ def introspect(timeout: float = 15) -> dict | None:
             "allowed_domains": strs(tok.get("allowed_domains"))}
 
 
-def _record(ok: bool, source: str, code: str | None = None, count: int | None = None) -> None:
-    db.set_setting("youtube_cookies_state", {"ok": ok, "source": source, "code": code, "count": count, "at": now()})
+def _record(ok: bool, source: str, code: str | None = None, count: int | None = None, detail: str | None = None) -> None:
+    db.set_setting("youtube_cookies_state", {"ok": ok, "source": source, "code": code, "count": count, "detail": detail,
+                                             "at": now()})
 
 
 def probe() -> dict:
@@ -176,8 +208,8 @@ def probe() -> dict:
     try:
         lines = _cookie_lines(fetch())
     except CookieError as e:
-        _record(False, "cookiecloud", e.code)
-        out = {"ok": False, "code": e.code, "fix": fix(e.code)}
+        _record(False, "cookiecloud", e.code, detail=e.detail)
+        out = {"ok": False, "code": e.code, "fix": fix(e.code), "detail": e.detail}
     else:
         _record(True, "cookiecloud", count=len(lines))
         db.resolve_alert("cookiecloud")
@@ -185,6 +217,41 @@ def probe() -> dict:
     if out["ok"] or out["code"] in _TOKEN_HINT:
         out["token"] = introspect()
     return out
+
+
+# the cookies yt-dlp signs YouTube requests with: without one of them YouTube sees a signed-out visitor
+AUTH_COOKIES = ("SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID")
+
+
+def _signed_in(lines: list[str]) -> bool:
+    """Whether the cookies carry a YouTube sign-in, judged by cookie names (values are never looked at)."""
+    return any(len(f) >= 7 and "youtube.com" in f[0] and f[5] in AUTH_COOKIES for f in (ln.split("\t") for ln in lines))
+
+
+@contextlib.contextmanager
+def cookiecloud_file() -> Iterator[tuple[str, dict]]:
+    """Fresh CookieCloud cookies in a 0600 file for one yt-dlp call, with no fallback to the server Chromium (the 机房
+    video test). Yields (path, {count, signed_in}) and removes the file afterwards; raises CookieError."""
+    try:
+        text = fetch()
+    except CookieError as e:
+        _record(False, "cookiecloud", e.code, detail=e.detail)
+        raise
+    lines = _cookie_lines(text)
+    _record(True, "cookiecloud", count=len(lines))
+    db.resolve_alert("cookiecloud")
+    run_dir = config.get().secrets_dir / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.chmod(0o700)
+    fd, path = tempfile.mkstemp(prefix="yt-cookies-", suffix=".txt", dir=run_dir)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(path, 0o600)
+        yield path, {"count": len(lines), "signed_in": _signed_in(lines)}
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 def browser_args() -> list[str]:
@@ -211,9 +278,9 @@ def ytdlp_args() -> Iterator[list[str]]:
             _record(True, "cookiecloud", count=len(_cookie_lines(text)))
             db.resolve_alert("cookiecloud")
         except CookieError as e:
-            _record(False, "cookiecloud", e.code)
+            _record(False, "cookiecloud", e.code, detail=e.detail)
             db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态，已改用服务器 Chromium",
-                           f"{fix(e.code)}（错误码 {e.code}）")
+                           f"{fix(e.code)}（错误码 {e.code}{f'，{e.detail}' if e.code == 'unreachable' and e.detail else ''}）")
         except OSError:
             # Preparation can fail after mkstemp (write/chmod or the status update). Remove the
             # plaintext cookie file before falling back, and never hand yt-dlp a partial file.
@@ -365,7 +432,10 @@ def save_credentials(body) -> None:
             _remove_secret(name)
         else:
             db.set_setting("cookiecloud_origin", None)
-    db.set_setting("youtube_cookies_state", None)  # the last read used the old credentials
+    # the last read and the last video test used the old credentials; keep only the test video's address
+    db.set_setting("youtube_cookies_state", None)
+    last = db.setting("youtube_video_test") or {}
+    db.set_setting("youtube_video_test", {"url": last["url"]} if last.get("url") else None)
     parts = [f"已更新 {'、'.join(FIELDS[f][0] for f in sets)}" if sets else "",
              f"已清除 {'、'.join(FIELDS[f][0] for f in clear)}" if clear else ""]
     db.event("config", "CookieCloud 凭据：" + "；".join(p for p in parts if p))
@@ -387,9 +457,9 @@ def _field(name: str) -> dict:
 
 
 def status() -> dict:
-    """What the 机房 shows: where the login comes from and how the last read went (no values)."""
+    """What the 机房 shows: where the login comes from, how the last read and the last video test went (no values)."""
     s = config.get()
     return {"cookiecloud": {"configured": configured(), "origin": origin(), "domains": domains(),
                             "access_token": bool(s.secret("cf-access-client-id") and s.secret("cf-access-client-secret")),
                             "fields": {f: _field(name) for f, (_, name) in FIELDS.items() if name}},
-            "state": db.setting("youtube_cookies_state"), "fix": FIX}
+            "state": db.setting("youtube_cookies_state"), "video_test": db.setting("youtube_video_test"), "fix": FIX}

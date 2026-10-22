@@ -46,6 +46,8 @@ STAGES: list[tuple[str, object, bool]] = [
 STAGE_NAMES = [s[0] for s in STAGES]
 ALWAYS_RERUN = {"PLAYBOOK"}
 PAUSE_KINDS = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"}
+MEDIA_CHECK_EVERY = 600      # seconds: while idle, look this often whether agy updated itself
+MEDIA_RECHECK_PAUSED = 3600  # seconds: while paused for AGY_MEDIA_READ, repeat the media self-test this often
 
 ALERT_TEXT = {
     "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
@@ -221,6 +223,8 @@ def _execute(run_id: str) -> str:
             _wait(run_id, e.kind, str(e))
             pause_queue(e.kind)
             return "WAITING"
+        if _hold_if_agy_cannot_read_media(run_id, e):
+            return "WAITING"
         _fail(run_id, e)
         return "FAILED"
     except Exception as e:  # noqa: BLE001
@@ -273,12 +277,50 @@ def pause_queue(reason: str) -> None:
     db.set_setting("queue_paused", {"reason": reason, "since": now()})
 
 
+# ---------------------------------------------------------------- agy media reads (agy updates itself)
+def media_self_test() -> dict:
+    """Run agy's media self-test and keep the result for the 机房; a pass remembers the agy version it passed on."""
+    h = AgyProvider().media_health()
+    db.set_setting("agy_media_health", h)
+    if h.get("ok"):
+        db.set_setting("agy_media_version", h.get("version"))
+    return h
+
+
+def media_alert(h: dict) -> None:
+    """Pause production and say what agy did instead, so the watchdog can be taught the new way to read media."""
+    if h.get("tool"):
+        how = f"读视频时用了没见过的工具 {h['tool']}（参数 {'、'.join(h.get('parameters') or []) or '无'}）"
+    elif h.get("error") == "WRONG_ANSWER":
+        how = "读了自检视频，却没答对画面里的数字"
+    else:
+        how = f"读视频自检出错（{h.get('error')}）"
+    db.raise_alert("AGY_MEDIA_READ", "critical", "agy 读不了视频，生产已暂停",
+                   f"agy {h.get('version')} {how}。系统每小时自检一次，通过后自动继续。"
+                   "需要改代码时，把这条告警交给维护者：读视频的工具名和参数登记在 providers/agy.py 的 MEDIA_READ。")
+    pause_queue("AGY_MEDIA_READ")
+
+
+def _hold_if_agy_cannot_read_media(run_id: str, e: ProviderError) -> bool:
+    """Every attempt of a media call deviated. If the self-test fails too, agy itself changed (2026-10-22: an update
+    renamed view_file): the run waits and production pauses, instead of failing every run after it. If the self-test
+    passes, the problem belongs to this run, which fails as before."""
+    if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT"):
+        return False
+    h = media_self_test()
+    if h.get("ok"):
+        return False
+    _wait(run_id, "AGY_MEDIA_READ", str(e))
+    media_alert(h)
+    return True
+
+
 # ---------------------------------------------------------------- worker loop
 class Worker:
     def __init__(self, poll: float = 5.0):
         self.poll = poll
         self.stop = False
-        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0}
+        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0}
 
     def recover(self) -> None:
         n = kill_orphans()
@@ -298,7 +340,28 @@ class Worker:
     def housekeeping(self) -> None:
         t = time.monotonic()
         paused = db.setting("queue_paused")
-        if paused and t - self.last["health"] > 600:
+        if paused and paused.get("reason") == "AGY_MEDIA_READ":
+            # a text-only health probe would pass and resume into the same failure: only the media self-test decides
+            if t - self.last["media"] > MEDIA_RECHECK_PAUSED:
+                self.last["media"] = t
+                h = media_self_test()
+                if h.get("ok"):
+                    db.set_setting("queue_paused", None)
+                    db.resolve_alert("AGY_MEDIA_READ")
+                    db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason='AGY_MEDIA_READ'")
+                    db.event("worker", f"agy {h.get('version')} 能读视频了，队列继续")
+                else:
+                    media_alert(h)
+        elif not paused and t - self.last["media"] > MEDIA_CHECK_EVERY and not db.one("SELECT 1 FROM runs WHERE production='RUNNING'"):
+            self.last["media"] = t
+            if AgyProvider().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
+                h = media_self_test()
+                db.event("worker", f"agy {h.get('version')} 读视频自检{'通过' if h.get('ok') else '没通过'}",
+                         level="info" if h.get("ok") else "warn")
+                if not h.get("ok"):
+                    media_alert(h)
+                    paused = db.setting("queue_paused")
+        if paused and paused.get("reason") != "AGY_MEDIA_READ" and t - self.last["health"] > 600:
             self.last["health"] = t
             h = AgyProvider().health()
             db.set_setting("agy_health", h)
