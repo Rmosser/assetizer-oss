@@ -16,7 +16,7 @@ def run(args: list[str], **kw) -> subprocess.CompletedProcess:
     so a killed encode never leaves a truncated file that later stages would reuse."""
     out = Path(args[-1])
     tmp = out.with_name(f".{out.stem}.part{out.suffix}")
-    r = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-y", *args[:-1], str(tmp)],
+    r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y", *args[:-1], str(tmp)],
                        capture_output=True, text=True, **kw)
     if r.returncode != 0:
         tmp.unlink(missing_ok=True)
@@ -137,8 +137,11 @@ def render_window(src: Path, start: float, length: float, out: Path) -> Path:
          "-map", "0:v:0", "-map", "0:a:0?", "-vf", "fps=2,scale=-2:'min(1080,ih)'",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-g", "20", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "64k", "-ac", "1", "-movflags", "+faststart", str(out)])
-    if out.stat().st_size > VIEW_FILE_LIMIT:  # very long unit: trade resolution for the 100 MB limit
-        model_proxy(src, start, length, out, fps=1, crf=34, max_height=720)
+    if out.stat().st_size > VIEW_FILE_LIMIT:  # very long unit: trade frame rate and resolution for the limit
+        for crf, h, abr in PROXY_LADDER[2:]:
+            model_proxy(src, start, length, out, fps=1, crf=crf, max_height=h, audio_kbps=abr)
+            if out.stat().st_size <= VIEW_FILE_LIMIT:
+                break
     return out
 
 
@@ -190,11 +193,17 @@ def moov_first(p: Path) -> bool:
     return False
 
 
-VIEW_FILE_LIMIT = 95 * 1024 * 1024  # agy >= 1.2.2 refuses view_file above 100 MB (changelog: context-overflow guard)
+# Largest media file agy reads. agy 1.2 refused view_file above 100 MB; agy 1.4.5 refuses above ~25 MB
+# (2026-10-22, 1-minute clips: 24.5 MB read, 27.4 MB refused; a 26 MB 25-minute chunk proxy was refused).
+# The media self-test (providers/agy.py) reads a clip near this size after every agy update.
+VIEW_FILE_LIMIT = 24 * 1024 * 1024
+# (CRF, max height, audio kbps), tried in order until the proxy fits: compression first, then resolution
+# (chart text), then audio. A 25-minute chunk fits at the second step; a 50-minute chunk needs the later ones.
+PROXY_LADDER = ((32, 1080, 48), (36, 1080, 48), (34, 720, 48), (38, 720, 32), (38, 540, 32), (42, 540, 24))
 
 
 def model_proxy(src: Path, start: float, length: float, out: Path, fps: float = 1.0, crf: int = 30,
-                max_height: int = 1080) -> Path:
+                max_height: int = 1080, audio_kbps: int = 48) -> Path:
     """Low-frame-rate model input. Gemini samples video at ~1 fps, so resolution (chart text)
     matters and frame rate does not. Frame-accurate start: offset == ``start`` exactly."""
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -202,15 +211,15 @@ def model_proxy(src: Path, start: float, length: float, out: Path, fps: float = 
          "-map", "0:v:0", "-map", "0:a:0?",
          "-vf", f"fps={fps},scale=-2:'min({max_height},ih)'", "-c:v", "libx264", "-preset", "veryfast",
          "-crf", str(crf), "-g", str(int(max(1, fps * 60))), "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", str(out)])
+         "-c:a", "aac", "-b:a", f"{audio_kbps}k", "-ac", "1", "-movflags", "+faststart", str(out)])
     return out
 
 
 def fit_proxy(src: Path, start: float, length: float, out: Path, fps: float = 1.0) -> tuple[Path, dict]:
-    """Encode a proxy under the view_file limit, raising CRF before giving up resolution."""
+    """Encode a proxy under VIEW_FILE_LIMIT, walking PROXY_LADDER."""
     # measured 2026-10-05: 50 min @1 fps CRF30 GOP10 = 131 MB (keyframes dominate) → long GOP first
-    for crf, h in ((32, 1080), (36, 1080), (34, 720)):
-        model_proxy(src, start, length, out, fps=fps, crf=crf, max_height=h)
+    for crf, h, abr in PROXY_LADDER:
+        model_proxy(src, start, length, out, fps=fps, crf=crf, max_height=h, audio_kbps=abr)
         if out.stat().st_size <= VIEW_FILE_LIMIT:
-            return out, {"fps": fps, "crf": crf, "height": h, "bytes": out.stat().st_size}
+            return out, {"fps": fps, "crf": crf, "height": h, "audio_kbps": abr, "bytes": out.stat().st_size}
     raise MediaError(f"proxy over view_file limit: {out.stat().st_size} bytes")

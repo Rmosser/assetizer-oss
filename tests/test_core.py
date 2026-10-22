@@ -1084,10 +1084,20 @@ if path == "@clip":  # the media self-test: the clip in its one --add-dir
     path = os.path.join(sys.argv[sys.argv.index("--add-dir") + 1], "canary.mp4")
 cid = "fake-conversation-0001"
 print(json.dumps({"event": "init", "init": {"model": sys.argv[sys.argv.index("--model") + 1], "tools": ["view_file"]}}), flush=True)
-for state in ("ACTIVE", "DONE") if tool else ():
-    print(json.dumps({"step_update": {"conversation_id": cid, "step_index": 2, "step_type": "tool", "tool_name": tool,
-                                      "state": state, "tool_info": {"name": tool, "parameters": {param: path}}}}), flush=True)
-    time.sleep(0.3)  # still running when the watchdog kills a deviation
+steps = [(2, tool, param, path)] if tool else []
+if os.environ.get("FAKE_AGY_TOOL2"):  # a second tool step after the first, e.g. re-reading its own prompt
+    path2 = os.environ["FAKE_AGY_PATH2"]
+    path2 = os.path.join(os.getcwd(), "..", "prompt.md") if path2 == "@prompt" else path2
+    steps.append((4, os.environ["FAKE_AGY_TOOL2"], os.environ["FAKE_AGY_PARAM2"], path2))
+for index, name, key, value in steps:
+    for state in ("ACTIVE", "DONE"):
+        print(json.dumps({"step_update": {"conversation_id": cid, "step_index": index, "step_type": "tool", "tool_name": name,
+                                          "state": state, "tool_info": {"name": name, "parameters": {key: value}}}}), flush=True)
+        time.sleep(0.3)  # still running when the watchdog kills a deviation
+    # agy refusing the media: an error step right after the read (2026-10-22, 26 MB), then the model flails
+    step = "error_message" if os.environ.get("FAKE_AGY_REFUSE") and index == 2 else "agent_response"
+    print(json.dumps({"step_update": {"conversation_id": cid, "step_index": index + 1, "step_type": step, "state": "DONE"}}), flush=True)
+    time.sleep(0.3)
 print(json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": answer, "conversation_id": cid, "usage": {}}}), flush=True)
 """
 
@@ -1114,7 +1124,7 @@ def fake_agy(home, monkeypatch):
 @pytest.fixture
 def canary(monkeypatch):
     from assetizer.providers import agy
-    monkeypatch.setattr(agy, "_canary_clip", lambda path, code: path.write_bytes(b"clip"))
+    monkeypatch.setattr(agy, "_canary_clip", lambda path, code, target: path.write_bytes(b"c" * 1000))
     monkeypatch.setattr(agy.random, "randint", lambda a, b: 4721)
 
 
@@ -1136,6 +1146,24 @@ def test_reading_any_other_file_is_still_a_deviation(fake_agy, home):
     with pytest.raises(ProviderError) as e:
         AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
     assert e.value.kind == "MODALITY_ROUTING_DEVIATION" and e.value.receipt["deviation"]["tool"] == "read_file"
+
+
+def test_rereading_its_own_prompt_is_benign_but_any_other_file_is_not(fake_agy, home, monkeypatch):
+    from assetizer.providers.agy import AgyProvider, ProviderError
+    clip = home / "clip.mp4"
+    clip.write_bytes(b"x")
+    fake_agy("read_file", "Path", str(clip), '{"ok": true}')
+    monkeypatch.setenv("FAKE_AGY_TOOL2", "read_file")
+    monkeypatch.setenv("FAKE_AGY_PARAM2", "Path")
+    monkeypatch.setenv("FAKE_AGY_PATH2", "@prompt")  # what MUBB14vJc9U-r5 did on a 25-minute chunk
+    r = AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
+    assert r.receipt["status"] == "SUCCESS" and r.receipt["view_file_count"] == 1
+    assert {b["tool"] for b in r.receipt["benign_tools"]} == {"read_file"}  # one entry per step update (ACTIVE, DONE)
+    (home / "notes.txt").write_text("x")
+    monkeypatch.setenv("FAKE_AGY_PATH2", str(home / "notes.txt"))
+    with pytest.raises(ProviderError) as e:
+        AgyProvider().call(home / "call-2", "读视频", kind="understand", media=[str(clip)])
+    assert e.value.kind == "MODALITY_ROUTING_DEVIATION"
 
 
 def test_the_media_self_test_needs_the_number_drawn_in_the_clip(fake_agy, canary):
@@ -1205,3 +1233,74 @@ def test_a_run_whose_media_reads_all_deviate_waits_only_when_agy_itself_cannot_r
     assert run["production"] == "WAITING" and run["wait_reason"] == "AGY_MEDIA_READ"
     assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
     assert runner._hold_if_agy_cannot_read_media("v-r1", ProviderError("PROVIDER_FAILURE")) is False
+
+
+def test_agy_refusing_the_media_file_stops_the_call_at_once(fake_agy, home, monkeypatch):
+    from assetizer.providers.agy import AgyProvider, ProviderError
+    clip = home / "clip.mp4"
+    clip.write_bytes(b"x" * 2048)
+    fake_agy("read_file", "Path", str(clip), "读不到")
+    monkeypatch.setenv("FAKE_AGY_REFUSE", "1")
+    with pytest.raises(ProviderError) as e:
+        AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
+    assert e.value.kind == "MEDIA_READ_FAILED" and "2048 bytes" in str(e.value)
+    assert e.value.receipt["media_error"]["bytes"] == 2048 and e.value.receipt["status"] == "MEDIA_REFUSED"
+
+
+def test_the_media_self_test_reports_a_refused_file_size(fake_agy, canary, home, monkeypatch):
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import AgyProvider
+    fake_agy("read_file", "Path", "@clip", "4721")
+    monkeypatch.setenv("FAKE_AGY_REFUSE", "1")
+    h = AgyProvider().media_health()
+    assert not h["ok"] and h["error"] == "MEDIA_READ_FAILED" and h["bytes"] == 1000
+    runner.media_alert(h)
+    body = db.one("SELECT body FROM alerts WHERE key='AGY_MEDIA_READ'")["body"]
+    assert "大小上限" in body and "VIEW_FILE_LIMIT" in body
+    assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
+
+
+def test_proxies_step_down_the_ladder_until_they_fit(home, monkeypatch):
+    from assetizer.media import ffmpeg
+    sizes = {(32, 1080, 48): 30, (36, 1080, 48): 26, (34, 720, 48): 20}
+    tried = []
+
+    def fake_proxy(src, start, length, out, fps=1.0, crf=30, max_height=1080, audio_kbps=48):
+        tried.append((crf, max_height, audio_kbps))
+        out.write_bytes(b"x" * sizes.get((crf, max_height, audio_kbps), 10))
+        return out
+    monkeypatch.setattr(ffmpeg, "model_proxy", fake_proxy)
+    monkeypatch.setattr(ffmpeg, "VIEW_FILE_LIMIT", 24)
+    out, enc = ffmpeg.fit_proxy(home / "src.mkv", 0, 1500, home / "p.mp4")
+    assert tried == [(32, 1080, 48), (36, 1080, 48), (34, 720, 48)]
+    assert enc == {"fps": 1.0, "crf": 34, "height": 720, "audio_kbps": 48, "bytes": 20}
+
+
+def test_a_cached_proxy_over_the_current_limit_is_encoded_again(home, monkeypatch):
+    import types
+    from assetizer import config
+    from assetizer.media import ffmpeg
+    from assetizer.pipeline import acquire
+    from assetizer.util import write_json
+    s = config.get()
+    calls = []
+
+    def fit(src, start, length, out):
+        calls.append(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"x" * 10)
+        return out, {"crf": 36}
+    monkeypatch.setattr(ffmpeg, "fit_proxy", fit)
+    monkeypatch.setattr(ffmpeg, "VIEW_FILE_LIMIT", 100)
+    ctx = types.SimpleNamespace(source={"id": "v", "media_sha256": "abc"}, media=home / "src.mkv",
+                                path=lambda *parts: home.joinpath("work", *parts[1:]))
+    name = f"CH01_0_1500_{s.chunk_minutes}_{s.chunk_overlap_minutes}"
+    cache = s.media_dir / "v" / "proxies"
+    cache.mkdir(parents=True)
+    (cache / f"{name}.mp4").write_bytes(b"x" * 500)  # made under the old, larger limit
+    write_json(cache / f"{name}.json", {"media_sha256": "abc", "encoding": {"crf": 32}})
+    path, enc = acquire._proxy(ctx, "CH01", 0, 1500)
+    assert len(calls) == 1 and enc == {"crf": 36} and path.stat().st_size == 10
+    path, enc = acquire._proxy(ctx, "CH01", 0, 1500)  # now under the limit: reused
+    assert len(calls) == 1 and enc == {"crf": 36}

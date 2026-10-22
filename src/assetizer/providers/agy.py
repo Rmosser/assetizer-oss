@@ -174,6 +174,9 @@ class AgyProvider:
             if r.get("status") == "SUCCESS" and (call_dir / "response.txt").exists():
                 return CallResult((call_dir / "response.txt").read_text(), r, reused=True)
         allowed = sorted(str(Path(m).resolve()) for m in (media or []))
+        # this call's own input files: agy 1.4 models on long chunks list the call directory and re-read the prompt
+        # (MUBB14vJc9U-r5, 2026-10-22). They hold nothing the model was not already given, so reading them is benign.
+        own_inputs = {str((call_dir / n).resolve()) for n in ("prompt.md", "schema.json", "stdin-message.jsonl")}
         write_text(call_dir / "prompt.md", prompt)
         model = model_for(self.s.agy_model, effort)
         cmd = [
@@ -207,6 +210,7 @@ class AgyProvider:
         t0 = time.monotonic()
         result: dict | None = None
         seen_tool_steps: set = set()
+        media_pending: str | None = None  # a media read whose outcome (answer or error step) has not come yet
         last_error_text = ""
         with (call_dir / "stderr.log").open("w") as err, (call_dir / "raw-output.jsonl").open("w") as out:
             ws = call_dir / "ws"  # empty workspace: nothing for an agentic model to explore
@@ -263,6 +267,13 @@ class AgyProvider:
                     receipt["conversation_id"] = su["conversation_id"]
                 if receipt.get("conversation_id") and not (call_dir / "conversation.txt").exists():
                     (call_dir / "conversation.txt").write_text(receipt["conversation_id"])  # survives a kill
+                if media_pending and su.get("step_type") not in (None, "tool"):
+                    if su["step_type"] == "error_message":
+                        # agy refused the media file (2026-10-22: a 26 MB proxy); without it the model only flails
+                        receipt["media_error"] = {"path": media_pending, "bytes": Path(media_pending).stat().st_size}
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        break
+                    media_pending = None
                 if su.get("step_type") == "tool" and su.get("tool_name") == "finish":
                     pass  # structured output is delivered through the finish tool
                 elif su.get("step_type") == "tool":
@@ -272,7 +283,8 @@ class AgyProvider:
                     ok = bool(path) and str(Path(path).resolve()) in allowed
                     if ok:
                         receipt["media_tool"] = name
-                    if not ok and _benign(name, params):
+                        media_pending = str(Path(path).resolve())
+                    if not ok and (_benign(name, params) or (path and str(Path(path).resolve()) in own_inputs)):
                         receipt.setdefault("benign_tools", []).append({"tool": name, "parameters": params})
                         continue
                     if not ok:
@@ -317,7 +329,11 @@ class AgyProvider:
 
         if killed[0]:
             receipt["watchdog"] = killed[0]
-        if receipt["deviation"]:
+        if receipt.get("media_error"):
+            receipt["status"] = "MEDIA_REFUSED"
+            kind_err = "MEDIA_READ_FAILED"
+            receipt["error_excerpt"] = f"agy refused the media file ({receipt['media_error']['bytes']} bytes)"
+        elif receipt["deviation"]:
             receipt["status"] = "DEVIATION"
             kind_err = "MODALITY_ROUTING_DEVIATION"
         elif status == "SUCCESS":
@@ -382,19 +398,23 @@ class AgyProvider:
             return {"ok": False, "error": e.kind, "checked_at": now()}
 
     def media_health(self) -> dict:
-        """Can agy still read a video the way the watchdog allows? A 3-second clip with a random number drawn in its
-        middle: the answer must be that number, so the model really saw the frames. When it cannot, the answer names
-        the tool and parameters agy used instead (what MEDIA_READ would need)."""
+        """Can agy still read a video the way the watchdog allows, at the size proxies are made to? A 10-second clip with
+        a random number in its middle, padded to just under VIEW_FILE_LIMIT: the answer must be that number, so the
+        model really saw the frames and agy still takes a file that large. When it cannot, the answer says how: the
+        tool and parameters agy used instead (what MEDIA_READ would need), or that it refused the file's size."""
+        from ..media.ffmpeg import VIEW_FILE_LIMIT
         d = self.s.home / "health" / "agy-media"
         shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True)
-        out = {"ok": False, "version": self.version(), "tool": None, "parameters": None, "error": None, "checked_at": now()}
+        out = {"ok": False, "version": self.version(), "tool": None, "parameters": None, "error": None, "bytes": None,
+               "checked_at": now()}
         code = str(random.randint(1000, 9999))
         clip = d / "canary.mp4"
         try:
-            _canary_clip(clip, code)
+            _canary_clip(clip, code, int(VIEW_FILE_LIMIT * 0.92))
         except (OSError, subprocess.SubprocessError) as e:
             return {**out, "error": "CANARY_UNAVAILABLE", "detail": type(e).__name__}
+        out["bytes"] = clip.stat().st_size
         prompt = f"用 view_file 读取视频 {clip}（只读一次）。只回复画面中央的数字，不要别的文字。读完后不要再调用任何工具。"
         try:
             r = self.call(d / "call", prompt, kind="media-health", media=[str(clip)], timeout="3m")
@@ -405,14 +425,18 @@ class AgyProvider:
         return {**out, "ok": right, "tool": r.receipt.get("media_tool"), "error": None if right else "WRONG_ANSWER"}
 
 
-def _canary_clip(path: Path, code: str) -> None:
-    """3 seconds, 640×360, the number in black on white, with a tone (proxies always carry audio)."""
+def _canary_clip(path: Path, code: str, target_bytes: int) -> None:
+    """10 seconds of noise with the number in a white box, encoded CBR so the file comes out at about target_bytes."""
     font = next((f for f in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                              "/System/Library/Fonts/Supplemental/Arial Bold.ttf") if Path(f).exists()), None)
     if font is None:
         font = subprocess.run(["fc-match", "-f", "%{file}", "sans:bold"], capture_output=True, text=True, timeout=30).stdout.strip()
-    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=640x360:d=3:r=10",
-                    "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-vf",
-                    f"drawtext=fontfile={font}:text={code}:fontsize=140:fontcolor=black:x=(w-text_w)/2:y=(h-text_h)/2",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path)],
-                   check=True, capture_output=True, timeout=60)
+    kbps = max(200, target_bytes * 8 // 10 // 1000 - 64)
+    subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=1280x720:r=30:d=10",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=10", "-vf",
+                    f"noise=alls=60:allf=t,drawtext=fontfile={font}:text={code}:fontsize=160:fontcolor=black:box=1:"
+                    "boxcolor=white:boxborderw=30:x=(w-text_w)/2:y=(h-text_h)/2",
+                    "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{kbps}k", "-minrate", f"{kbps}k", "-maxrate", f"{kbps}k",
+                    "-bufsize", f"{kbps}k", "-x264-params", "nal-hrd=cbr", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "64k",
+                    "-shortest", str(path)],
+                   stdin=subprocess.DEVNULL, check=True, capture_output=True, timeout=120)

@@ -104,7 +104,8 @@ def _proxy(ctx: RunContext, pid: str, offset: float, length: float) -> tuple[Pat
     cache = s.media_dir / ctx.source["id"] / "proxies"
     name = f"{pid}_{offset:.0f}_{length:.0f}_{s.chunk_minutes}_{s.chunk_overlap_minutes}"
     mp4, meta = cache / f"{name}.mp4", cache / f"{name}.json"
-    if sha and mp4.exists() and meta.exists():
+    # a proxy made under an older, larger agy limit is encoded again
+    if sha and mp4.exists() and meta.exists() and mp4.stat().st_size <= ffmpeg.VIEW_FILE_LIMIT:
         m = read_json(meta)
         if m.get("media_sha256") == sha:
             return mp4, m.get("encoding") or {}

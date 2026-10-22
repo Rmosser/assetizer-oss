@@ -288,24 +288,29 @@ def media_self_test() -> dict:
 
 
 def media_alert(h: dict) -> None:
-    """Pause production and say what agy did instead, so the watchdog can be taught the new way to read media."""
-    if h.get("tool"):
-        how = f"读视频时用了没见过的工具 {h['tool']}（参数 {'、'.join(h.get('parameters') or []) or '无'}）"
+    """Pause production and say what agy did instead, so the code can be taught agy's new way to read media."""
+    mb = f"{(h.get('bytes') or 0) / 1048576:.0f} MB"
+    if h.get("error") == "MEDIA_READ_FAILED":
+        how = (f"拒绝读取 {mb} 的自检视频：它可能又调低了单个视频文件的大小上限。"
+               "要调小 media/ffmpeg.py 里的 VIEW_FILE_LIMIT，片段会照新上限重新压缩")
+    elif h.get("tool"):
+        how = (f"读视频时用了没见过的工具 {h['tool']}（参数 {'、'.join(h.get('parameters') or []) or '无'}）。"
+               "要把它登记进 providers/agy.py 的 MEDIA_READ")
     elif h.get("error") == "WRONG_ANSWER":
         how = "读了自检视频，却没答对画面里的数字"
     else:
         how = f"读视频自检出错（{h.get('error')}）"
     db.raise_alert("AGY_MEDIA_READ", "critical", "agy 读不了视频，生产已暂停",
-                   f"agy {h.get('version')} {how}。系统每小时自检一次，通过后自动继续。"
-                   "需要改代码时，把这条告警交给维护者：读视频的工具名和参数登记在 providers/agy.py 的 MEDIA_READ。")
+                   f"agy {h.get('version')} {how}。系统每小时自检一次，通过后自动继续。需要改代码时，把这条告警交给维护者。")
     pause_queue("AGY_MEDIA_READ")
 
 
 def _hold_if_agy_cannot_read_media(run_id: str, e: ProviderError) -> bool:
-    """Every attempt of a media call deviated. If the self-test fails too, agy itself changed (2026-10-22: an update
-    renamed view_file): the run waits and production pauses, instead of failing every run after it. If the self-test
-    passes, the problem belongs to this run, which fails as before."""
-    if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT"):
+    """A media call failed on reading the media itself: every attempt deviated, or agy refused the file. If the
+    self-test fails too, agy itself changed (2026-10-22: an update renamed view_file and cut the file size limit to
+    ~25 MB): the run waits and production pauses, instead of failing every run after it. If the self-test passes,
+    the problem belongs to this run, which fails as before."""
+    if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT", "MEDIA_READ_FAILED"):
         return False
     h = media_self_test()
     if h.get("ok"):
