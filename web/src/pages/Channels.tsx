@@ -51,7 +51,7 @@ function Side({ data, sel, go }: { data: any; sel: string; go: (to: string) => v
         <a href="/channels/universal" className={`cfg-ch${sel === "universal" ? " on" : ""}`} aria-current={sel === "universal" ? "page" : undefined}
           onClick={(e) => { if (e.metaKey || e.ctrlKey) return; e.preventDefault(); go("/channels/universal"); }}>
           <span className="cfg-ch-name">通用规程</span>
-          <span className="cfg-ch-meta"><Chip tone="ok">生效中</Chip><span>v{data.universal?.version ?? 1}</span><span>未建档频道使用</span></span>
+          <span className="cfg-ch-meta"><Chip tone="ok">生效中</Chip><span>v{data.universal?.version ?? 1}</span></span>
         </a>
       </div>
     </aside>
@@ -100,7 +100,7 @@ function Head({ c, reload }: { c: any; reload: () => void }) {
         {tracked && <div><dt>样片</dt><dd>{c.samples}{c.samples_busy ? <span className="muted"> · {c.samples_busy} 期试跑中</span> : null}</dd></div>}
         <div><dt>已收</dt><dd>{c.sources} 期{c.last_source && <span className="muted"> · 最近 {ago(c.last_source)}</span>}</dd></div>
       </dl>
-      {c.compile?.state === "running" && <Note tone="warn">学习目标 v{c.prompts[0]?.version} 正在编译成新规程（约 2–4 分钟），完成后出现在「规程」里。</Note>}
+      {c.compile?.state === "running" && <Note tone="warn">学习目标 v{c.prompts[0]?.version} 正在编译（约 2–4 分钟）</Note>}
       {c.compile?.state === "failed" && <Note tone="bad">学习目标 v{c.prompts[0]?.version} 编译失败：{c.compile.error}</Note>}
       {msg && <Note tone="bad">{msg}</Note>}
     </header>
@@ -163,7 +163,6 @@ export default function Channels() {
             <>
               <header className="cfg-head">
                 <div className="cfg-head-row"><h1>通用规程</h1><Chip tone="ok">生效中</Chip></div>
-                <p className="cfg-sub">没有专属学习目标的频道用这套规程：中性、完整、可追溯地整理内容，不加入任何频道偏好。只读。</p>
               </header>
               {data.universal ? <PlaybookPanel channel={null} playbooks={[data.universal]} reload={reload} />
                 : <Note>没有生效的通用规程。</Note>}

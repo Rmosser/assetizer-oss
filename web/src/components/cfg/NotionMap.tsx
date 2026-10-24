@@ -68,7 +68,7 @@ function ValueEditor({ r, m, set, view, titles, addTitles }: { r: Row; m: any; s
       <div className="nm-val">
         <input className="cfg-input" value={v || ""} onChange={(e) => set({ ...m, value: e.target.value })} aria-label={`${r.name} 模板`} />
         <div className="nm-vars">{Object.entries(view.template_vars).map(([k, d]) => (
-          <button key={k} className="chip" title={d} onClick={() => set({ ...m, value: `${v || ""}{${k}}` })}>{`{${k}}`}<span className="muted"> {d}</span></button>
+          <button key={k} className="chip" title={d} onClick={() => set({ ...m, value: `${v || ""}{${k}}` })}>{`{${k}}`}</button>
         ))}</div>
       </div>
     );
@@ -88,7 +88,7 @@ function ValueEditor({ r, m, set, view, titles, addTitles }: { r: Row; m: any; s
       ))}</div>
     );
   }
-  if (m.source !== "fixed") return <span className="muted">由系统按每一期计算</span>;
+  if (m.source !== "fixed") return <span className="muted">自动</span>;
   if (r.type === "select" || r.type === "status") {
     return (
       <select value={v || ""} onChange={(e) => set({ ...m, value: e.target.value })} aria-label={`${r.name} 固定值`}>
@@ -172,8 +172,7 @@ export default function NotionMap({ cid }: { cid: string }) {
       <section className="cfg-sec first">
         <div className="cfg-form">
           <Field label="目标数据库">
-            <span><a href={view.database.url} target="_blank" rel="noreferrer">{view.database.title || "Notion 数据库"} ↗</a>
-              <span className="muted mono"> {view.database.id.slice(0, 8)}…</span></span>
+            <a href={view.database.url} target="_blank" rel="noreferrer">{view.database.title || "Notion 数据库"} ↗</a>
           </Field>
           <Field label="正文格式">
             <select value={cfg.template} onChange={(e) => setCfg({ ...cfg, template: e.target.value })}>
@@ -201,12 +200,11 @@ export default function NotionMap({ cid }: { cid: string }) {
       <section className="cfg-sec">
         <div className="cfg-sec-row">
           <h3 className="cfg-sec-h">属性映射</h3>
-          <span className="muted">实时读取 Notion · 改属性名自动跟随{view.sample_source ? ` · 示例取自「${view.sample_source.title}」` : " · 暂无样片，示例为空"}</span>
           <label className="chk grow-r"><input type="checkbox" checked={onlySet} onChange={(e) => setOnlySet(e.target.checked)} />只看已配置{unset ? `（${unset} 个未配置）` : ""}</label>
         </div>
         {view.problems > 0 && <Note tone="bad">有 {view.problems} 处映射和 Notion 现状对不上，这个频道的交付已暂停。</Note>}
         <div className="nm-tbl" role="table" aria-label="属性映射">
-          <div className="nm-tr nm-th" role="row"><span>属性</span><span>值来源</span><span>值</span><span>示例</span></div>
+          <div className="nm-tr nm-th" role="row"><span>属性</span><span>值来源</span><span>值</span><span title={view.sample_source ? `取自「${view.sample_source.title}」` : undefined}>示例</span></div>
           {rows.map((r) => {
             const m = draft[r.id];
             return (
@@ -217,7 +215,7 @@ export default function NotionMap({ cid }: { cid: string }) {
                 </span>
                 <span>
                   {r.deleted ? <button className="btn xs" onClick={() => setRow(r, null)}>移除映射</button>
-                    : !r.writable ? <span className="muted">Notion 自动生成</span>
+                    : !r.writable ? <span className="muted">自动</span>
                     : (
                       <select value={m?.source || ""} onChange={(e) => pickSource(r, e.target.value)} aria-label={`${r.name} 的值来源`}>
                         <option value="">不填</option>

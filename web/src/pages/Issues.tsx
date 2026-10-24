@@ -4,7 +4,7 @@ import { IssueTitle, issueHeadline, originalTitle, typeset, Words } from "../cjk
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDate, cnDay, cnMonth, cnNum, dur, parseDay, WAIT } from "../util";
+import { cnDate, cnDay, cnMonth, cnNum, parseDay, WAIT } from "../util";
 
 type Stage = { name: string; label: string; status: string; started_at?: string };
 
@@ -65,7 +65,7 @@ function Feature({ it }: { it: any }) {
       <div className="feature-text">
         <div className="kicker">{it.channel || "未识别频道"} · 第{cnNum(it.no)}期{it.published_at ? ` · ${cnDay(it.published_at)}` : ""}</div>
         <h2 className="feature-title"><a {...linkProps(issueHref(it))}><Words>{headOf(it)}</Words></a></h2>
-        {originalTitle(it.title) !== headOf(it) && <p className="dek"><span className="dek-k">原题</span><Words>{originalTitle(it.title)}</Words></p>}
+        {originalTitle(it.title) !== headOf(it) && <p className="dek"><Words>{originalTitle(it.title)}</Words></p>}
         {it.units != null ? (
           <p className="feature-stats"><span className="ph"><span className="num">{Math.round((it.duration || 0) / 60)}</span> 分钟</span> · <span className="ph"><span className="num">{it.units}</span> 单元（必学 <span className="num">{it.must}</span>）</span> · <span className="ph"><span className="num">{it.clips}</span> 段片段</span></p>
         ) : <p className="feature-stats">尚未成刊</p>}
@@ -82,7 +82,7 @@ function Feature({ it }: { it: any }) {
         <div className="feature-foot">
           {it.notion_url ? (
             <a className="go" href={it.notion_url} target="_blank" rel="noreferrer">在 Notion 阅读 <span className="arrow">↗</span></a>
-          ) : <span className="muted">{it.tuning ? "调试样片，定稿后写入 Notion" : "尚未写入 Notion"}</span>}
+          ) : <span className="muted">{it.tuning ? "样片" : "未入 Notion"}</span>}
           <a className="go quiet" {...linkProps(issueHref(it))}>对照原视频 <span className="arrow">→</span></a>
         </div>
       </div>
@@ -179,7 +179,6 @@ export default function Issues() {
   const totalClips = ready.reduce((a, i) => a + (i.clips || 0), 0);
   const feature = ready[0] || issues.find((i) => !producing(i));
   const rest = issues.filter((i) => i !== feature && !(producing(i) && data.producing?.source_id === i.id));
-  const totalMin = issues.reduce((a, i) => a + (i.duration || 0), 0);
 
   return (
     <main className="page home">
@@ -195,13 +194,6 @@ export default function Issues() {
               本刊已收 <strong className="num">{ready.length}</strong> 期，沉淀 <strong className="num">{totalUnits}</strong> 个知识单元、<strong className="num">{totalClips}</strong> 段可独立观看的片段。
               {data.queue.length > 0 && <> 另有 <strong className="num">{data.queue.length}</strong> 期在排队。</>}
             </p>
-          ) : <p className="hero-lede">一份只为你编的刊：视频进来，知识单元、片段与文章出去。</p>}
-          {data.decisions.length > 0 ? (
-            <a className="zhupi-link" href="#decisions">
-              <span>待你拍板 <span className="num">{data.decisions.length}</span> 件</span><span className="arrow" aria-hidden>→</span>
-            </a>
-          ) : ready.length > 0 ? (
-            <div className="zhupi-quiet">没有需要你处理的事。新的一期会自动写入 Notion。</div>
           ) : null}
         </div>
       </section>
@@ -254,12 +246,7 @@ export default function Issues() {
           {rest.length > 0 && <Archive issues={rest} />}
         </>
       ) : !data.producing && (
-        <Empty title="还没有任何一期" action={<button className="btn solid" onClick={() => dispatchEvent(new Event("az:paste"))}>付印第一期</button>}>
-          粘贴一个 YouTube 视频链接，系统会理解、拆解成知识单元，剪好片段、写好文章。你只需要回来阅读。
-        </Empty>
-      )}
-      {issues.length > 0 && (
-        <p className="colophon">已入库原始视频共 {dur(totalMin)}。串行付印：一小时视频约 <span className="ph">1.5–2 小时</span>成刊。</p>
+        <Empty title="还没有任何一期" action={<button className="btn solid" onClick={() => dispatchEvent(new Event("az:paste"))}>付印第一期</button>} />
       )}
     </main>
   );

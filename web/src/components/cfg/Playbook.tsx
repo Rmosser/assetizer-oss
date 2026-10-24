@@ -25,16 +25,15 @@ function Rules({ p }: { p: any }) {
     <>
       <div className="cfg-toolbar tight">
         <input className="cfg-input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="筛选规则" aria-label="筛选规则" />
-        <span className="muted">{rows.length} / {p.rules.length} 条</span>
+        {q && <span className="muted">{rows.length} / {p.rules.length} 条</span>}
         <button className="btn xs ghost" onClick={() => setOpen(open.size ? new Set() : new Set(rows.map((r: any) => r.id)))}>{open.size ? "收起全部原文" : "展开全部原文"}</button>
       </div>
       <div className="tbl-wrap">
         <table className="tbl">
-          <thead><tr><th style={{ width: "13em" }}>ID</th><th style={{ width: "7.5em" }}>用于</th><th>规则</th></tr></thead>
+          <thead><tr><th style={{ width: "7.5em" }}>用于</th><th>规则</th></tr></thead>
           <tbody>
             {rows.map((r: any) => (
-              <tr key={r.id}>
-                <td className="mono">{r.id}</td>
+              <tr key={r.id} title={r.id}>
                 <td className="muted">{(r.phases || []).map((x: string) => PHASE[x] || x).join(" · ")}</td>
                 <td>
                   {r.rule}

@@ -103,7 +103,6 @@ export default function Engine() {
       <section className="hero page-hero">
         <h1 className="hero-title">机房</h1>
         <div className="hero-lede">
-          付印设备与生产记录。{data.capacity_note.replace(/^串行处理：/, "串行付印：")}
           <div className={`queue-state${data.paused ? " bad" : ""}`}>
             {data.paused ? (
               <>队列已暂停 · {WAIT[data.paused.reason] || data.paused.reason}
@@ -117,7 +116,7 @@ export default function Engine() {
         <div className="inst">
           <Lamp state={agy ? (agy.ok && agyMedia?.ok !== false ? "ok" : "bad") : "idle"} label="模型" />
           <div className="big">{agy ? (!agy.ok ? "需要登录" : agyMedia?.ok === false ? "读不了视频" : "在线") : "未探测"}</div>
-          <div className="sub"><span className="num">{data.model}</span>{agy?.checked_at ? ` · ${ago(agy.checked_at)}检查` : " · 每次付印前自动探测"}</div>
+          <div className="sub"><span className="num">{data.model}</span>{agy?.checked_at ? ` · ${ago(agy.checked_at)}检查` : ""}</div>
           {agyMedia && (
             <div className="sub">读视频自检{agyMedia.ok ? "通过" : "没通过"} · agy <span className="num">{agyMedia.version}</span>
               {agyMedia.checked_at && ` · ${ago(agyMedia.checked_at)}`}</div>
@@ -127,9 +126,9 @@ export default function Engine() {
           <Lamp state={ytLamp} label="YouTube 会话" />
           <div className="big">{ytBig}</div>
           <div className="sub">
-            {!cc?.configured ? "登录态来自服务器上的 Chromium（未配置 CookieCloud）"
+            {!cc?.configured ? "服务器 Chromium"
               : ccDown ? <>{data.youtube.fix?.[ccs.code] || ccs.code}（错误码 {ccs.code}{ccs.at && ` · ${ago(ccs.at)}`}）这段时间的下载改用服务器上的 Chromium。</>
-              : <>登录态来自你的 Chrome（CookieCloud）{ccs?.at && <> · {ago(ccs.at)}读取</>}{ccs?.ok && <> · <span className="num">{ccs.count}</span> 条</>}</>}
+              : <>CookieCloud{ccs?.at && <> · {ago(ccs.at)}读取</>}{ccs?.ok && <> · <span className="num">{ccs.count}</span> 条</>}</>}
           </div>
           {cc?.configured && vt && (
             <div className="sub">视频测试{vt.ok ? "通过" : "没通过"}{vt.video?.title ? ` · 《${vt.video.title}》` : ""}{vt.at ? ` · ${ago(vt.at)}` : ""}</div>
@@ -140,8 +139,7 @@ export default function Engine() {
               <button className="btn sm inst-act" onClick={() => setCcOpen(true)}>配置 CookieCloud</button>
               {!phone && (
                 <details className="fold mini inst-alt">
-                  <summary><i className="plus" aria-hidden /><span>或者：在服务器的 Chromium 里登录</span></summary>
-                  <div className="sub">远程屏幕登录需要先在电脑上建隧道：</div>
+                  <summary><i className="plus" aria-hidden /><span>在服务器 Chromium 里登录</span></summary>
                   <Cmd text={SSH} />
                   <button className="btn sm inst-act" onClick={async () => { const r = await post("/api/youtube/remote-browser"); if (r.ok) window.open(r.url, "_blank"); else alert(r.output); }}>启动远程登录屏幕</button>
                 </details>
@@ -152,7 +150,6 @@ export default function Engine() {
         <div className="inst">
           <Lamp state={data.notion.token && (data.notion.database || data.notion.parent) ? "ok" : "idle"} label="Notion 交付" />
           <div className="big">{data.notion.token ? (data.notion.database ? "已连接" : "待指定位置") : "未配置"}</div>
-          <div className="sub">{data.notion.token ? "数据库每期一行，正文含视频与截图" : "配置之前，可以在应用内阅读与审阅"}</div>
         </div>
         <div className="inst">
           <Lamp state={d.free / d.total < 0.15 ? "bad" : "ok"} label="磁盘" />
@@ -174,7 +171,6 @@ export default function Engine() {
         <div className="inst tile"><span className="label">Token · 入 / 出 / 思考</span><div className="v sm"><span className="num">{fmtK(c.inp)} / {fmtK(c.outp)} / {fmtK(c.think)}</span></div></div>
         <div className="inst tile"><span className="label">模型峰值内存</span><div className="v"><span className="num">{c.rss ? (c.rss / 1048576).toFixed(1) : "—"}</span><small>GiB</small></div></div>
       </div>
-      <p className="colophon">金额成本：模型服务商没有提供，暂不统计。</p>
 
       <div className="cols2">
         <div>

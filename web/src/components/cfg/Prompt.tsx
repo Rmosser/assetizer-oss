@@ -64,7 +64,7 @@ export default function PromptPanel({ c, reload }: { c: any; reload: () => void 
     setBusy(true); setMsg(null);
     try {
       await post(`/api/channels/${c.id}/prompt`, { text, note: note.trim() || null });
-      setMsg({ tone: "ok", text: `已保存为 v${(latest?.version || 0) + 1}，正在编译（约 2–4 分钟），完成后在「规程」里定稿。定稿前旧版本继续生效。` });
+      setMsg({ tone: "ok", text: `已保存为 v${(latest?.version || 0) + 1}，正在编译。` });
       setNote(""); setBaseId(null); reload();
     } catch (e) { setMsg({ tone: "bad", text: (e as Error).message }); }
     setBusy(false);
@@ -75,7 +75,6 @@ export default function PromptPanel({ c, reload }: { c: any; reload: () => void 
     <div className="pmt">
       <div className="pmt-grid">
         <aside className="pmt-versions" aria-label="学习目标版本">
-          <div className="label">版本</div>
           {prompts.length === 0 && <p className="muted">还没有学习目标。</p>}
           {prompts.map((p) => (
             <button key={p.id} className={`pmt-v${p.id === base?.id ? " on" : ""}`} onClick={() => pick(p.id)}>
@@ -90,13 +89,12 @@ export default function PromptPanel({ c, reload }: { c: any; reload: () => void 
           <div className="cfg-toolbar tight">
             <Seg value={mode} onChange={setMode} label="视图" options={[{ value: "edit", label: "编辑" }, { value: "diff", label: dirty ? `改动（相对 v${base?.version}）` : prev ? `与 v${prev.version} 的差异` : "差异" }]} />
             {base?.origin?.startsWith("http") && <a className="muted" href={base.origin} target="_blank" rel="noreferrer">Notion 原文 ↗</a>}
-            <span className="muted grow-r">{text.length.toLocaleString()} 字 · {text.split("\n").length} 行</span>
           </div>
           {mode === "edit" ? (
             <textarea className="pmt-text" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} aria-label="学习目标" />
           ) : dirty ? <Diff a={base.text} b={text} /> : prev ? <Diff a={prev.text} b={base.text} /> : <Note>这是第一个版本，没有可对比的旧版本。</Note>}
           <div className="cfg-toolbar">
-            <input className="cfg-input grow" value={note} onChange={(e) => setNote(e.target.value)} placeholder="改动说明（可选），例如：章节里加上原话参考" aria-label="改动说明" />
+            <input className="cfg-input grow" value={note} onChange={(e) => setNote(e.target.value)} placeholder="改动说明（可选）" aria-label="改动说明" />
             <button className="btn solid sm" disabled={busy || !dirty || text.trim().length < 30} onClick={save}>保存为 v{(latest?.version || 0) + 1} 并编译</button>
             <button className="btn sm ghost" disabled={!dirty} onClick={() => setText(base?.text || "")}>还原</button>
           </div>

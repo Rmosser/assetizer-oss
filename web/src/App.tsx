@@ -62,7 +62,7 @@ function Paste() {
   };
   return (
     <form className="paste" onSubmit={submit}>
-      <input ref={ref} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接，回车付印" aria-label="提交视频链接" inputMode="url" />
+      <input ref={ref} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接" aria-label="提交视频链接" inputMode="url" />
       <kbd>⌘K</kbd>
       {hint && <span className="hint" role="status">{hint}</span>}
     </form>
@@ -86,7 +86,6 @@ function PasteSheet({ onClose }: { onClose: () => void }) {
   };
   return (
     <Sheet title="付印一期" onClose={onClose}>
-      <p className="sheet-lede">粘贴 YouTube 链接。系统会理解、拆解、剪辑并写好文章，你只需要回来阅读。</p>
       <form className="sheet-form" onSubmit={(e) => { e.preventDefault(); go(v); }}>
         <input value={v} onChange={(e) => setV(e.target.value)} placeholder="https://youtu.be/…" aria-label="视频链接" inputMode="url" autoComplete="off" />
         <div className="sheet-row">
@@ -167,7 +166,7 @@ export default function App() {
       <header className="masthead">
         <a className="brand" {...linkProps("/")} aria-label="资产刊 首页">
           <Seal />
-          <span className="wordmark"><b>资产刊</b><span>ASSETIZER</span></span>
+          <span className="wordmark"><b>资产刊</b></span>
         </a>
         <nav className="nav" aria-label="主导航">
           <a {...linkProps("/")} className={tab === "issues" ? "on" : ""} aria-current={tab === "issues" ? "page" : undefined}>

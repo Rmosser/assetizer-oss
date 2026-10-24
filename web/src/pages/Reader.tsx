@@ -6,7 +6,7 @@ import { cleanUnitTitle, cnNo, deJargon, endStop, issueHeadline, originalTitle, 
 import { Lightbox } from "../components/Lightbox";
 import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll, Empty } from "../components/States";
-import { useMedia, useOnce, usePoll, useStored } from "../hooks";
+import { useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
 import { cnDay, cnNum, cnYear, DELIVERY, mins, parseDay, tc } from "../util";
 
@@ -290,7 +290,7 @@ function IssueIndex({ units, flags, current, onJump, mobile, full = false }: {
     <nav className={`yaomu${open ? " open" : ""}`} aria-label="要目">
       <button className="yaomu-head" onClick={() => setOpen(!open)} aria-expanded={open} disabled={!mobile}>
         <h2>要目</h2>
-        <span className="yaomu-sum"><span className="num">{units.length}</span> 单元 · 必学 <span className="num">{must}</span>{pi > 0 && <> · 校注 <span className="num">{pi}</span></>}</span>
+        {mobile && <span className="yaomu-sum"><span className="num">{units.length}</span> 单元 · 必学 <span className="num">{must}</span>{pi > 0 && <> · 校注 <span className="num">{pi}</span></>}</span>}
         {mobile && <i className="chev" aria-hidden />}
       </button>
       {open && (
@@ -400,7 +400,7 @@ function Dock({ active, setActive, onBack, onTime }: { active: Active; setActive
         onPlay={() => setPaused(false)} onPause={() => { setPaused(true); onTime(null); }}
         onTimeUpdate={(e) => { active.time = (e.target as HTMLVideoElement).currentTime; onTime(active.clipStart + active.time); }} />
       <div className="bar">
-        <button className="dock-title" onClick={onBack}><Words>{active.title}</Words><small>回到这一段</small></button>
+        <button className="dock-title" onClick={onBack}><Words>{active.title}</Words></button>
         <button className="dock-btn" onClick={() => { const v = vref.current; if (v) (v.paused ? v.play() : v.pause()); }} aria-label={paused ? "播放" : "暂停"}>
           {paused ? <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden><path d="M8 5.5v13l11-6.5-11-6.5Z" fill="currentColor" /></svg>
             : <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" /></svg>}
@@ -541,7 +541,7 @@ function Nudge({ sourceId, clip, onDone }: { sourceId: string; clip: Asset; onDo
       </div>
       {words && strip(words.tail, "end")}
       <div className="nudge-foot">
-        <span className="muted">点选词语，把边界吸到词边。重剪是确定性的，不调用模型。时长 {Math.round(end - start)} 秒。</span>
+        <span className="muted">{Math.round(end - start)} 秒</span>
         <button className="btn solid sm" onClick={submit} disabled={end - start < 3}>按此重剪</button>
       </div>
       {state && <p className="zhu nudge-msg">{state}</p>}
@@ -701,7 +701,6 @@ function Track({ source, onDone }: { source: any; onDone: () => void }) {
   return (
     <div className="track">
       <h3>把「{source.channel_title}」加入长期关注</h3>
-      <p>以后这个频道的视频会按你的学习目标生产。先告诉系统你为什么看它，系统起草一份频道学习目标，你改完再编译。</p>
       <label>频道名<input value={name} onChange={(e) => setName(e.target.value)} /></label>
       <label>你主要为什么看这个频道？<textarea rows={3} value={why} onChange={(e) => setWhy(e.target.value)} placeholder="例如：学习他怎么判断宏观周期，以及他引用的数据和论证过程" /></label>
       {!draft ? (
@@ -796,7 +795,6 @@ export default function Reader({ id }: { id: string }) {
   const [playhead, setPlayhead] = useState<number | null>(null);
   const [stuck, setStuck] = useState(false);
   const inline = useMedia("(max-width: 1240px)");
-  const [noteSeen, markNote] = useOnce("az-margin-note");
   const sentinel = useRef<HTMLDivElement>(null);
   const setActive = useCallback((a: Active) => setActiveState(a), []);
   const onTime = useCallback((t: number | null) => setPlayhead(t == null ? null : Math.round(t * 2) / 2), []);
@@ -947,7 +945,7 @@ export default function Reader({ id }: { id: string }) {
         )}
         <div className="kicker">{kicker}</div>
         <h1><Words>{headline}</Words></h1>
-        {orig !== headline && <p className="dek"><span className="dek-k">原题</span><Words>{orig}</Words></p>}
+        {orig !== headline && <p className="dek"><Words>{orig}</Words></p>}
         <div className="reader-meta">
           <span>{cnDay(source.published_at)}</span>
           <span><span className="num">{Math.round((source.duration || 0) / 60)}</span> 分钟</span>
@@ -956,7 +954,6 @@ export default function Reader({ id }: { id: string }) {
         </div>
         <div className="reader-links">
           {source.url && <a href={source.url} target="_blank" rel="noreferrer">原视频 ↗</a>}
-          {source.notion_url && <a href={source.notion_url} target="_blank" rel="noreferrer">Notion ↗</a>}
           {playbook && <a {...linkProps(`/channels/${playbook.channel_id || "universal"}/playbook`)}>规程 v{playbook.version}{playbook.channel_id ? "" : "（通用）"}</a>}
           {(!channel || channel.mode !== "TRACKED") && source.youtube_channel_id && (
             <button className="btn sm zhu" onClick={() => setTracking(!tracking)}>加入长期关注</button>
@@ -966,7 +963,7 @@ export default function Reader({ id }: { id: string }) {
           <div className="head-fig">
             <a href={`#u-${firstMust.id}`} onClick={(e) => { e.preventDefault(); jump(firstMust.id); }} aria-label={`必学：${firstMust.title}`}>
               <span className="head-fig-img"><img src={media(mustPoster.id, 640)} alt="" /></span>
-              <span className="head-fig-cap"><span className="label">必学</span><Words>{firstMust.title}</Words></span>
+              {firstMust.title !== headline && <span className="head-fig-cap"><Words>{firstMust.title}</Words></span>}
             </a>
           </div>
         ) : null}
@@ -981,11 +978,9 @@ export default function Reader({ id }: { id: string }) {
             <button className="rb-count" onClick={() => setIndexOpen(true)} aria-label="打开单元目录">
               <span><span className="num">{String(ci + 1).padStart(2, "0")}</span><em className="num">/{units.length}</em></span>
             </button>
-          ) : (
-            <span className="rb-state">{tuning ? "调试样片" : "自动出刊"}</span>
-          )}
+          ) : tuning ? <span className="rb-state">样片</span> : null}
           <Stepper count={queue.length} total={flags.filter(isReview).length} pos={queue.length ? Math.min(pos, queue.length - 1) : -1} onStep={step} />
-          {!mobile && (
+          {!mobile && source.delivery !== "DELIVERED" && (
             <span className="rb-deliv" title={source.delivery_reason || ""}>
               {DELIVERY[source.delivery] || source.delivery}
               {["FAILED", "STALE"].includes(source.delivery) && (
@@ -1007,7 +1002,7 @@ export default function Reader({ id }: { id: string }) {
       )}
 
       {!run || !units.length ? (
-        <Empty title="这一期还在付印">完成后会自动出现在这里。可以在「机房」查看进度。</Empty>
+        <Empty title="这一期还在付印" />
       ) : (
         <div className="reader">
           {!mobile && (
@@ -1023,10 +1018,6 @@ export default function Reader({ id }: { id: string }) {
             {runFlags.filter(isReview).map((f: Flag) => (
               <Zhupi key={f.id} f={f} onSet={onSetFlag} playAt={playAt} focused={focusFlag === f.id} />
             ))}
-            {!inline && !noteSeen && (
-              <p className="margin-note">校注落在这一栏：系统对条件、归属、边界没有把握的地方，会在对应段落旁标出，并在正文里圈出原句。仅供参考，不需要逐条处理。
-                <button className="link" onClick={markNote}>知道了</button></p>
-            )}
             {runFlags.some((f: Flag) => !isReview(f)) && (
               <details className="notes">
                 <summary>{`注记 ${runFlags.filter((f: Flag) => !isReview(f)).length} 条`}</summary>

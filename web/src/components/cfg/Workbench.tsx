@@ -147,7 +147,6 @@ function Candidates({ cid, onAdd, busy }: { cid: string; onAdd: (ids: string[]) 
           setPick(new Set());
         }}>加入选中的 {pick.size} 期</button>
         <button className="btn sm ghost" onClick={load}>刷新</button>
-        <span className="muted">「库里已有」的视频定稿后不会重复写入 Notion。</span>
       </div>
     </div>
   );
@@ -195,22 +194,19 @@ export default function Workbench({ cid, stage, onChanged }: { cid: string; stag
     <div className="wb">
       {tuning ? (
         <div className="cfg-toolbar">
-          <label className="cfg-inline"><span>试跑用规程</span>
-            <select value={pb ?? ""} onChange={(e) => setPb(Number(e.target.value))}>
+          <label className="cfg-inline">
+            <select value={pb ?? ""} onChange={(e) => setPb(Number(e.target.value))} aria-label="试跑用规程">
               {wb.playbooks.map((p) => <option key={p.id} value={p.id}>v{p.version}{p.note ? ` · ${p.note}` : ""} · {PB[p.status]?.label || p.status}{p.id === wb.draft_id ? "（最新）" : ""}</option>)}
             </select>
           </label>
           <button className="btn solid sm" disabled={!pb || !idle || busy} onClick={trialAll}>用 v{chosen?.version ?? "?"} 试跑全部样片{idle ? `（${idle}）` : ""}</button>
-          <span className="muted">定稿前，样片不会写入 Notion。</span>
         </div>
-      ) : (
-        <Note>已定稿。要用样片试跑新版本，先点顶部的「回到调试期」。下面是调试时的样片与版本记录。</Note>
-      )}
+      ) : null}
       {msg && <Note tone={msg.tone === "bad" ? "bad" : "ok"}>{msg.text}</Note>}
 
       {wb.summary.length > 0 && (
         <section className="cfg-sec first">
-          <div className="cfg-sec-row"><h3 className="cfg-sec-h">偏好汇总</h3><span className="muted">每期样片里你标了「偏好」的版本，按版本合计</span></div>
+          <div className="cfg-sec-row"><h3 className="cfg-sec-h">偏好汇总</h3></div>
           <div className="tbl-wrap">
             <table className="tbl tight">
               <thead><tr><th>版本</th><th>说明</th><th className="r">已完成</th><th className="r">偏好</th><th className="r">有备注</th></tr></thead>
@@ -228,7 +224,6 @@ export default function Workbench({ cid, stage, onChanged }: { cid: string; stag
         <section className="cfg-sec first">
           <div className="cfg-sec-row">
             <h3 className="cfg-sec-h">排队中的试跑 {wb.queue.length} 次</h3>
-            <span className="muted">一次跑一期，同一期的几个版本连着跑</span>
             {tuning && <button className="btn xs ghost grow-r" onClick={() => { if (confirm("取消所有还没开始的试跑？")) act(() => post(`/api/channels/${cid}/trial-queue/clear`)); }}>清空排队</button>}
           </div>
           <div className="tbl-wrap">
@@ -245,7 +240,7 @@ export default function Workbench({ cid, stage, onChanged }: { cid: string; stag
         </section>
       )}
       {wb.samples.length === 0 ? (
-        <Empty>还没有样片。挑 2–3 期有代表性的视频：一期典型的、一期内容密的、一期形式特别的。</Empty>
+        <Empty>还没有样片</Empty>
       ) : (
         <div className="tbl-wrap">
           <table className="tbl wb-tbl">
