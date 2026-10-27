@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { get } from "../../api";
 import { Fold } from "../Fold";
 import { hm, Icon, Seg, short, Stepper, Switch, TYPE_ICON, useNarrow } from "./bits";
@@ -18,7 +18,9 @@ const SRC: Record<string, string> = {
   clips: "视频片段数", notes: "校注数", run: "Run 编号",
 };
 const VAR: Record<string, string> = { video_title: "视频原标题", channel: "频道名", date: "发布日期", date8: "发布日期", headline: "本期题眼", url: "视频链接" };
-const ACCESS_KIND: Record<string, string> = { public_video: "视频 · 公开", member_video: "视频 · 会员", public_live: "直播 · 公开", member_live: "直播 · 会员" };
+const ACCESS_FORM: [string, string][] = [["video", "视频"], ["live", "直播"]];
+const ACCESS_TIER: [string, string][] = [["public", "公开"], ["member", "会员"]];
+const ACCESS_KINDS = ACCESS_FORM.flatMap(([f]) => ACCESS_TIER.map(([t]) => `${t}_${f}`));
 
 /** A setting card. On a phone it folds to its header and a one-line summary. `act` ends the header; a phone's header
  *  is the fold button, so there the card leaves it out and the caller places it in the body. */
@@ -218,10 +220,46 @@ function summary(r: NotionRow, m: Mapping | undefined, titles: Record<string, st
 
 function initMapping(r: NotionRow, source: string, view: NotionView): Mapping {
   const m: Mapping = { name: r.name, type: r.type, source };
-  if (source === "access") m.value = Object.fromEntries(Object.entries(view.access_labels).map(([k, l]) => [k, (r.options || []).includes(l) ? l : ""]));
+  if (source === "access") m.value = Object.fromEntries(Object.entries(view.access_labels).map(([k, l]) => [k, !r.options || r.options.includes(l) ? l : ""]));
   if (source === "template") m.value = "";
   if (source === "fixed") m.value = r.type === "relation" || r.type === "multi_select" ? [] : r.type === "checkbox" ? false : "";
   return m;
+}
+
+/** 视频 / 直播 × 公开 / 会员 as a 2 × 2 of what each kind writes; one row of options edits the picked cell, which is
+ *  this episode's kind until another is picked. A property without options (text) takes typed values. */
+function AccessMap({ r, m, set, now }: { r: NotionRow; m: Mapping; set: (m: Mapping) => void; now?: string }) {
+  const [pick, setPick] = useState<string | null>(null);
+  const v: Record<string, string> = m.value || {};
+  const at = pick ?? (now && ACCESS_KINDS.includes(now) ? now : ACCESS_KINDS[0]);
+  const gone = (o: string) => !!o && !!r.options && !r.options.includes(o);
+  const choose = (o: string) => set({ ...m, value: { ...v, [at]: o } });
+  return (
+    <>
+      <div className="amap" role="radiogroup" aria-label={`${r.name} 按类型`}>
+        <span />{ACCESS_TIER.map(([t, l]) => <span key={t} className="ax c">{l}</span>)}
+        {ACCESS_FORM.map(([f, fl]) => (
+          <Fragment key={f}>
+            <span className="ax">{fl}</span>
+            {ACCESS_TIER.map(([t, tl]) => {
+              const k = `${t}_${f}`, cur = v[k] || "";
+              return (
+                <button key={k} role="radio" aria-checked={at === k} aria-label={`${fl} · ${tl}`} className={`acell${at === k ? " on" : ""}`} onClick={() => setPick(k)}>
+                  {cur ? <Opt name={cur} color={gone(cur) ? "gone" : r.colors[cur]} /> : <span className="nil">不写入</span>}
+                  {now === k && <span className={`now${gone(cur) ? " z" : ""}`}>本期</span>}
+                </button>
+              );
+            })}
+          </Fragment>
+        ))}
+      </div>
+      <div className="apick">{r.options
+        ? <div className="opts">{r.options.map((o) => (
+          <button key={o} className={`optb${v[at] === o ? " on" : ""}`} onClick={() => choose(o)}><Opt name={o} color={r.colors[o]} /></button>
+        ))}</div>
+        : <input className="ch-input" value={v[at] || ""} onChange={(e) => choose(e.target.value)} aria-label={`${r.name} 写入的文字`} />}</div>
+    </>
+  );
 }
 
 function Editor({ r, m, set, view, titles, addTitles, ctx }: {
@@ -258,21 +296,7 @@ function Editor({ r, m, set, view, titles, addTitles, ctx }: {
       )}
       {m?.source === "fixed" && r.type === "checkbox" && <Switch on={!!m.value} onChange={(v) => set({ ...m, value: v })} label={r.name} />}
       {m?.source === "template" && <TemplateInput value={String(m.value || "")} vars={view.template_vars} onChange={(v) => set({ ...m, value: v })} />}
-      {m?.source === "access" && (
-        <div className="amap">{Object.keys(ACCESS_KIND).map((k) => {
-          const cur = (m.value || {})[k] || "";
-          const gone = cur && r.options && !r.options.includes(cur);
-          return (
-            <div key={k} className="arow">
-              <span className="k">{ACCESS_KIND[k]}</span>
-              <span className="opts">{(r.options || []).map((o) => (
-                <button key={o} className={`optb${cur === o ? " on" : ""}`} onClick={() => set({ ...m, value: { ...(m.value || {}), [k]: o } })}><Opt name={o} color={r.colors[o]} /></button>
-              ))}{gone && <span className="optb on"><Opt name={cur} color="gone" /></span>}</span>
-              {ctx.access === k && <span className={`now${gone ? " z" : ""}`}>{gone ? "这一期 · 选项已不存在" : "这一期"}</span>}
-            </div>
-          );
-        })}</div>
-      )}
+      {m?.source === "access" && <AccessMap r={r} m={m} set={set} now={ctx.access} />}
       {r.problem && <p className="ch-fix"><span>{brief(r.problem)}</span>{view.database.url && <a className="ch-lk" href={view.database.url} target="_blank" rel="noreferrer">在 Notion 里改 ↗</a>}</p>}
     </div>
   );
