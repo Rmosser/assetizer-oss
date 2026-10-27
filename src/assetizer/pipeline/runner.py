@@ -9,12 +9,13 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import subprocess
 import threading
 import time
 import traceback
 from pathlib import Path
 
-from .. import config, db, youtube
+from .. import config, db, notify, youtube
 from ..llm import ContractError
 from ..providers.agy import AgyProvider, ProviderError
 from ..util import now
@@ -274,6 +275,8 @@ def _fail(run_id: str, e: BaseException) -> None:
     db.exec("UPDATE runs SET production=?, error_class=?, error=?, finished_at=? WHERE id=?",
             state, kind, f"{e}\n{traceback.format_exc()[-1500:]}", now(), run_id)
     db.event("run", f"生产失败：{kind}", run_id, "error")
+    if state == "FAILED":
+        notify.run_failed(run_id, kind, str(e))
 
 
 def pause_queue(reason: str) -> None:
@@ -323,15 +326,67 @@ def _hold_if_agy_cannot_read_media(run_id: str, e: ProviderError) -> bool:
     return True
 
 
+# ---------------------------------------------------------------- worker health
+MEMORY_CHECK_EVERY = 60  # seconds
+MEMORY_ALERT_AT, MEMORY_CLEAR_AT = 0.8, 0.6  # share of the unit's MemoryMax
+
+
+def systemd_restarts() -> int | None:
+    """How often systemd restarted the worker after it died since the unit was last started by hand.
+    A crash or OOM raises it; a deploy or manual restart sets it back to 0."""
+    try:
+        out = subprocess.run(["systemctl", "--user", "show", "-p", "NRestarts", "--value", "assetizer-worker"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return int(out.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def exit_reason() -> str:
+    try:
+        out = subprocess.run(["journalctl", "--user", "-u", "assetizer-worker", "--since", "-15min", "--no-pager", "-o", "cat"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "原因不明"
+    return "内存不足，被系统杀掉" if "oom-kill" in out else "进程意外退出"
+
+
+def cgroup_memory() -> tuple[int, int] | None:
+    """Anonymous memory of the worker's cgroup (worker, agy and whisper together) and its MemoryMax, in bytes."""
+    try:
+        rel = Path("/proc/self/cgroup").read_text().strip().split("::", 1)[1]
+        cg = Path("/sys/fs/cgroup") / rel.lstrip("/")
+        stat = dict(line.split() for line in (cg / "memory.stat").read_text().splitlines())
+        limit = (cg / "memory.max").read_text().strip()
+        return (int(stat["anon"]), int(limit)) if limit != "max" else None
+    except (OSError, IndexError, KeyError, ValueError):
+        return None
+
+
+def memory_alert() -> None:
+    m = cgroup_memory()
+    if not m:
+        return
+    anon, limit = m
+    if anon > MEMORY_ALERT_AT * limit:
+        db.raise_alert("MEMORY_HIGH", "warning", "Worker 内存接近上限",
+                       f"worker（含 agy、whisper）占用 {anon / 2**30:.1f} GB，上限 {limit / 2**30:.0f} GB。"
+                       "超过上限时 worker 会被系统杀掉，随后自动重启并从断点续跑。")
+    elif anon < MEMORY_CLEAR_AT * limit:
+        db.resolve_alert("MEMORY_HIGH")
+
+
 # ---------------------------------------------------------------- worker loop
 class Worker:
     def __init__(self, poll: float = 5.0):
         self.poll = poll
         self.stop = False
-        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0}
+        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
+                     "memory": 0.0, "digest": 0.0}
 
     def recover(self) -> None:
         n = kill_orphans()
+        interrupted = [r["id"] for r in db.q("SELECT id FROM runs WHERE production='RUNNING'")]
         for r in db.q("SELECT id, attempts FROM runs WHERE production='RUNNING'"):
             if r["attempts"] < 5:
                 db.exec("UPDATE runs SET production='QUEUED' WHERE id=?", r["id"])
@@ -344,6 +399,11 @@ class Worker:
         finish.sweep_agy_state()
         if n:
             db.event("worker", f"清理了 {n} 个遗留 agy 进程", level="warn")
+        restarts = systemd_restarts()
+        if restarts is not None:
+            if restarts > (db.setting("worker_nrestarts") or 0):
+                notify.worker_recovered(exit_reason(), interrupted)
+            db.set_setting("worker_nrestarts", restarts)
 
     def housekeeping(self) -> None:
         t = time.monotonic()
@@ -397,6 +457,13 @@ class Worker:
                 poll()
             except Exception as e:  # noqa: BLE001
                 db.event("ingest", f"自动收录异常：{e}", level="warn")
+        if t - self.last["memory"] > MEMORY_CHECK_EVERY:
+            self.last["memory"] = t
+            memory_alert()
+        if t - self.last["digest"] > 300:
+            self.last["digest"] = t
+            if notify.configured() and notify.digest_due():
+                notify.send_digest()
 
     def tick(self) -> bool:
         self.housekeeping()
@@ -414,6 +481,10 @@ class Worker:
         from ..tuning import dispatch_next
         if dispatch_next():  # 调试台: the next queued trial run
             return True
+        batch = db.setting("trial_batch")
+        if batch and not db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'"):
+            db.set_setting("trial_batch", None)
+            notify.trials_done(batch)
         return deliver_pending()
 
     def loop(self) -> None:

@@ -102,11 +102,27 @@ def cmd_doctor(a) -> None:
         out[tool] = shutil.which(tool) or "MISSING"
     out["disk_free_gb"] = round(shutil.disk_usage(s.home).free / 1e9, 1)
     out["notion_token"] = bool(s.secret("notion-token"))
+    out["telegram"] = bool(s.secret("telegram-bot-token")) and bool(s.secret("telegram-chat-id"))
     out["browser_profile"] = str(s.browser_profile) if s.browser_profile and s.browser_profile.exists() else "MISSING"
     if a.agy:
         from .providers.agy import AgyProvider
         out["agy"] = AgyProvider().health()
     _print(out)
+
+
+def cmd_telegram_setup(a) -> None:
+    from . import notify
+    try:
+        _print(notify.setup())
+    except notify.SetupError as e:
+        raise SystemExit(str(e))
+
+
+def cmd_notify_digest(a) -> None:
+    from . import notify
+    print(notify.digest())
+    if a.send:
+        print("sent" if notify.send(notify.digest()) else "not sent (Telegram 未配置或发送失败)")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -126,6 +142,9 @@ def main(argv: list[str] | None = None) -> None:
     x = sub.add_parser("set"); x.add_argument("key"); x.add_argument("value"); x.set_defaults(fn=cmd_set)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     x = sub.add_parser("doctor"); x.add_argument("--agy", action="store_true"); x.set_defaults(fn=cmd_doctor)
+    sub.add_parser("telegram-setup", help="给 bot 发过消息后运行：记下 chat id 并发一条测试消息").set_defaults(fn=cmd_telegram_setup)
+    x = sub.add_parser("notify-digest", help="打印日报；--send 立即发到 Telegram"); x.add_argument("--send", action="store_true")
+    x.set_defaults(fn=cmd_notify_digest)
     a = p.parse_args(argv)
     a.fn(a)
 

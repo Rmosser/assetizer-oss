@@ -1416,3 +1416,142 @@ def test_skeleton_with_an_overlong_label_is_mended_before_validation(tmp_path, m
         llm.structured(tmp_path / "a", "knowledge-skeleton", "p", P.SKELETON_SCHEMA)
     o = llm.structured(tmp_path / "b", "knowledge-skeleton", "p", P.SKELETON_SCHEMA, normalize=fit_labels)
     assert o["units"][0]["label"] == LONG_LABEL[:64]
+
+
+# ---------------------------------------------------------------- Telegram notifications
+@pytest.fixture
+def sent(home, monkeypatch):
+    """Telegram configured; captures what would be sent instead of calling the API."""
+    from assetizer import config, notify
+    s = config.get().secrets_dir
+    s.mkdir(parents=True, exist_ok=True)
+    (s / "telegram-bot-token").write_text("123:SECRET")
+    (s / "telegram-chat-id").write_text("42")
+    out = []
+    monkeypatch.setattr(notify, "_api", lambda token, method, **kw: out.append(kw["text"]) or {"ok": True})
+    return out
+
+
+def test_notify_is_silent_until_configured(home, monkeypatch):
+    from assetizer import notify
+    monkeypatch.setattr(notify, "_api", lambda *a, **kw: pytest.fail("must not call Telegram"))
+    assert not notify.configured() and notify.send("x") is False
+
+
+def test_alerts_notify_once_per_occurrence(sent):
+    from assetizer import db
+    db.raise_alert("YOUTUBE_AUTH", "critical", "YouTube 需要登录", "去 CookieCloud 同步一次")
+    db.raise_alert("YOUTUBE_AUTH", "critical", "YouTube 需要登录", "去 CookieCloud 同步一次")  # retried: no repeat
+    db.resolve_alert("YOUTUBE_AUTH")
+    db.resolve_alert("YOUTUBE_AUTH")
+    db.raise_alert("YOUTUBE_AUTH", "critical", "YouTube 需要登录", "again")
+    assert len(sent) == 3 and sent[0].startswith("🔴 YouTube 需要登录") and sent[1] == "✅ 已恢复：YouTube 需要登录"
+
+
+def test_a_failed_run_is_reported_but_a_skipped_one_is_not(sent):
+    from assetizer import db
+    from assetizer.llm import ContractError
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    db.exec("INSERT INTO sources(id, title, created_at, updated_at) VALUES ('v','中国往何处去？',?,?)", now(), now())
+    for rid in ("v-r1", "v-r2"):
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?, 'v', 'RUNNING', ?)", rid, now())
+    try:
+        raise ContractError("SCHEMA_VIOLATION", "units/17/label: too long")
+    except ContractError as e:
+        runner._fail("v-r1", e)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(runner, "_classify", lambda e: "SKIPPED_SHORT")
+        runner._fail("v-r2", RuntimeError("short"))
+    assert len(sent) == 1 and "中国往何处去？" in sent[0] and "v-r1" in sent[0] and "SCHEMA_VIOLATION" in sent[0]
+
+
+def test_worker_reports_a_restart_by_systemd_but_not_a_deploy(sent, monkeypatch):
+    from assetizer import db
+    from assetizer.pipeline import finish, runner
+    from assetizer.util import now
+    monkeypatch.setattr(runner, "kill_orphans", lambda: 0)
+    monkeypatch.setattr(finish, "sweep_agy_state", lambda: None)
+    monkeypatch.setattr(runner, "exit_reason", lambda: "内存不足，被系统杀掉")
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('v',?,?)", now(), now())
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','RUNNING',?)", now())
+    for restarts in (0, 1, 0, 0, 1):  # deploy, OOM, deploy, deploy, crash
+        db.exec("UPDATE runs SET production='RUNNING' WHERE id='v-r1'")
+        monkeypatch.setattr(runner, "systemd_restarts", lambda n=restarts: n)
+        runner.Worker().recover()
+    assert len(sent) == 2 and "内存不足" in sent[0] and "v-r1" in sent[0]
+
+
+def test_memory_alert_raises_near_the_limit_and_clears_well_below(sent, monkeypatch):
+    from assetizer import db
+    from assetizer.pipeline import runner
+    for used in (5.0, 7.6, 7.8, 6.0, 5.0, 8.0):
+        monkeypatch.setattr(runner, "cgroup_memory", lambda u=used: (int(u * 2**30), 9 * 2**30))
+        runner.memory_alert()
+    assert [m.split("\n")[0] for m in sent] == ["🟠 Worker 内存接近上限", "✅ 已恢复：Worker 内存接近上限",
+                                                 "🟠 Worker 内存接近上限"]
+    assert db.one("SELECT resolved_at FROM alerts WHERE key='MEMORY_HIGH'")["resolved_at"] is None
+
+
+def test_telegram_setup_finds_the_chat_and_keeps_its_id(home, monkeypatch):
+    from assetizer import config, notify
+    s = config.get().secrets_dir
+    s.mkdir(parents=True, exist_ok=True)
+    (s / "telegram-bot-token").write_text("123:SECRET")
+    updates = []
+    calls = []
+
+    def api(token, method, **kw):
+        calls.append(method)
+        return {"getMe": {"ok": True, "result": {"username": "assetizer_bot"}},
+                "getUpdates": {"ok": True, "result": updates},
+                "sendMessage": {"ok": True}}[method]
+    monkeypatch.setattr(notify, "_api", api)
+    with pytest.raises(notify.SetupError, match="@assetizer_bot"):
+        notify.setup()
+    updates.append({"message": {"chat": {"id": 7001, "first_name": "Demo"}, "text": "hi"}})
+    r = notify.setup()
+    assert r == {"bot": "assetizer_bot", "chat_id": 7001, "chat": "Demo", "test_sent": True}
+    p = s / "telegram-chat-id"
+    assert p.read_text() == "7001" and oct(p.stat().st_mode & 0o777) == "0o600" and calls[-1] == "sendMessage"
+
+
+def test_a_failed_send_is_logged_without_the_token(home, monkeypatch):
+    import httpx
+    from assetizer import config, db, notify
+    s = config.get().secrets_dir
+    s.mkdir(parents=True, exist_ok=True)
+    (s / "telegram-bot-token").write_text("123:SECRET")
+    (s / "telegram-chat-id").write_text("42")
+
+    def boom(url, **kw):
+        raise httpx.ConnectError(f"cannot reach {url}")
+    monkeypatch.setattr(httpx, "post", boom)
+    assert notify.send("x") is False
+    e = db.one("SELECT message FROM events WHERE kind='notify'")["message"]
+    assert "ConnectError" in e and "SECRET" not in e
+
+
+def test_daily_digest(sent, monkeypatch):
+    import datetime as dt
+    from assetizer import db, notify
+    from assetizer.util import now
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('v',?,?)", now(), now())
+    db.exec("INSERT INTO runs(id, source_id, production, created_at, finished_at) VALUES ('v-r1','v','COMPLETE',?,?), "
+            "('v-r2','v','FAILED',?,?)", now(), now(), now(), now())
+    db.exec("INSERT INTO runs(id, source_id, production, stage, created_at) VALUES ('v-r3','v','RUNNING','CLIPS',?)", now())
+    text = notify.digest()
+    assert "完成 1 · 部分完成 0 · 失败 1" in text and "正在跑：v-r3（CLIPS）" in text and "未解决告警：无" in text
+
+    class Clock(dt.datetime):
+        hour_now = 8
+
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 10, 24, cls.hour_now, 0, tzinfo=tz)
+    monkeypatch.setattr(notify.dt, "datetime", Clock)
+    assert not notify.digest_due()  # before 9:00
+    Clock.hour_now = 9
+    assert notify.digest_due()
+    notify.send_digest()
+    assert not notify.digest_due() and sent[-1].startswith("📋 Assetizer 日报（10-24 09:00）")

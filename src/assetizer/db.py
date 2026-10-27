@@ -354,14 +354,22 @@ def event(kind: str, message: str, run_id: str | None = None, level: str = "info
 
 
 def raise_alert(key: str, severity: str, title: str, body: str = "", action: dict | None = None) -> None:
+    from . import notify
+    was_open = one("SELECT 1 FROM alerts WHERE key=? AND resolved_at IS NULL", key)
     exec("""INSERT INTO alerts(key, severity, title, body, action, created_at) VALUES (?,?,?,?,?,?)
             ON CONFLICT(key) DO UPDATE SET severity=excluded.severity, title=excluded.title, body=excluded.body,
             action=excluded.action, resolved_at=NULL""",
          key, severity, title, body, j(action) if action else None, now())
+    if not was_open:  # alerts are re-raised on every retry: tell the user once per occurrence
+        notify.alert_raised(severity, title, body)
 
 
 def resolve_alert(key: str) -> None:
+    from . import notify
+    a = one("SELECT title FROM alerts WHERE key=? AND resolved_at IS NULL", key)
     exec("UPDATE alerts SET resolved_at=? WHERE key=? AND resolved_at IS NULL", now(), key)
+    if a:
+        notify.alert_resolved(a["title"])
 
 
 def setting(key: str, default: Any = None) -> Any:

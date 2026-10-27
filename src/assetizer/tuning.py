@@ -83,6 +83,7 @@ def dispatch_next() -> str | None:
             continue  # this video is waiting on something of its own (e.g. a live not yet over): the next one goes first
         r = submit(f"https://www.youtube.com/watch?v={e['source_id']}", playbook_id=e["playbook_id"])
         db.exec("UPDATE trial_queue SET status='DISPATCHED', run_id=?, dispatched_at=? WHERE id=?", r["run_id"], now(), e["id"])
+        db.set_setting("trial_batch", (db.setting("trial_batch") or 0) + 1)  # the worker says when the batch is done
         return r["run_id"]
     return None
 
