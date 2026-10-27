@@ -44,7 +44,8 @@ def add_sample(channel_id: str, url: str) -> str:
 
 def trial(channel_id: str, playbook_ids: int | list[int], source_ids: list[str] | None = None) -> list[dict]:
     """Queue trial runs: every listed sample × every listed version, video by video (all versions of one
-    sample before the next), so the user can compare a sample as soon as its versions are done.
+    sample before the next), so the user can compare a sample as soon as its versions are done. Without `source_ids`
+    (a version's 试跑 N 期) only the pairs that have no run yet are queued; a listed sample is run again on purpose.
     The queue is worked through one run at a time by the worker (dispatch_next)."""
     ch = db.one("SELECT * FROM channels WHERE id=?", channel_id)
     if not ch or ch["stage"] != "TUNING":
@@ -60,6 +61,9 @@ def trial(channel_id: str, playbook_ids: int | list[int], source_ids: list[str] 
         if not db.one("SELECT 1 FROM samples WHERE channel_id=? AND source_id=?", channel_id, sid):
             continue
         for pid in pids:
+            if source_ids is None and db.one("SELECT 1 FROM runs WHERE source_id=? AND playbook_id=?", sid, pid):
+                out.append({"source_id": sid, "playbook_id": pid, "skipped": "已跑过"})
+                continue
             dup = db.one("""SELECT 1 FROM trial_queue q LEFT JOIN runs r ON r.id=q.run_id WHERE q.source_id=? AND q.playbook_id=?
                             AND (q.status='PENDING' OR (q.status='DISPATCHED' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')))""",
                          sid, pid)

@@ -216,6 +216,7 @@ function Grid({ wb, ch, sel, cmp, onPick, act }: MatrixProps) {
   const [folded, setFolded] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [clearing, setClearing] = useState<number | null>(null);
   const pbs = wb.playbooks;
   const adoptedPb = new Set(wb.samples.map((s) => s.runs.find((r) => r.id === s.adopt.run_id)?.playbook_id));
   const cols = all ? pbs : pbs.filter((p, i) => i < 3 || adoptedPb.has(p.id));
@@ -249,7 +250,12 @@ function Grid({ wb, ch, sel, cmp, onPick, act }: MatrixProps) {
                 {p.missing > 0 && (
                   <button className="ch-vrun" onClick={() => act.trial([p.id])}><Icon name="play" size={9} fill />试跑 {p.missing} 期 · {est(p.est_minutes)}</button>
                 )}
-                {queued > 0 && <span className="ch-vq"><span>排队 {queued}</span><button onClick={() => act.clear()}>清空</button></span>}
+                {queued > 0 && (
+                  // 清空 takes the place of 试跑 N 期 the moment it is clicked: a second click must not drop the whole queue
+                  <span className="ch-vq"><span>排队 {queued}</span>{clearing === p.id
+                    ? <><button onClick={() => { setClearing(null); act.clear(); }}>确认清空</button><button onClick={() => setClearing(null)}>取消</button></>
+                    : <button onClick={() => setClearing(p.id)}>清空</button>}</span>
+                )}
               </span>
             </div>
           );

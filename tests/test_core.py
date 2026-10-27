@@ -478,6 +478,21 @@ def test_trials_queue_video_by_video_and_run_one_at_a_time(home):
         tuning.trial("w", [v2])
 
 
+def test_a_version_trial_skips_samples_it_already_ran(home):
+    from assetizer import db, tuning
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    tuning.add_sample("w", "AAAAAAAAAAA")
+    tuning.add_sample("w", "BBBBBBBBBBB")
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at) VALUES ('AAAAAAAAAAA-r1','AAAAAAAAAAA',?,'COMPLETE',?)",
+            v2, now())
+    out = tuning.trial("w", [v2])
+    assert [(x["source_id"], "queued" in x) for x in out] == [("AAAAAAAAAAA", False), ("BBBBBBBBBBB", True)]
+    db.exec("UPDATE runs SET production='COMPLETE'")
+    # naming the sample runs it again on purpose
+    assert tuning.trial("w", [v2], ["AAAAAAAAAAA"])[0].get("queued")
+
+
 def test_votes_feed_the_preference_summary(home):
     from assetizer import db, tuning
     from assetizer.util import now
