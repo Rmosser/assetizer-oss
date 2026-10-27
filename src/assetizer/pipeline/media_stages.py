@@ -61,7 +61,6 @@ def transcribe(ctx: RunContext) -> dict:
         r = asr.transcribe(wav, initial_prompt=prompt)
     finally:
         wav.unlink(missing_ok=True)
-        asr.release()
     try:
         import opencc
         cc = opencc.OpenCC("t2s")

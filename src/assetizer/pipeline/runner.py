@@ -85,7 +85,9 @@ def submit(url: str, priority: int = 0, playbook_id: int | None = None) -> dict:
 
 # ---------------------------------------------------------------- orphans
 def kill_orphans() -> int:
-    """Kill agy processes left behind by a previous worker (they run in their own session)."""
+    """Kill agy and whisper processes left behind by a previous worker (they run in their own session)."""
+    from ..media.asr import CHILD
+
     runs_dir = str(config.get().runs_dir)
     killed = 0
     proc = Path("/proc")
@@ -96,10 +98,11 @@ def kill_orphans() -> int:
             continue
         try:
             cmd = (p / "cmdline").read_bytes().split(b"\0")
-            if not cmd or not cmd[0].endswith(b"agy"):
+            whisper = len(cmd) > 3 and cmd[1:3] == [b"-m", CHILD.encode()] and cmd[3].startswith(runs_dir.encode())
+            if not (cmd[0].endswith(b"agy") or whisper):
                 continue
             cwd = os.readlink(p / "cwd")
-            if cwd.startswith(runs_dir):
+            if whisper or cwd.startswith(runs_dir):
                 os.killpg(os.getpgid(int(p.name)), signal.SIGKILL)
                 killed += 1
         except (OSError, ProcessLookupError):

@@ -1304,3 +1304,80 @@ def test_a_cached_proxy_over_the_current_limit_is_encoded_again(home, monkeypatc
     assert len(calls) == 1 and enc == {"crf": 36} and path.stat().st_size == 10
     path, enc = acquire._proxy(ctx, "CH01", 0, 1500)  # now under the limit: reused
     assert len(calls) == 1 and enc == {"crf": 36}
+
+
+def _pcm(seconds, quiet=()):
+    """Loud noise with silent stretches at the given (start, end) seconds."""
+    import numpy as np
+    from assetizer.media import asr
+    x = np.random.default_rng(0).integers(-8000, 8000, int(seconds * asr.SR)).astype(np.int16)
+    for a, b in quiet:
+        x[int(a * asr.SR):int(b * asr.SR)] = 0
+    return x
+
+
+def test_asr_windows_cut_in_silence_and_cover_the_audio():
+    from assetizer.media import asr
+    pcm = _pcm(40 * 60, quiet=[(910, 911), (1795, 1796)])
+    w = asr.windows(pcm)
+    assert w[0][0] == 0 and w[-1][1] == len(pcm)
+    assert all(a == b for (_, a), (b, _) in zip(w, w[1:]))  # contiguous, no gap or overlap
+    cuts = [a / asr.SR for a, _ in w[1:]]
+    assert len(cuts) == 2 and 910 <= cuts[0] <= 911 and 1795 <= cuts[1] <= 1796
+    assert asr.windows(_pcm(15 * 60)) == [(0, 15 * 60 * asr.SR)]  # short audio: one window
+
+
+class _FakeWhisper:
+    """Says one word one second into every window it is given."""
+
+    def __init__(self, *a, **kw):
+        self.calls = []
+
+    def transcribe(self, audio, **kw):
+        import types
+        self.calls.append(len(audio))
+        w = types.SimpleNamespace(start=1.0, end=1.5, word="涨")
+        return [types.SimpleNamespace(start=1.0, end=2.0, text="涨", words=[w])], types.SimpleNamespace(language="zh")
+
+
+def test_asr_windows_are_stitched_on_one_timeline():
+    from assetizer.media import asr
+    pcm = _pcm(40 * 60, quiet=[(910, 911), (1795, 1796)])
+    model = _FakeWhisper()
+    r = asr.transcribe_pcm(model, pcm, offset=100.0)
+    starts = [a / asr.SR for a, _ in asr.windows(pcm)]
+    assert len(model.calls) == 3 and max(model.calls) <= (asr.WINDOW + asr.SEARCH) * asr.SR
+    assert [s["start"] for s in r["segments"]] == pytest.approx([100.0 + s + 1.0 for s in starts])
+    assert [w["end"] for w in r["words"]] == pytest.approx([100.0 + s + 1.5 for s in starts])
+    assert r["language"] == "zh"
+
+
+def test_asr_child_reads_wav_and_writes_json(home, monkeypatch):
+    import sys
+    import types
+    import wave
+    from assetizer.media import asr
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FakeWhisper))
+    wav, out = home / "a.wav", home / "a.wav.asr.json"
+    with wave.open(str(wav), "wb") as f:
+        f.setnchannels(1), f.setsampwidth(2), f.setframerate(asr.SR)
+        f.writeframes(_pcm(5).tobytes())
+    asr.main([str(wav), str(out), "--offset", "2.5", "--language", "zh"])
+    r = json.loads(out.read_text())
+    assert r["segments"] == [{"start": 3.5, "end": 4.5, "text": "涨"}] and r["words"][0]["word"] == "涨"
+
+
+def test_asr_runs_in_a_child_process_and_reports_its_failure(tmp_path, monkeypatch):
+    import sys
+    from assetizer.media import asr
+    from assetizer.providers.agy import LIVE_PGIDS
+    wav = tmp_path / "a.wav"
+    ok = "import json, sys; json.dump({'segments': [], 'words': [], 'language': 'zh'}, open(sys.argv[1], 'w'))"
+    monkeypatch.setattr(asr, "_command", lambda w, out, *a: [sys.executable, "-c", ok, str(out)])
+    assert asr.transcribe(wav) == {"segments": [], "words": [], "language": "zh"}
+    assert not (tmp_path / "a.wav.asr.json").exists() and not LIVE_PGIDS
+    bad = "import sys; print('model file missing', file=sys.stderr); sys.exit(3)"
+    monkeypatch.setattr(asr, "_command", lambda w, out, *a: [sys.executable, "-c", bad])
+    with pytest.raises(RuntimeError, match="exit 3: model file missing"):
+        asr.transcribe(wav)
+    assert not LIVE_PGIDS
