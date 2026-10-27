@@ -1381,3 +1381,38 @@ def test_asr_runs_in_a_child_process_and_reports_its_failure(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match="exit 3: model file missing"):
         asr.transcribe(wav)
     assert not LIVE_PGIDS
+
+
+LONG_LABEL = "unit_18_low_interest_rate_defensive_assets_high_dividend_and_rent"  # 65 chars, 16vTrljdSaE-r4
+
+
+def _skel_unit(label, depends_on=()):
+    return {"label": label, "title": "t", "topic_refs": ["T1"], "focus": "f", "knowledge_type": "CONCEPT",
+            "learning_priority": 2, "tickers": [], "depends_on": list(depends_on), "clip_candidate": False, "why": "w"}
+
+
+def test_fit_labels_shortens_keeps_unique_and_renames_dependencies():
+    import re
+    from assetizer.pipeline.semantic import fit_labels
+    clash = LONG_LABEL[:64]  # what plain truncation would produce
+    o = fit_labels({"units": [_skel_unit(clash), _skel_unit(LONG_LABEL), _skel_unit("unit_01_ok", [LONG_LABEL, clash])],
+                    "uncertainties": []})
+    labels = [u["label"] for u in o["units"]]
+    assert labels[0] == clash and labels[2] == "unit_01_ok"  # labels within the limit stay as they are
+    assert len(labels[1]) <= P.LABEL_MAX and labels[1].endswith("_2") and len(set(labels)) == 3
+    assert all(re.fullmatch(r"[a-z0-9_]{3,64}", x) for x in labels)
+    assert o["units"][2]["depends_on"] == [labels[1], clash]
+    assert fit_labels(["not", "an", "object"]) == ["not", "an", "object"]
+
+
+def test_skeleton_with_an_overlong_label_is_mended_before_validation(tmp_path, monkeypatch):
+    import types
+    from assetizer.llm import LLM
+    from assetizer.pipeline.semantic import fit_labels
+    text = json.dumps({"units": [_skel_unit(LONG_LABEL)], "uncertainties": []})
+    llm = LLM(provider=object())
+    monkeypatch.setattr(llm, "_call", lambda *a, **kw: types.SimpleNamespace(text=text))
+    with pytest.raises(ContractError, match="does not match"):
+        llm.structured(tmp_path / "a", "knowledge-skeleton", "p", P.SKELETON_SCHEMA)
+    o = llm.structured(tmp_path / "b", "knowledge-skeleton", "p", P.SKELETON_SCHEMA, normalize=fit_labels)
+    assert o["units"][0]["label"] == LONG_LABEL[:64]

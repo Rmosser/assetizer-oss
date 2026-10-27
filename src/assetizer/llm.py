@@ -145,8 +145,10 @@ class LLM:
 
     def structured(self, call_root: Path, stage: str, prompt: str, schema: dict, *,
                    media: list[str] | None = None, effort: str | None = None,
-                   check: Callable[[Any], None] | None = None, enforce: bool = False) -> Any:
-        """Return validated JSON. ``check`` may raise ContractError for semantic checks.
+                   check: Callable[[Any], None] | None = None, normalize: Callable[[Any], Any] | None = None,
+                   enforce: bool = False) -> Any:
+        """Return validated JSON. ``check`` may raise ContractError for semantic checks; ``normalize`` may
+        mend a near-miss the stage can fix without the model, before the schema is validated.
 
         ``enforce=True`` uses agy ``--json-schema`` (function-call output). Only for small
         outputs: on a 50-min chunk it burned the output budget on thinking and returned
@@ -170,6 +172,8 @@ class LLM:
 
         def parse(text: str) -> Any:
             o = _strip_extras(extract_json(text, schema.get("required")), schema)
+            if normalize:
+                o = normalize(o)
             validate(o, schema)
             if check:
                 check(o)

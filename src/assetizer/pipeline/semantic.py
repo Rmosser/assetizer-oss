@@ -164,6 +164,31 @@ def _strip(t: dict) -> dict:
 
 
 # ------------------------------------------------------------------ knowledge
+def fit_labels(o: dict) -> dict:
+    """Shorten unit labels past LABEL_MAX, keeping them unique and renaming depends_on to match. The model now
+    and then runs a descriptive label a character over (2026-10-23: a 65-character label failed both attempts
+    of a skeleton, and with it the whole run)."""
+    if not isinstance(o, dict) or not isinstance(o.get("units"), list):
+        return o  # malformed: the schema reports it
+    units = [u for u in o["units"] if isinstance(u, dict) and isinstance(u.get("label"), str)]
+    taken = {u["label"] for u in units if len(u["label"]) <= P.LABEL_MAX}
+    renamed = {}
+    for u in units:
+        old = u["label"]
+        if len(old) <= P.LABEL_MAX:
+            continue
+        new, n = old[:P.LABEL_MAX].rstrip("_"), 1
+        while new in taken:
+            n += 1
+            new = old[:P.LABEL_MAX - len(f"_{n}")].rstrip("_") + f"_{n}"
+        taken.add(new)
+        renamed[old] = u["label"] = new
+    for u in units:
+        if renamed and isinstance(u.get("depends_on"), list):
+            u["depends_on"] = [renamed.get(x, x) for x in u["depends_on"]]
+    return o
+
+
 def knowledge(ctx: RunContext) -> dict:
     merged, by_id = _topic_records(ctx)
     mtopics = {t["id"]: t for t in merged["topics"]}
@@ -179,7 +204,7 @@ def knowledge(ctx: RunContext) -> dict:
             raise ContractError("SCHEMA_VIOLATION", f"unknown topic refs {bad[:5]}")
 
     skel = llm.structured(ctx.calls, "knowledge-skeleton", P.skeleton_prompt(ctx.playbook, skel_input),
-                          P.SKELETON_SCHEMA, check=check_skel)
+                          P.SKELETON_SCHEMA, check=check_skel, normalize=fit_labels)
     units = []
     for u in skel["units"]:
         refs = [mtopics[r] for r in u["topic_refs"]]

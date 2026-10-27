@@ -131,9 +131,11 @@ def facet_schema(playbook: dict) -> dict:
 KNOWLEDGE_TYPES = ["CHART_READING", "TRADING_PRINCIPLE", "TRADE_MANAGEMENT", "RISK_CONTROL", "MARKET_CONTEXT",
                    "TICKER_ANALYSIS", "CONCEPT", "CASE_STUDY", "ARGUMENT", "QA", "GENERAL_CONTEXT", "OTHER"]
 
+LABEL_MAX = 64
+
 SKELETON_SCHEMA = obj({
     "units": arr(obj({
-        "label": {"type": "string", "pattern": r"^[a-z0-9_]{3,64}$"},
+        "label": {"type": "string", "pattern": rf"^[a-z0-9_]{{3,{LABEL_MAX}}}$"},
         "title": STR, "topic_refs": arr(STR, minItems=1), "focus": STR,
         "knowledge_type": {"type": "string", "enum": KNOWLEDGE_TYPES},
         "learning_priority": {"type": "integer", "minimum": 1, "maximum": 3},
