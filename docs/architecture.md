@@ -9,9 +9,9 @@ Assetizer（资产刊）把长期关注的投资 / 金融长视频，按频道�
 | 进程 | 入口 | 职责 |
 |---|---|---|
 | web | `python -m assetizer.cli web` → `src/assetizer/web/app.py`（FastAPI） | 界面与 API；不跑生产流水线，但学习目标的编译（后台线程）和起草在这里调用模型，试跑入队时也直接派发第一条 |
-| worker | `python -m assetizer.cli worker` → `pipeline/runner.py` 的 `Worker` | 生产、交付、试跑派发、自动收录、健康探测、保留期清理、通知 |
+| worker | `python -m assetizer.cli worker` → `pipeline/runner.py` 的 `Worker` | 生产、交付、试跑派发、自动收录、健康探测、保留期清理、调试样片的低清版（`playback.py`）、通知 |
 
-数据目录里：`assetizer.db`（SQLite，WAL）、`runs/<run_id>/`（每次运行的产物与检查点）、`media/`（原始视频与工作文件）、`packages/`（发布素材包，每期一份，按最后一次跑到 PACKAGE 的运行重建）、`compile/`（编译时的模型答复）、`secrets/`（凭据文件，见下）、`run/`（worker 心跳与正常退出标记）。
+数据目录里：`assetizer.db`（SQLite，WAL）、`runs/<run_id>/`（每次运行的产物与检查点）、`media/`（原始视频与工作文件）、`playback/`（调试样片的 360p 低清版，供频道页原片栏播放，滚动释放）、`packages/`（发布素材包，每期一份，按最后一次跑到 PACKAGE 的运行重建）、`compile/`（编译时的模型答复）、`secrets/`（凭据文件，见下）、`run/`（worker 心跳与正常退出标记）。
 
 凭据只从环境变量 `ASSETIZER_<NAME>` 或 `secrets/<name>` 读取（`config.secret`）：`notion-token`、CookieCloud、Telegram 等。仓库里不放任何凭据。
 

@@ -11,13 +11,14 @@ class MediaError(RuntimeError):
     pass
 
 
-def run(args: list[str], **kw) -> subprocess.CompletedProcess:
+def run(args: list[str], nice: int = 0, **kw) -> subprocess.CompletedProcess:
     """Run ffmpeg; the last arg is the output, written to a temp name and renamed on success
-    so a killed encode never leaves a truncated file that later stages would reuse."""
+    so a killed encode never leaves a truncated file that later stages would reuse. `nice` > 0 runs it at
+    lower CPU priority (background work that must not slow production)."""
     out = Path(args[-1])
     tmp = out.with_name(f".{out.stem}.part{out.suffix}")
-    r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y", *args[:-1], str(tmp)],
-                       capture_output=True, text=True, **kw)
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y", *args[:-1], str(tmp)]
+    r = subprocess.run(["nice", "-n", str(nice), *cmd] if nice else cmd, capture_output=True, text=True, **kw)
     if r.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise MediaError(r.stderr[-2000:])
@@ -51,6 +52,18 @@ def render_clip(src: Path, start: float, end: float, out: Path, crf: int = 22) -
          "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
          "-profile:v", "high", "-g", "60",
          "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart", str(out)])
+    return out
+
+
+def playback_copy(src: Path, out: Path, height: int = 360) -> Path:
+    """The whole video, small enough to keep for in-page playback: 360p, 25 fps, mono AAC, index first so the
+    browser can start and seek before it has the file. It runs beside production, so at low priority and on two
+    decode and two encode threads: on devbox (2026-10-27) a 28.8-minute 1080p original took 4.2 minutes at
+    2.8 cores and came out 41.5 MB (1.44 MB a minute); with only the encoder capped it took 2.7 minutes but 6.7 cores."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    run(["-threads", "2", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?", "-vf", f"scale=-2:{height}", "-filter_threads", "1",
+         "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p", "-profile:v", "main", "-g", "100",
+         "-threads", "2", "-c:a", "aac", "-b:a", "64k", "-ac", "1", "-movflags", "+faststart", str(out)], nice=10)
     return out
 
 

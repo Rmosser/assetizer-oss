@@ -1219,7 +1219,7 @@ def test_an_agy_update_that_breaks_media_reads_pauses_production_until_the_self_
     db.set_setting("agy_media_version", "1.4.5")
     w = runner.Worker()
     t = time.monotonic()
-    w.last.update(retry=t, retention=t, ingest=t, probe=t, health=t)  # only the media check is due
+    w.last.update(retry=t, retention=t, ingest=t, probe=t, health=t, playback=t)  # only the media check is due
     w.housekeeping()
     assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
     body = db.one("SELECT body FROM alerts WHERE key='AGY_MEDIA_READ' AND resolved_at IS NULL")["body"]
@@ -2578,3 +2578,112 @@ def test_stage_providers_send_text_stages_to_another_provider(home, monkeypatch)
     assert [n for _, n in asked] == ["magpie", "magpie", "agy"]
     assert [type(p).__name__ for p in providers.in_use()] == ["AgyProvider", "MagpieProvider"]
     assert providers.stage_key("selection:repair") == "selection"
+
+
+# ---------------------------------------------------------------- 原片栏的低清版 (playback.py)
+def _playback_fixture(home, monkeypatch, sizes=None):
+    """Channel w in tuning with samples a, b; channel tom locked with sample c; d is no sample. All originals cached.
+    The encode is faked: it writes `sizes[sid]` bytes (default 1000)."""
+    from assetizer import db, playback
+    from assetizer.media import ffmpeg
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, mode, stage, created_at, updated_at) VALUES ('w','王','TRACKED','TUNING',?,?), ('tom','汤姆','TRACKED','LOCKED',?,?)", t, t, t, t)
+    for sid, ch in (("a", "w"), ("b", "w"), ("c", "tom"), ("d", None)):
+        src = home / "media" / sid / "src.mkv"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"x")
+        db.exec("INSERT INTO sources(id, channel_id, media_path, media_state, created_at, updated_at) VALUES (?,?,?,'CACHED',?,?)", sid, ch, str(src), t, t)
+        if ch:
+            db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES (?,?,?)", ch, sid, t)
+    made = []
+
+    def fake(src, out, height=360):
+        made.append(out.stem)
+        out.write_bytes(b"v" * (sizes or {}).get(out.stem, 1000))
+        return out
+    monkeypatch.setattr(ffmpeg, "playback_copy", fake)
+    monkeypatch.setattr(playback, "_failed", {})
+    monkeypatch.setattr(playback, "_capped", {})
+    monkeypatch.setattr(playback, "MIN_FREE", 0)
+    return made
+
+
+def _playback_drain():
+    import time
+    from assetizer import playback
+    for _ in range(200):
+        if not playback._busy.locked():
+            return
+        time.sleep(0.01)
+    raise AssertionError("encode still running")
+
+
+def test_playback_copies_only_tuning_samples_and_goes_when_written(home, monkeypatch):
+    from assetizer import db, playback
+    made = _playback_fixture(home, monkeypatch)
+    monkeypatch.setattr(playback, "MIN_FREE", float("inf"))
+    assert not playback.tick() and not made  # a full disk is left to production
+    monkeypatch.setattr(playback, "MIN_FREE", 0)
+    while playback.tick():
+        _playback_drain()
+    assert sorted(made) == ["a", "b"]  # a locked channel's sample (c) and a non-sample (d) never get one
+    assert playback.ready("a") and playback.ready("b") and not playback.ready("c")
+    # an original already purged: nothing to make the copy from, the page falls back to the YouTube embed
+    db.exec("DELETE FROM samples WHERE source_id='b'")
+    playback.sweep()
+    assert not playback.ready("b")  # removed from the samples
+    db.exec("UPDATE channels SET stage='LOCKED' WHERE id='w'")
+    playback.sweep()
+    assert not playback.ready("a")  # locked: its samples were written to Notion
+    db.exec("UPDATE channels SET stage='TUNING' WHERE id='w'")
+    db.exec("UPDATE sources SET media_state='PURGED' WHERE id='a'")
+    assert not playback.tick() and not playback.ready("a")
+
+
+def test_playback_rolls_off_idle_copies_and_keeps_under_the_cap(home, monkeypatch):
+    import os
+    import time
+    from assetizer import db, playback
+    made = _playback_fixture(home, monkeypatch, sizes={"a": 600, "b": 600})
+    old = time.time() - (playback.KEEP_DAYS + 1) * 86400
+    db.exec("UPDATE samples SET added_at=? WHERE source_id='a'", "2026-01-01T00:00:00+00:00")
+    while playback.tick():
+        _playback_drain()
+    os.utime(playback.path("a"), (old, old))
+    playback.sweep()
+    assert not playback.ready("a") and playback.ready("b")  # a: no activity for KEEP_DAYS
+    # over the cap the least recently active goes first, and is not made again only to push out a newer one
+    db.set_setting("playback_max_gb", 1e-6)  # 1000 bytes: room for one copy
+    db.exec("UPDATE samples SET added_at=? WHERE source_id='a'", "2099-01-01T00:00:00+00:00")  # a is now the most recent
+    made.clear()
+    assert playback.tick()
+    _playback_drain()
+    assert made == ["a"] and playback.ready("a") and not playback.ready("b")
+    assert not playback.tick() and made == ["a"]  # b, pushed out by the cap, is not made again only to go again
+    db.exec("UPDATE samples SET added_at=? WHERE source_id='b'", "2099-06-01T00:00:00+00:00")  # tried again: newest
+    assert playback.tick()
+    _playback_drain()
+    assert made == ["a", "b"] and playback.ready("b") and not playback.ready("a")
+
+
+def test_playback_streams_with_ranges_and_marks_activity(home, monkeypatch):
+    import os
+    import time
+    from fastapi.testclient import TestClient
+    from assetizer import playback
+    from assetizer.web import app as web
+    _playback_fixture(home, monkeypatch, sizes={"a": 5000})
+    while playback.tick():
+        _playback_drain()
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    assert c.get("/api/sources/a", headers=h).json()["playback"] is True
+    assert c.get("/api/sources/c", headers=h).json()["playback"] is False
+    old = time.time() - 7200
+    os.utime(playback.path("a"), (old, old))
+    r = c.get("/api/sources/a/playback", headers={**h, "range": "bytes=0-99"})
+    assert r.status_code == 206 and len(r.content) == 100 and r.headers["content-type"] == "video/mp4"
+    assert playback.path("a").stat().st_mtime > old + 3600  # played: counts as activity
+    assert c.get("/api/sources/c/playback", headers=h).status_code == 404
+    assert c.get("/api/sources/..%2Fx/playback", headers=h).status_code == 404

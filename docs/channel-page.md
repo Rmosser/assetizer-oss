@@ -75,6 +75,7 @@
 - **只读、带缓存**：库结构和关联页标题缓存 60 秒（`preview.cached`），预览请求不写 Notion。换库时清掉缓存；在 Notion 里改了库结构，最多 60 秒后反映到预览。
 - **未保存的改动也算**：卡片贰、叁、肆的编辑形成 draft，前端防抖 300 ms 后连同 draft 请求 `POST /api/channels/{cid}/notion/preview`（`preview.draft_config` 合并到已保存配置上）。有改动时底部浮出保存条，关闭或刷新页面时提醒；保存条在时，提示条浮在它上方，不压住「放弃 / 保存」。
 - **问题项**：属性类型变了、选项不存在、属性被删时，预览返回 `problems`；卡片叁在该行标朱红，交付暂停时自动展开它。报错文案在行内去掉已显示的属性名（`brief()`）。
+- **视频可播**：视频块点了才播交付要上传的那个片段文件（`/media/{asset_id}`），YouTube 内嵌块点了才加载内嵌播放器；同一页同时只播一个视频。
 - **换库**：卡片叁「换库」用 `GET /api/notion/databases` 列出 integration 能访问的数据库，`POST /api/channels/{cid}/notion/target` 切换。映射按属性名迁移，固定关联要重选，同时记下是否测试副本。列表里看不到某个库，说明它没有被加到这个 integration 的 Connections 里。
 
 ## 5. 点亮与连线
@@ -87,7 +88,14 @@
 - 实现见 `components/channel/lit.ts`：事件委托找到悬停元素的键，然后**注入一条 CSS 规则**（`[data-k~="键"]` 加上 `lt-bg` / `lt-ring` / `lt-seg` 的高亮样式），而不是重渲染。Notion 预览可能有上千个块，靠 React 状态逐个改会卡。
 - 连线（`Wires.tsx`）只画 `f:`、`tok:`、`p:` 三类，路线走栏与栏之间的空隙，不横穿面板；只连视口内可见的元素；窗口窄于 1100px 不画。滚动和缩放时用 `requestAnimationFrame` 重算。连线以点亮的键为 React key：从一个事实直接移到下一个会重新描线，滚动重算只移动现有的线。
 - 卡片肆里带点亮样式的是选中的模板和页面大标题，悬停 Notion 预览里来自模板的块会点亮它们，反过来也一样。
-- 点单元或轨道，Notion 预览滚到对应章节（`c:` 键）。
+- 点单元或轨道，Notion 预览滚到对应章节（`c:` 键）；原片正在播放时同时跳到单元起点。
+
+### 原片播放
+
+- 原片栏的播放器点了才加载：调试中的样片有 360p 低清版时播它（`/api/sources/{sid}/playback`，会员视频也能看），否则用 YouTube 内嵌（youtube-nocookie）；两样都没有时退回「在 YouTube 打开」。没有海报时播放按钮在左下角，避开标题卡。
+- 低清版由 worker 从缓存的原片转码（`playback.py`），只给调试中频道的样片生成：定稿（样片写入 Notion）或移出样片就删；14 天没有加入、试跑或播放也删；总量超过设置 `playback_max_gb`（默认 5）时从最久没动静的删起，删掉的不会为了挤掉更新的而重做。原片已清理的样片不生成。
+- 2026-10-27 在 devbox 实测：28.8 分钟的 1080p 原片转 360p 用 4.2 分钟、平均 2.8 核，得到 41.5 MB（约 1.44 MB/分钟）。
+- YouTube 内嵌要求请求带来源页（Referer），否则报 Error 153；iframe 用 `strict-origin-when-cross-origin`，页面不要设更严的来源页策略。
 
 ## 6. 布局与断点
 
@@ -118,7 +126,7 @@
 | `web/src/pages/Channel.tsx` | 页面装配：数据加载、选中的格、draft、对比、布局分支、动作 |
 | `components/channel/Header.tsx` | 页头、频道切换菜单（`Switcher`）、状态、定稿 / 回到调试期 |
 | `components/channel/Matrix.tsx` | 桌面矩阵（`Grid`）、手机条带（`Strip`）、`RunPending`、`runFor` / `done` |
-| `components/channel/SourcePane.tsx` | 原片复刻：海报、单元轨道（含对比）、字段、单元列表与章节号 |
+| `components/channel/SourcePane.tsx` | 原片复刻：播放器（低清版或 YouTube 内嵌）、单元轨道（含对比）、字段、单元列表与章节号 |
 | `components/channel/Cards.tsx` | 五张卡：学习目标、Notion 标题、属性（含 `PagePicker`）、页面结构、收录 |
 | `components/channel/NotionPane.tsx` | Notion 复刻：路径、标题分段、属性、正文块、对比条 |
 | `components/channel/Manuscript.tsx` | 稿纸与规则视图、差异、编辑与保存编译、重新编译 |
@@ -137,7 +145,7 @@
 
 ## 9. 页面用到的接口
 
-`/api/channels`（频道列表与状态）、`POST /api/channels/{cid}`（改名、学习原因）、`/api/overview`（告警灯）、`/api/channels/{cid}/workbench`、`/api/channels/{cid}/candidates`、`/api/channels/{cid}/samples/{sid}/remove`、`/api/channels/{cid}/trial-queue/clear`、`/api/runs/{rid}/retry`、`/api/channels/draft`、`/api/channels/track`、`/api/channels/{cid}/recent`、`/api/sources/{sid}?run=`、`/api/compare`、`/api/channels/{cid}/notion`（读 / 存）、`/api/channels/{cid}/notion/preview`、`/api/channels/{cid}/notion/target`、`/api/notion/databases`、`/api/notion/pages`、`/api/playbooks/{pid}/annotations`、`/api/playbooks/{pid}/recompile`、`/api/channels/{cid}/lock-preview`、`/api/channels/{cid}/lock`、`/api/channels/{cid}/retune`、`/api/channels/{cid}/trial`、`/api/channels/{cid}/samples`、`/api/channels/{cid}/ingest`、`/api/channels/{cid}/prompt`、`/api/sources/{sid}/adopt`。
+`/api/channels`（频道列表与状态）、`POST /api/channels/{cid}`（改名、学习原因）、`/api/overview`（告警灯）、`/api/channels/{cid}/workbench`、`/api/channels/{cid}/candidates`、`/api/channels/{cid}/samples/{sid}/remove`、`/api/channels/{cid}/trial-queue/clear`、`/api/runs/{rid}/retry`、`/api/channels/draft`、`/api/channels/track`、`/api/channels/{cid}/recent`、`/api/sources/{sid}?run=`、`/api/sources/{sid}/playback`、`/api/compare`、`/api/channels/{cid}/notion`（读 / 存）、`/api/channels/{cid}/notion/preview`、`/api/channels/{cid}/notion/target`、`/api/notion/databases`、`/api/notion/pages`、`/api/playbooks/{pid}/annotations`、`/api/playbooks/{pid}/recompile`、`/api/channels/{cid}/lock-preview`、`/api/channels/{cid}/lock`、`/api/channels/{cid}/retune`、`/api/channels/{cid}/trial`、`/api/channels/{cid}/samples`、`/api/channels/{cid}/ingest`、`/api/channels/{cid}/prompt`、`/api/sources/{sid}/adopt`。
 
 旧链接 `/channels/{cid}/<旧标签>` 会跳到新页面：`prompt` 跳稿纸，`playbook` 跳规则视图，其余回到主视图；页面位置写在地址里（`?sample=&run=&view=manuscript|rules&pb=`），刷新和分享都能回到同一处。
 

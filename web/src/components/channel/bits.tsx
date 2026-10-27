@@ -129,6 +129,19 @@ export function Track({ units, flags, dur, keyOf, mark, onPick, tall }: {
   );
 }
 
+/** The YouTube video id in a watch, youtu.be, embed, shorts or live link. */
+export function ytId(url?: string | null): string | null {
+  const m = /(?:youtu\.be\/|[?&]v=|\/(?:embed|shorts|live)\/)([\w-]{11})/.exec(url || "");
+  return m ? m[1] : null;
+}
+/** A privacy-enhanced YouTube embed that starts playing; enablejsapi lets the page seek it with postMessage.
+ *  YouTube refuses an embed whose request carries no Referer (Error 153), so its <iframe> keeps the default policy. */
+export const ytEmbed = (id: string) =>
+  `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&playsinline=1&rel=0&enablejsapi=1&origin=${encodeURIComponent(location.origin)}`;
+/** onPlay for a <video>: one plays at a time on the page. */
+export const solo = (e: React.SyntheticEvent<HTMLVideoElement>) =>
+  document.querySelectorAll("video").forEach((v) => { if (v !== e.currentTarget) v.pause(); });
+
 export function Toast({ text, seal, leaving }: { text: string; seal?: boolean; leaving?: boolean }) {
   return <div className={`ch-toast${leaving ? " leaving" : ""}`} role="status">{seal && <span className="zs" aria-hidden>定</span>}<span>{text}</span></div>;
 }

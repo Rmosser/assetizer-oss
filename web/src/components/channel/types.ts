@@ -69,6 +69,7 @@ export type SourceDetail = {
   source: { id: string; title: string | null; url: string | null; duration: number | null; published_at: string | null; channel_title: string | null; info: any; notion_url?: string | null };
   run: { id: string } | null; units: Unit[]; assets: { id: number; unit_id: string | null; kind: string; status: string; start: number | null }[];
   sections: { id: string; kind: string; unit_ids: string[] }[]; flags: any[];
+  playback?: boolean;  // a 360p copy kept for tuning (playback.py)
 };
 export type Compare = {
   a_units: (Unit & { change: string })[]; b_units: (Unit & { change: string })[];

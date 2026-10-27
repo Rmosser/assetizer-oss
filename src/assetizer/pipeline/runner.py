@@ -451,7 +451,7 @@ class Worker:
         self.poll = poll
         self.stop = False
         self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
-                     "memory": 0.0, "digest": 0.0}
+                     "memory": 0.0, "digest": 0.0, "playback": 0.0}
         self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it
         self.finished: dict[str, str] = {}             # run id → final state, until reap() picks it up
 
@@ -529,6 +529,13 @@ class Worker:
         if t - self.last["retention"] > 3600:
             self.last["retention"] = t
             retention()
+        if t - self.last["playback"] > 60:
+            self.last["playback"] = t
+            from .. import playback
+            try:
+                playback.tick()  # 原片栏的低清版: release what tuning no longer needs, make the next one
+            except Exception as e:  # noqa: BLE001
+                db.event("worker", f"原片低清版异常：{e}", level="warn")
         from ..ingest import EVERY as INGEST_EVERY
         if t - self.last["ingest"] > INGEST_EVERY:
             self.last["ingest"] = t

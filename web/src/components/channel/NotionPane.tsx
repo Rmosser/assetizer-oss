@@ -1,7 +1,7 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { media } from "../../api";
 import { linkProps } from "../../router";
-import { Adopt, fmt, Icon, TYPE_ICON } from "./bits";
+import { Adopt, fmt, Icon, solo, TYPE_ICON, ytEmbed, ytId } from "./bits";
 import { keys } from "./lit";
 import type { Block, Compare, Part, Preview, PropRow, Seg } from "./types";
 
@@ -50,6 +50,36 @@ function Value({ r }: { r: PropRow }) {
   return <span className="txt">{String(v)}</span>;
 }
 
+/** A clip on the page: the file delivery uploads, loaded only when played. */
+function Clip({ b }: { b: Block }) {
+  const [on, setOn] = useState(false);
+  const tc = b.caption?.split(" · ")[0];
+  return (
+    <figure className="b-vid-f">
+      {on && b.asset_id ? <div className="b-vid on"><video src={media(b.asset_id)} controls autoPlay playsInline onPlay={solo} /></div> : (
+        <button className="b-vid dark" disabled={!b.asset_id} onClick={() => setOn(true)} aria-label={tc ? `播放 ${tc}` : "播放"}>
+          <span className="pl0"><span className="pb"><Icon name="play" size={18} fill /></span>{tc && <b className="tc">{tc}</b>}</span>
+        </button>
+      )}
+      {b.caption && <figcaption>{b.caption}</figcaption>}
+    </figure>
+  );
+}
+
+/** An embedded YouTube video: the player loads only when played. */
+function Embed({ url }: { url?: string }) {
+  const [on, setOn] = useState(false);
+  const id = ytId(url);
+  if (on && id) {
+    return <div className="b-vid on"><iframe src={ytEmbed(id)} title="YouTube" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" /></div>;
+  }
+  return (
+    <button className="b-vid dark" disabled={!id} onClick={() => setOn(true)} aria-label="播放 YouTube">
+      <span className="pl0"><span className="pb"><Icon name="play" size={18} fill /></span><b className="tc">YouTube</b></span>
+    </button>
+  );
+}
+
 function BlockView({ b, k, tag, heading, fieldOf }: { b: Block; k?: string; tag?: string; heading?: Part[]; fieldOf: (v: string) => string | null }) {
   const t = b.type;
   const body = (() => {
@@ -74,15 +104,12 @@ function BlockView({ b, k, tag, heading, fieldOf }: { b: Block; k?: string; tag?
         <tr key={ri}>{row.map((cell, ci) => (b.header && ri === 0 ? <th key={ci}><Rich segs={cell} /></th> : <td key={ci}><Rich segs={cell} /></td>))}</tr>
       ))}</tbody></table>
     );
-    if (t === "embed") return <div className="b-vid dark"><span className="pl0"><span className="pb"><Icon name="play" size={18} fill /></span><b className="tc">YouTube</b></span></div>;
+    if (t === "embed") return <Embed key={b.url} url={b.url} />;  // another video: back to the poster, not autoplaying it
     if (t === "image") return (
       <figure className="b-img">{b.asset_id ? <img src={media(b.asset_id, 640)} alt={b.caption || ""} loading="lazy" /> : <span className="ph">截图</span>}
         {b.caption && <figcaption>{b.caption}</figcaption>}</figure>
     );
-    if (t === "video") return (
-      <figure className="b-vid-f"><div className="b-vid dark"><span className="pl0"><span className="pb"><Icon name="play" size={18} fill /></span>{b.caption && <b className="tc">{b.caption.split(" · ")[0]}</b>}</span></div>
-        {b.caption && <figcaption>{b.caption}</figcaption>}</figure>
-    );
+    if (t === "video") return <Clip key={b.asset_id ?? ""} b={b} />;
     return <div className="b-p"><Rich segs={b.text} /></div>;
   })();
   return <div className={`blk lt-bg${b.tpl ? " tpl" : ""}`} data-k={k} data-side={k ? "dst" : undefined}>{body}</div>;

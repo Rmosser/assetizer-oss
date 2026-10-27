@@ -20,7 +20,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import config, db
+from .. import config, db, playback
 from ..util import now
 
 app = FastAPI(title="Assetizer", docs_url="/api/docs")
@@ -251,7 +251,18 @@ def source(sid: str, run: str | None = None):
         "runs": db.q("SELECT id, kind, production, created_at, finished_at FROM runs WHERE source_id=? AND kind!='EXPERIMENT' ORDER BY created_at DESC", sid),
         "channel": db.one("SELECT id, name, mode, stage FROM channels WHERE id=?", s.get("channel_id")),
         "no": db.one("SELECT COUNT(*) n FROM sources WHERE created_at <= ?", s["created_at"])["n"],
+        "playback": playback.ready(sid),
     }
+
+
+@app.get("/api/sources/{sid}/playback")
+def playback_file(sid: str):
+    """原片栏的低清版 (playback.py): the whole video at 360p, streamed with range requests."""
+    p = playback.path(sid)
+    if not p or not p.exists():
+        raise HTTPException(404)
+    playback.touch(p)
+    return FileResponse(p, media_type="video/mp4", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/api/sources/{sid}/words")

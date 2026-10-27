@@ -55,7 +55,7 @@ Assetizer 以懒猫 LPK 运行（包名 `cloud.lazycat.app.assetizer`，版本�
 lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <命令>
 ```
 
-常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`。
+常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（例如 `set worker_slots 2`；`set playback_max_gb 5` 是原片低清版的总量上限）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`。
 
 队列由 worker 自动暂停和恢复（例如模型登录失效、读不了视频），不要手动设置 `queue_paused`；需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」，它们还会把等待中的运行重新排队、解除对应告警。
 
