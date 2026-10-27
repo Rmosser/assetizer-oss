@@ -27,7 +27,7 @@ from . import config, db
 from .notion import blocks as B
 from .notion import mapping as M
 from .notion.client import Notion, NotionError
-from .util import fmt_tc, now, read_json
+from .util import fmt_tc, now
 
 DB_PROPS = {
     "名称": {"title": {}},
@@ -98,12 +98,12 @@ def build_plan(source: dict, run_id: str, target: dict | None = None) -> list[di
 
 
 def _default_plan(source: dict, run_id: str) -> list[dict]:
-    comp = read_json(config.get().runs_dir / run_id / "composition.json")
+    from .templates import composition
     plan: list[dict] = []
     head = (f"来源：{source.get('channel_title') or ''} · {source.get('url') or ''} · 时长 {fmt_tc(source.get('duration') or 0)}。"
             "观点归原作者；本文由 Assetizer 自动整理，截图与解释性内容未经逐项事实审计。")
     plan.append({"key": "head", "block": B.callout(head, "🧭")})
-    for bi, blk in enumerate(comp["blocks"]):
+    for bi, blk in enumerate(composition(run_id)):
         k = blk["section_id"]
         if blk.get("video"):
             v = blk["video"]

@@ -30,8 +30,16 @@ def _cn(n: int) -> str:
     return CN[n // 10] + "十" + (CN[n % 10] if n % 10 else "")
 
 
-def _comp(run_id: str) -> list[dict]:
-    return read_json(config.get().runs_dir / run_id / "composition.json")["blocks"]
+def composition(run_id: str) -> list[dict]:
+    """The run's composition blocks, each clip and screenshot at the path the assets table has for it now:
+    composition.json keeps absolute paths from the machine the run was made on (runs made on OVH say /home/debian/…)."""
+    blocks = read_json(config.get().runs_dir / run_id / "composition.json")["blocks"]
+    media = [m for b in blocks for m in ([b["video"]] if b.get("video") else []) + (b.get("screenshots") or [])]
+    ids = [m["asset_id"] for m in media if m.get("asset_id")]
+    paths = {r["id"]: r["path"] for r in db.q(f"SELECT id, path FROM assets WHERE id IN ({','.join('?' * len(ids))})", *ids)} if ids else {}
+    for m in media:
+        m["path"] = paths.get(m.get("asset_id")) or m["path"]
+    return blocks
 
 
 def _split(md: str) -> tuple[str | None, str]:
@@ -73,7 +81,7 @@ def _ctx(source: dict, run_id: str) -> dict:
 # ------------------------------------------------------------------ reading guide
 def reading_guide(source: dict, run_id: str, target: dict) -> list[dict]:
     ctx = _ctx(source, run_id)
-    blocks = _comp(run_id)
+    blocks = composition(run_id)
     plan: list[dict] = [{"key": "src", "block": B.block("paragraph", f"**来源链接**：[{ctx['url']}]({ctx['url']})")}]
     heading = re.sub(r"\{(\w+)\}", lambda x: str(ctx.get(x[1], "")), target.get("heading") or "").strip()
     if heading:
@@ -140,7 +148,7 @@ def _priority_rows(run_id: str, limit: int = 8) -> list[list[str]]:
 # ------------------------------------------------------------------ chapters
 def chapters(source: dict, run_id: str, target: dict) -> list[dict]:
     ctx = _ctx(source, run_id)
-    blocks = _comp(run_id)
+    blocks = composition(run_id)
     segs = _segments(run_id)
     plan: list[dict] = [{"key": "embed", "block": {"object": "block", "type": "embed", "embed": {"url": ctx["url"]}}},
                         {"key": "div0", "block": B.divider()}]

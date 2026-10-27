@@ -2005,6 +2005,30 @@ def _lock_fixture():
     return v1, v2, v3
 
 
+def test_media_of_runs_made_elsewhere_resolve_through_the_assets_table(home, monkeypatch):
+    """composition.json keeps the absolute paths of the machine a run was made on (OVH before the move to the box);
+    the page plan and the preview take each clip and screenshot from the assets table instead."""
+    from fastapi.testclient import TestClient
+    from assetizer import config, db, delivery
+    from assetizer import preview as PV
+    from assetizer.notion import mapping as M
+    from assetizer.web import app as web
+    aid = _preview_fixture(home)
+    p = config.get().runs_dir / "r1" / "composition.json"
+    comp = json.loads(p.read_text())
+    comp["blocks"][1]["screenshots"][0].update(path="/home/debian/assetizer/data/runs/r1/shot.jpg", asset_id=aid)
+    p.write_text(json.dumps(comp))
+    shot = str(config.get().runs_dir / "r1" / "shot.jpg")
+    src = db.one("SELECT * FROM sources WHERE id='s1'")
+    for target in ({}, M.get("trader-tom")):  # the default page and the channel's template
+        assert [it["media"]["path"] for it in delivery.build_plan(src, "r1", target) if it.get("media")] == [shot]
+    monkeypatch.setattr(web, "_notion", lambda: FakeNotion())
+    PV.forget()
+    r = TestClient(web.app).post("/api/channels/trader-tom/notion/preview", json={"run_id": "r1", "config": {}},
+                                 headers={"host": "127.0.0.1"}).json()
+    assert next(b for b in r["blocks"] if b["key"] == "sec1:shot0")["asset_id"] == aid
+
+
 def test_lock_preview_says_what_each_sample_would_get(home, monkeypatch):
     from fastapi.testclient import TestClient
     from assetizer import delivery
