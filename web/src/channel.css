@@ -224,7 +224,9 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 
 /* the three columns */
 .ch-studio { position: relative; display: grid; grid-template-columns: minmax(0, 30fr) minmax(0, 31fr) minmax(0, 37fr); gap: 24px; margin-top: 18px; align-items: start; }
-.ch-studio.ms { grid-template-columns: minmax(0, 61fr) minmax(0, 37fr); }
+/* the 稿纸 takes the source and card columns of the same grid: the Notion page does not move, and the sheet's right edge is
+   the card column's, where its 合上稿纸 meets the card's 打开稿纸 */
+.ch-studio > .ch-msh { grid-column: 1 / 3; }
 .ch-pane { display: flex; flex-direction: column; height: calc(100vh - var(--top) - 44px); min-height: 640px; max-height: 1400px; border-radius: 12px;
   box-shadow: var(--shadow); overflow: hidden; border: 1px solid var(--rule); position: sticky; top: calc(var(--top) + 12px); }
 .ch-yt { background: var(--yt-bg); color: var(--yt-ink); }
@@ -387,6 +389,8 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-hl .acts { display: flex; gap: 6px; margin-left: auto; }
 .ch-cfoot { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12.5px; color: var(--ink-3); }
 .ch-cfoot .grow { margin-left: auto; }
+.ch-cardh h3 + .ch-msx { margin-left: auto; }
+.ch-msx { flex: none; }
 .ch-why { width: 100%; border: 1px solid var(--rule-2); border-radius: 10px; background: var(--nt-bg); padding: 10px 12px; font: 15px/1.7 var(--serif); color: var(--ink); resize: vertical; }
 .ch-comp { border: 1px solid var(--rule-2); border-radius: 10px; background: var(--nt-bg); padding: 8px; display: flex; flex-wrap: wrap; gap: 6px; min-height: 46px; align-items: center; width: 100%; text-align: left; }
 .ch-comp.click { cursor: text; }
@@ -473,17 +477,28 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-msh { display: flex; flex-direction: column; height: calc(100vh - var(--top) - 44px); min-height: 640px; max-height: 1400px; background: var(--chp-sheet); border: 1px solid var(--rule);
   border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; position: sticky; top: calc(var(--top) + 12px); }
 .ch-msh.solo { height: auto; min-height: 0; max-height: none; position: static; margin-top: 8px; }
-.ch-msh .msrail { display: flex; align-items: center; gap: 4px; min-height: 48px; padding: 6px 14px; border-bottom: 1px solid var(--rule); background: var(--chp-card); flex: none; flex-wrap: wrap; }
-.ch-msh .vt { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 9px; border-radius: 7px; font: 500 12px var(--mono); color: var(--ink-3); }
-.ch-msh .vt:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink); }
-.ch-msh .vt.on { background: var(--nt-bg); color: var(--ink); box-shadow: 0 0 0 1px var(--rule-2); }
+/* the rail has the 学习目标 card header's measure — 16px above, 28px controls, the card's 4px inset in its column plus its
+   18px padding on the right — so 合上稿纸 lands exactly on 打开稿纸; when the rail wraps, the toggle stays in that corner */
+.ch-msh .msrail { display: flex; align-items: flex-start; gap: 10px; padding: 16px 22px 12px 18px; border-bottom: 1px solid var(--rule); background: var(--chp-card); flex: none; }
+.ch-msh .msvs { position: relative; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.ch-msh .vtm { position: absolute; left: 0; top: 0; height: 28px; border-radius: 7px; background: var(--nt-bg); box-shadow: 0 0 0 1px var(--rule-2); pointer-events: none;
+  transition: transform 0.32s var(--ease), width 0.32s var(--ease); }
+.ch-msh .vt { position: relative; flex: none; display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 9px; border-radius: 7px; font: 500 12px var(--mono);
+  color: var(--ink-3); white-space: nowrap; transition: background 0.15s var(--ease), color 0.15s var(--ease); }
+.ch-msh .vt:not(.on):hover { background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink); }
+.ch-msh .vt.on { color: var(--ink); }
 .ch-msh .vt.dr::after { content: "草稿"; font: 500 10px var(--sans); color: var(--ink-3); }
-.ch-msh .msrail .grow { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ch-msh .msrail .grow { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; min-height: 28px; }
 .ch-msh .compiling { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink-2); }
 .ch-msh .chk { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
 .ch-msh .chk .bx { width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid var(--ink-3); display: grid; place-items: center; color: transparent; }
 .ch-msh .chk .bx.on { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 .chp .msb { flex: 1; overflow: auto; padding: 30px 0 120px; }
+/* another version or view fades in; one that is still loading keeps the last on screen, dimmed if it takes a moment */
+.chp .msb > div { transition: opacity 0.2s var(--ease); }
+.chp .msb.stale > div { opacity: 0.5; transition-delay: 0.12s; }
+.chp .ms-in { animation: ch-msin 0.3s var(--ease); }
+@keyframes ch-msin { from { opacity: 0; transform: translateY(6px); } }
 .chp .ms-edit { padding: 0 30px; height: 100%; }
 .chp .ms-edit textarea { width: 100%; min-height: 70vh; border: 1px solid var(--rule-2); border-radius: 10px; background: var(--nt-bg); color: var(--ink); padding: 16px 18px; font: 15px/1.9 var(--serif); resize: vertical; }
 .chp .ms-empty { padding: 30px 64px; color: var(--ink-3); display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
@@ -497,8 +512,15 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .chp .mst.li { padding-left: 24px; }
 .chp .mst b { font-weight: 700; }
 .chp .mst .blank { display: block; height: 6px; }
-.chp .mst.ins { box-shadow: inset 2px 0 0 var(--ink); border-radius: 0 6px 6px 0; text-decoration: underline; text-decoration-color: var(--ink-3); text-underline-offset: 5px; text-decoration-thickness: 1px; }
+.chp .mst.ins { box-shadow: inset 2px 0 0 var(--ink); border-radius: 0 6px 6px 0; text-decoration: underline; text-decoration-color: var(--ink-3); text-underline-offset: 5px; text-decoration-thickness: 1px;
+  transition: background 0.15s var(--ease), box-shadow 0.3s var(--ease), text-decoration-color 0.3s var(--ease); }
 .chp .mst.del { color: var(--ink-4); text-decoration: line-through; text-decoration-color: var(--ink-3); }
+/* turning the diff off folds the old lines away (grid rows 1fr ↔ 0fr, as in <Fold>) and lets the new lines' marks fade */
+.chp .msr.dl { grid-template-rows: 1fr; transition: grid-template-rows 0.3s var(--ease), margin-top 0.3s var(--ease); }
+.chp .msr.dl > * { min-height: 0; overflow: hidden; padding-block: 0; }
+.chp .nd .msr.dl { grid-template-rows: 0fr; margin-top: 0; visibility: hidden;
+  transition: grid-template-rows 0.3s ease-in-out, margin-top 0.3s ease-in-out, visibility 0s 0.3s; }
+.chp .nd .mst.ins { box-shadow: inset 0 0 0 var(--ink); text-decoration-color: transparent; }
 .chp .mst.cf { background: var(--zhu-wash); }
 .chp .mm { border-left: 2px solid transparent; padding: 2px 0 2px 14px; font-size: 12px; color: var(--ink-3); display: flex; flex-direction: column; gap: 3px; justify-content: flex-start; }
 .chp .mm.on { border-left-color: var(--ink-4); }
@@ -545,6 +567,52 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-wires .d { fill: var(--ink-2); }
 @keyframes ch-draw { from { stroke-dashoffset: 1600; } to { stroke-dashoffset: 0; } }
 
+/* 稿纸开合 (Channel.tsx morph, one view transition): the 学习目标 card grows into the sheet across the source pane and
+   folds back into it. The card and the sheet share a corner — top right on wide screens, top left below 1400px — and both
+   snapshots stay pinned to it at their own size, so the toggle there holds still and the sheet is revealed from it instead
+   of stretched. The source pane and the other cards step back underneath; the masthead, the save bar and the toast stay on
+   top. A goal card scrolled partly out of its column (.ch-vt-col) would be drawn whole, so then the column grows instead. */
+.ch-vt .ch-goal, .ch-vt .ch-studio > .ch-msh { view-transition-name: ch-goal; }
+.ch-vt .ch-studio > .ch-cards { view-transition-name: ch-cards; }
+.ch-vt .ch-studio > .ch-yt { view-transition-name: ch-src; }
+.ch-vt.ch-vt-col .ch-studio > .ch-cards { view-transition-name: ch-goal; }
+.ch-vt.ch-vt-col .ch-goal { view-transition-name: none; }
+.ch-vt .masthead { view-transition-name: ch-mast; }
+.ch-vt .ch-dock { view-transition-name: ch-dock; }
+.ch-vt .ch-toast { view-transition-name: ch-toast; }
+/* the rest of the page holds still: a plain crossfade instead of the page turn (styles.css 翻开), which is for moving between
+   pages. Replacing the default animation drops the plus-lighter blend the browser sets with it, without which an unchanged
+   pixel greys halfway through, so it is set again for every pair. */
+.ch-vt::view-transition-old(root) { animation: ch-vt-out 0.26s linear both; }
+.ch-vt::view-transition-new(root) { animation: ch-vt-in 0.26s linear both; }
+.ch-vt::view-transition-old(root), .ch-vt::view-transition-new(root), ::view-transition-old(ch-goal), ::view-transition-new(ch-goal) { mix-blend-mode: plus-lighter; }
+::view-transition-group(ch-src), ::view-transition-group(ch-cards) { z-index: 1; }
+::view-transition-group(ch-goal) { z-index: 2; border-radius: 14px; overflow: clip; background: var(--chp-sheet); box-shadow: 0 0 0 1px var(--rule), var(--shadow);
+  animation-duration: 0.44s; animation-timing-function: cubic-bezier(0.2, 0, 0, 1); }
+::view-transition-group(ch-mast) { z-index: 3; animation: none; }
+::view-transition-group(ch-dock), ::view-transition-group(ch-toast) { z-index: 4; }
+::view-transition-old(ch-goal), ::view-transition-new(ch-goal) { height: 100%; object-fit: none; object-position: right top; }
+::view-transition-old(ch-goal) { animation: ch-vt-out 0.16s linear both; }
+::view-transition-new(ch-goal) { animation: ch-vt-in 0.26s 0.05s linear both; }
+.ch-vt-close::view-transition-group(ch-goal) { animation-duration: 0.38s; }
+.ch-vt-close::view-transition-old(ch-goal) { animation: ch-vt-out 0.2s 0.1s linear both; }
+.ch-vt-close::view-transition-new(ch-goal) { animation: ch-vt-in 0.2s 0.14s linear both; }
+::view-transition-old(ch-src) { animation: ch-vt-back 0.3s cubic-bezier(0.4, 0, 1, 1) both; }
+::view-transition-new(ch-src) { animation: ch-vt-fore 0.34s 0.1s cubic-bezier(0.2, 0, 0, 1) both; }
+::view-transition-old(ch-cards) { animation: ch-vt-sink 0.22s cubic-bezier(0.4, 0, 1, 1) both; }
+::view-transition-new(ch-cards) { animation: ch-vt-rise 0.32s 0.14s cubic-bezier(0.2, 0, 0, 1) both; }
+::view-transition-old(ch-mast) { animation: none; }  /* the masthead does not change: its snapshot stands in for it */
+::view-transition-new(ch-mast) { animation: none; opacity: 0; }
+@keyframes ch-vt-out { to { opacity: 0; } }
+@keyframes ch-vt-in { from { opacity: 0; } }
+@keyframes ch-vt-back { to { opacity: 0; transform: scale(0.98); } }
+@keyframes ch-vt-fore { from { opacity: 0; transform: scale(0.98); } }
+@keyframes ch-vt-sink { to { opacity: 0; transform: translateY(12px); } }
+@keyframes ch-vt-rise { from { opacity: 0; transform: translateY(12px); } }
+@media (max-width: 1399px) {
+  ::view-transition-old(ch-goal), ::view-transition-new(ch-goal) { object-position: left top; }
+}
+
 /* 定稿单 and 换库 (inside the shared Sheet dialog) */
 .sheet:has(.ch-sheet), .sheet:has(.ch-target) { width: min(680px, 94vw); background: var(--chp-card); }
 .ch-sheet, .ch-target { font: 14px/1.55 var(--sans); padding-bottom: 4px; }
@@ -580,8 +648,13 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 /* narrower screens: two columns, then one; phones get the compact layout */
 @media (max-width: 1399px) {
   .ch-studio { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
-  .ch-studio.ms { grid-template-columns: minmax(0, 1fr); }
+  .ch-studio > .ch-msh { grid-column: 1 / -1; }
   .ch-studio.ms .ch-nt { display: none; }
+}
+/* the panes fill the window under the page head: scrolling on past them only slid their headers under the masthead */
+@media (min-width: 861px) {
+  .page.chp-page { padding-bottom: 0; }
+  .chp { padding-bottom: 32px; }
 }
 @media (max-width: 1099px) {
   .ch-tb { overflow-x: auto; }
@@ -652,6 +725,7 @@ button.ch-cardh { width: 100%; text-align: left; margin: 0; }
   .chp .mm { border-left: 0; flex-direction: row; flex-wrap: wrap; padding: 0 10px 8px; }
   .chp .rv { padding: 0 16px; }
   .chp .rvi { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .ch-msh .msrail { padding: 10px 12px; gap: 8px; }
   .ch-ib { flex-wrap: wrap; }
   .ch-ib-o { display: none; }
   .ch-dock input { width: 140px; }

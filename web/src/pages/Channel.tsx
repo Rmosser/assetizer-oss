@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { post } from "../api";
 import { Fault, Stale, Unroll } from "../components/States";
 import { useLeaving, usePoll } from "../hooks";
 import { navigate, usePath } from "../router";
-import { smooth } from "../util";
+import { reduceMotion, smooth } from "../util";
 import { cn, Seg, Toast, useCompact, useNarrow } from "../components/channel/bits";
 import { FIELD_OF_SOURCE, FIELD_OF_VAR, GoalCard, IntakeCard, PropsCard, StructureCard, TitleCard } from "../components/channel/Cards";
 import { activeOf, draftOf, Header, modeOf, Switcher } from "../components/channel/Header";
@@ -42,6 +43,19 @@ function usePreview(cid: string, runId: string | null, draft: Draft | null) {
 }
 
 const label = (r: { label?: string; rule: string }) => r.label || (r.rule.length > 10 ? r.rule.slice(0, 8) + "…" : r.rule);
+
+let morphs = 0;
+/** The 稿纸 opening or closing as one view transition: the 学习目标 card grows into the sheet and folds back into it
+ *  (channel.css, 「稿纸开合」). `cls` stay on <html> while it plays and pick what takes part; `after` runs once the page
+ *  shows the new state, before the browser captures it. Without the API, or under reduced motion, it just happens. */
+function morph(update: () => void, cls: string[], after?: () => void) {
+  if (!("startViewTransition" in document) || reduceMotion()) { update(); after?.(); return; }
+  const root = document.documentElement, n = ++morphs;
+  root.classList.remove("ch-vt-open", "ch-vt-close", "ch-vt-col");
+  root.classList.add("ch-vt", ...cls);
+  document.startViewTransition(() => { flushSync(update); after?.(); }).finished
+    .finally(() => { if (n === morphs) root.classList.remove("ch-vt", ...cls); }).catch(() => {});
+}
 
 /** 通用规程: what a channel without its own playbook is made with. */
 function Universal({ list }: { list: ChannelsResp }) {
@@ -291,13 +305,28 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
   const draftGoal = async (why: string) => {
     await post(`/api/channels/${ch.id}`, { why });
     const r = await post<{ raw_prompt: string }>("/api/channels/draft", { name: ch.name, why, source_id: issues[0]?.id || null });
-    setInitialText(r.raw_prompt); setView("manuscript"); reloadList();
+    sheetOpen(() => { setInitialText(r.raw_prompt); setView("manuscript"); }); reloadList();
   };
   const recompile = async (pbId: number) => {
     await post(`/api/playbooks/${pbId}/recompile`);
     reloadList(); flash("正在按这份学习目标重新编译 · 约 3 分钟后多出一版草稿");
   };
-  const openMs = (v: "manuscript" | "rules", f?: string) => { setMsPb(goalPb?.id ?? null); setFocus(f || null); setView(v); };
+  // the sheet grows out of the 学习目标 card and folds back into it. Afterwards the toggle in their shared corner has the
+  // focus; on a phone, where nothing sits side by side, what took the tapped thing's place is scrolled into view.
+  const settle = (toggle: string, show: string) => {
+    document.querySelector<HTMLElement>(toggle)?.focus({ preventScroll: true });
+    const r = narrow ? document.querySelector(show)?.getBoundingClientRect() : null;
+    if (r && (r.top < 0 || r.top > innerHeight - 80)) document.querySelector(show)?.scrollIntoView({ block: "start" });
+  };
+  const sheetOpen = (go: () => void) => {
+    if (view !== "studio") { go(); return; }
+    // a card scrolled partly out of its column would be drawn whole while it grows: the column grows instead
+    const col = studio.current?.querySelector(".ch-cards"), card = col?.querySelector(".ch-goal");
+    const cut = !!col && !!card && card.getBoundingClientRect().top < col.getBoundingClientRect().top - 1;
+    morph(go, cut ? ["ch-vt-open", "ch-vt-col"] : ["ch-vt-open"], () => settle(".ch-msh .ch-msx", ".ch-studio"));
+  };
+  const openMs = (v: "manuscript" | "rules", f?: string) => sheetOpen(() => { setMsPb(goalPb?.id ?? null); setFocus(f || null); setView(v); });
+  const closeMs = () => morph(() => { setView("studio"); setFocus(null); }, ["ch-vt-close"], () => settle(".ch-goal .ch-msx", ".ch-goal"));
 
   // ------------------------------------------------------------------ what each pane shows
   const version = mode === "tuning" ? (run?.version ? `v${run.version}` : "通用") : activePb ? `v${activePb.version}` : "通用";
@@ -371,7 +400,7 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
           </>
         ) : (
           <Manuscript ch={ch} mode={mode} pbId={msPb ?? goalPb?.id ?? null} setPbId={setMsPb} view={view} setView={setView} focus={focus}
-            onClose={() => { setView("studio"); setFocus(null); }} onRetune={() => retune().catch((e) => flash(e.message))} onSave={savePrompt}
+            seed={annQ.data} onClose={closeMs} onRetune={() => retune().catch((e) => flash(e.message))} onSave={savePrompt}
             onRecompile={recompile} initialText={initialText} />
         )}
         {view !== "studio" || !compact ? notionPane : !narrow ? turn : null}

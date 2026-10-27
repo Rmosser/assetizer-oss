@@ -20,23 +20,25 @@ const SRC: Record<string, string> = {
 const VAR: Record<string, string> = { video_title: "视频原标题", channel: "频道名", date: "发布日期", date8: "发布日期", headline: "本期题眼", url: "视频链接" };
 const ACCESS_KIND: Record<string, string> = { public_video: "视频 · 公开", member_video: "视频 · 会员", public_live: "直播 · 公开", member_live: "直播 · 会员" };
 
-/** A setting card. On a phone it folds to its header and a one-line summary. */
-function Card({ n, title, right, sum, alert, children }: {
-  n: string; title: string; right?: React.ReactNode; sum?: React.ReactNode; alert?: boolean; children: React.ReactNode;
+/** A setting card. On a phone it folds to its header and a one-line summary. `act` ends the header; a phone's header
+ *  is the fold button, so there the card leaves it out and the caller places it in the body. */
+function Card({ n, title, right, sum, alert, act, cls, children }: {
+  n: string; title: string; right?: React.ReactNode; sum?: React.ReactNode; alert?: boolean; act?: React.ReactNode; cls?: string;
+  children: React.ReactNode;
 }) {
   const narrow = useNarrow();
   const [open, setOpen] = useState(false);
   if (!narrow) {
     return (
-      <section className="ch-card">
-        <div className="ch-cardh"><span className="cn">{n}</span><h3>{title}</h3>{right && <span className="r">{right}</span>}</div>
+      <section className={`ch-card${cls ? ` ${cls}` : ""}`}>
+        <div className="ch-cardh"><span className="cn">{n}</span><h3>{title}</h3>{right && <span className="r">{right}</span>}{act}</div>
         {children}
       </section>
     );
   }
   const r = open ? right : sum ?? right;
   return (
-    <section className={`ch-card${open ? "" : " fold"}`}>
+    <section className={`ch-card${open ? "" : " fold"}${cls ? ` ${cls}` : ""}`}>
       <button className="ch-cardh" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span className="cn">{n}</span><h3>{title}</h3>{r && <span className={`r${alert && !open ? " z" : ""}`}>{r}</span>}
         <span className="chv"><Icon name="chev" size={12} /></span>
@@ -54,9 +56,10 @@ export function GoalCard({ mode, ch, pb, ann, newerDraft, onOpen, onRetune, onDr
   const [why, setWhy] = useState(ch.why || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const narrow = useNarrow();
   if (mode === "discovery") {
     return (
-      <Card n="壹" title="学习目标" right="未建立">
+      <Card cls="ch-goal" n="壹" title="学习目标" right="未建立">
         <textarea className="ch-why" rows={3} value={why} onChange={(e) => setWhy(e.target.value)} placeholder="为什么长期看这个频道？" aria-label="为什么长期看这个频道" />
         {err && <p className="ch-err">{err}</p>}
         <div className="ch-cfoot"><span className="grow" />
@@ -75,8 +78,11 @@ export function GoalCard({ mode, ch, pb, ann, newerDraft, onOpen, onRetune, onDr
   const failed = ch.compile?.state === "failed";
   const ruleLabel = (id?: string) => ann?.rules.find((r) => r.id === id)?.label || "";
   const diff = mode === "tuning" ? ann?.vs_previous : null;
+  // the sheet grows out of this card from its top right corner, where 合上稿纸 then sits (design §R3-10)
+  const sheet = <button className="ch-btn sm ch-msx" aria-expanded={false} onClick={() => onOpen("manuscript")}>{mode === "locked" ? "查看稿纸" : "打开稿纸"}</button>;
   return (
-    <Card n="壹" title="学习目标" right={pb ? `v${pb.version} · ${rules} 条规则` : null} alert={!!ann?.conflicts.length || failed}
+    <Card cls="ch-goal" n="壹" title="学习目标" right={pb ? `v${pb.version} · ${rules} 条规则` : null} alert={!!ann?.conflicts.length || failed}
+      act={!narrow && sheet}
       sum={pb ? `v${pb.version}${pb.status === "NEEDS_CONFIRMATION" ? " 草稿" : ""}${ann?.conflicts.length ? ` · ${ann.conflicts.length} 处冲突` : ""}` : null}>
       <div className="ch-hls">
         {compiling && <div className="ch-hl"><b className="htg">编译中</b><span className="tx">新版本 · 约 3 分钟</span><span className="ch-prog" style={{ width: 90 }}><b style={{ width: "40%" }} /></span></div>}
@@ -103,8 +109,7 @@ export function GoalCard({ mode, ch, pb, ann, newerDraft, onOpen, onRetune, onDr
       </div>
       <div className="ch-cfoot">
         <button className="ch-lk" onClick={() => onOpen("rules")}>全部 {rules} 条</button>
-        <span className="grow" />
-        <button className="ch-btn sm" onClick={() => onOpen("manuscript")}>{mode === "locked" ? "查看稿纸" : "打开稿纸"}</button>
+        {narrow && <><span className="grow" />{sheet}</>}
       </div>
     </Card>
   );
