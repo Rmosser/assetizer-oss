@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { post } from "./api";
-import { usePoll } from "./hooks";
+import { useLeaving, usePoll } from "./hooks";
 import { linkProps, navigate, usePath } from "./router";
-import { Sheet } from "./components/Sheet";
+import { Sheet, type SheetHandle } from "./components/Sheet";
 import Issues from "./pages/Issues";
 import Reader from "./pages/Reader";
-import Channels from "./pages/Channels";
+import ChannelPage from "./pages/Channel";
 import Engine from "./pages/Engine";
 
 function Seal() {
@@ -43,6 +43,8 @@ async function submitUrl(url: string): Promise<string> {
 function Paste() {
   const [v, setV] = useState("");
   const [hint, setHint] = useState<string | null>(null);
+  const hintOut = useLeaving(hint);
+  const hintT = useRef<number | undefined>(undefined);
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -58,13 +60,14 @@ function Paste() {
     if (!v.trim()) return;
     try { setHint(await submitUrl(v)); setV(""); }
     catch (err) { setHint(String((err as Error).message || err)); }
-    setTimeout(() => setHint(null), 2600);
+    clearTimeout(hintT.current);
+    hintT.current = window.setTimeout(() => setHint(null), 2600);
   };
   return (
     <form className="paste" onSubmit={submit}>
       <input ref={ref} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接" aria-label="提交视频链接" inputMode="url" />
       <kbd>⌘K</kbd>
-      {hint && <span className="hint" role="status">{hint}</span>}
+      {hintOut.shown && <span className={`hint${hintOut.leaving ? " leaving" : ""}`} role="status">{hintOut.shown}</span>}
     </form>
   );
 }
@@ -73,10 +76,11 @@ function PasteSheet({ onClose }: { onClose: () => void }) {
   const [v, setV] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const sheet = useRef<SheetHandle>(null);
   const go = async (url: string) => {
     if (!url.trim()) return;
     setBusy(true);
-    try { setMsg(await submitUrl(url)); setV(""); setTimeout(onClose, 1100); }
+    try { setMsg(await submitUrl(url)); setV(""); setTimeout(() => sheet.current?.close(), 1100); }
     catch (err) { setMsg(String((err as Error).message || err)); }
     setBusy(false);
   };
@@ -85,7 +89,7 @@ function PasteSheet({ onClose }: { onClose: () => void }) {
     catch { setMsg("无法读取剪贴板，请手动粘贴"); }
   };
   return (
-    <Sheet title="付印一期" onClose={onClose}>
+    <Sheet ref={sheet} title="付印一期" onClose={onClose}>
       <form className="sheet-form" onSubmit={(e) => { e.preventDefault(); go(v); }}>
         <input value={v} onChange={(e) => setV(e.target.value)} placeholder="https://youtu.be/…" aria-label="视频链接" inputMode="url" autoComplete="off" />
         <div className="sheet-row">
@@ -156,7 +160,7 @@ export default function App() {
   const m = path.match(/^\/issue\/([^/]+)/);
   if (m) page = <Reader id={decodeURIComponent(m[1])} />;
   else if (path === "/share") page = <Share />;
-  else if (tab === "channels") page = <Channels />;
+  else if (tab === "channels") page = <ChannelPage />;
   else if (tab === "engine") page = <Engine />;
   else page = <Issues />;
 

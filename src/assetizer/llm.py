@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 import jsonschema
 
+from . import providers
 from .providers.agy import AgyProvider, ProviderError, gemini_schema
 from .util import read_json, write_json
 
@@ -104,8 +105,12 @@ def validate(obj: Any, schema: dict) -> None:
 
 class LLM:
     def __init__(self, provider: AgyProvider | None = None, recorder: Recorder | None = None):
-        self.p = provider or AgyProvider()
+        self.fixed = provider  # an explicit provider answers every stage (bench, tests); otherwise `stage_providers` routes
+        self.p = provider or providers.get()
         self.recorder = recorder
+
+    def provider(self, stage: str):
+        return self.fixed or providers.for_stage(stage)
 
     def _record(self, stage: str, attempt: str, receipt: dict) -> None:
         if self.recorder:
@@ -113,10 +118,11 @@ class LLM:
 
     def _call(self, d: Path, stage: str, prompt: str, **kw):
         last: ProviderError | None = None
+        p = self.provider(stage)
         for n in range(3):
             sub = d if n == 0 else d.with_name(d.name + f"-retry{n}")
             try:
-                r = self.p.call(sub, prompt, **kw)
+                r = p.call(sub, prompt, **kw)
                 if not r.reused:
                     self._record(stage, sub.name, r.receipt)
                 return r
@@ -182,11 +188,12 @@ class LLM:
         last: ContractError | ProviderError | None = None
         r = None
         deviations = 0
+        feedback = ""  # why the previous answer was rejected: the same prompt again got the same answer (2026-10-27)
         for n in (1, 2, 3, 4):
             if n == 4 or (n == 3 and deviations == 0):
                 break
             try:
-                r = self._call(d / f"attempt-{n}", stage, full_prompt, **kw)
+                r = self._call(d / f"attempt-{n}", stage, full_prompt + feedback, **kw)
             except ProviderError as e:
                 if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT"):
                     raise
@@ -209,6 +216,7 @@ class LLM:
                 last = e
                 if e.kind == "FORMAT_NONCOMPLIANCE" and len(r.text.strip().strip("}{[] \n")) >= 20:
                     break  # real content in a broken envelope → repair below
+                feedback = f"\n\n【上一次的输出没有通过校验】{e}。请重新完整输出，不要遗漏任何要求的条目。"
         if r is None and isinstance(last, ProviderError):
             raise last
         if r is None or not isinstance(last, ContractError) or last.kind != "FORMAT_NONCOMPLIANCE" \

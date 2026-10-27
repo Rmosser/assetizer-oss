@@ -83,7 +83,7 @@ export const PRODUCTION: Record<string, string> = {
 export const WAIT: Record<string, string> = {
   AGY_AUTH_REQUIRED: "模型登录失效", PROVIDER_QUOTA: "模型配额", YOUTUBE_AUTH: "YouTube 需登录",
   DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "频道待定稿", LIVE_IN_PROGRESS: "直播未结束",
-  AGY_MEDIA_READ: "agy 读不了视频",
+  AGY_MEDIA_READ: "agy 读不了视频", NETWORK: "网络中断，稍后重试",
 };
 export const DELIVERY: Record<string, string> = {
   NOT_STARTED: "待交付", BLOCKED: "Notion 未配置", DELIVERING: "交付中", DELIVERED: "已入 Notion",
@@ -95,3 +95,7 @@ export function clock(iso?: string | null) {
   const d = new Date(iso);
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
+
+export const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+/** For scrollTo / scrollIntoView: the CSS reduced-motion rule does not reach script-driven scrolling. */
+export const smooth = (): ScrollBehavior => (reduceMotion() ? "auto" : "smooth");

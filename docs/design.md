@@ -1,288 +1,82 @@
-# Assetizer · IA + Technical Design v0.2
+# Assetizer · 设计裁决
 
-> 产品输入：PRD v0.2 · Post-Validation Baseline（Notion，生效）+ Product Validation Closure + Run-001～014 本地证据。
-> 本文件合并 IA 与 Technical Design 的第一版，供实现直接使用；ADR 级裁决在 §12 列出。
+项目的长期决定和理由，只收**现在仍然有效**的条目。机制细节见 [architecture.md](architecture.md) 和 [channel-page.md](channel-page.md)，具体参数以代码为准。
 
+- 条目编号沿用 v0.2：代码注释里的「design §R2-5」指 §R2 第 5 条，「§R6」即 §R-6。没有列出的 v0.2 条目已被取代，或不再保证与实现一致，原文见 [history/design-v0.2.md](history/design-v0.2.md)。
+- 改变长期决定时改这里：保留编号，被取代的条目移到文末表格并写明由什么取代。
 
-> **v0.2 = v0.1 草案 + 独立评审（docs/design-review.md）采纳结果。** 下面"§R 评审后裁决"优先于正文中冲突的描述。
+## §R2 人的介入点（2026-10-06，PRD v0.2.1）
 
-## §R 评审后裁决（2026-10-05）
+依据 Notion「PRD v0.2 → v0.2.1 · 人的介入点澄清：频道调试期与稳定期」。
 
-**采纳：**
-1. 失败矩阵：空响应 / 仅 `}` → 同 prompt 重生成 1 次（不走 repair）；`AGY_AUTH_REQUIRED` / `PROVIDER_QUOTA` → **暂停队列**，Run 进 `WAITING`，不计失败；Worker 恢复前杀掉孤儿 agy 进程组（DB 记录 pgid）；媒体调用超时 35 min + 5 min 无流事件看门狗。
-2. **时间合同**：模型只输出 Chunk / Window 内的局部时间（它在画面里看到的时间码）；全局时间由代码 = local + 实测 offset（ffprobe 首帧 pts）；所有时间夹在 `[0, duration]`；记录 precision。Merge / Knowledge 的时间由代码从 topic 引用推出，不让模型做加法。
-3. **KNOWLEDGE 与 ARTICLE 分片**：KNOWLEDGE = skeleton（只出 unit 列表）+ detail（每批 6 个）；ARTICLE = outline + section 批次，产物为 `ArticleSection[]`（自带 unit_refs）。
-4. **IA**：新增 `Flag`（内容待判断项）、`Alert`（系统健康，可自动解除）、`Decision`（需用户拍板）；状态拆为 `production` / `delivery` / `review` 三字段；Notion 行与 Package 属于 **Source**（指向 current_run），重跑不产生第二篇；KU 主键为系统 ULID，模型 slug 只作 label；`publication_priority` / `selection` / `embed` / `standalone` 挂在 Clip Asset；KU 增加 `depends_on`、`segments`、`facets`（频道特有字段由 Playbook 声明）；新增 Speaker Registry。
-5. Regenerate 两个动词：「只改这一处」（本 Source 新 Revision，不改 Playbook）与「以后这个频道都这样」（PromptAmendment 提案 → 新 Prompt 版本）；Minor Edit = 确定性操作（ASR 词边界微调 Clip、文本 overlay）。
-6. Stage 顺序 RESOLVE → PLAYBOOK → ACQUIRE；格式 `-S res:1080,vcodec:h264,acodec:aac`，高度 < 720 → `DEGRADED_FORMAT`；Chunk 保持 50+5（agy RSS 与媒体时长正相关，50 min ≈ 7.6 GiB）。
-7. Boundary：窗口重编码 720p 保证 0 点；模型返回窗口内时间；**全片 ASR 作为 Source 级 Transcript**，用 Run-008 句界强度做有方向吸附（起点 [-6,+2] s 优先向前，终点 [-1,+6] s 优先向后），不越过下一 KU 起点；容差内无合格句界 → `BOUNDARY_UNCERTAIN` Flag；模型失败 → 确定性兜底 + `BOUNDARY_FALLBACK` Flag（总要出片）。
-8. 新增 **REVIEW_CHECK**：一次批量纯文本调用，检查 Clip 首尾半句、代词悬空、结论前结束、下一主题混入，以及 KU 的 PLAN/EXECUTED/条件 claim 与 ASR 对照（CAVA 类）→ 只产出 Flag，不改写。
-9. Clips：`-r 30 -pix_fmt yuv420p -profile:v high -g 60 +faststart`；删除 silencedetect，改 ASR 首末词裁剪；每段生成 poster。截图：锚点 ±1 s 取 5 帧选最清晰。MEDIA_QA 加查 codec/profile/pix_fmt/moov 位置。
-10. COMPOSE 按 Source 时间顺序；全部 GENERATED Clip 内嵌；小节内顺序 视频 → 截图 → 文字。
-11. Notion：数据库行（每 Source 一行，状态用属性）+ block_key→block_id 映射 + 续传前读回对账 + JIT 上传；交付独立于生产，token 未配置时 `delivery=BLOCKED`，应用内照常审阅。
-12. 磁盘：剩余 ≥ max(15 GB, 6×源文件) 才允许 ACQUIRE；subtitled 版本可重渲染，审阅完成 N 天后删除。
-13. Playbook：今晚导入 Run-014 已审计的 Tom Playbook 为 ACTIVE；王海滨导入 Run-013 W 为 NEEDS_CONFIRMATION；编译器采用"确定性切条款 + 逐条归属 + 代码算覆盖率 + 规范化 quote + Policy 冲突检测 + 用户确认一次"，后续实现。Universal = 空 ChannelPrompt 的 Playbook（Run-011 Universal 指令）。
-14. 导航收为 3 个：**刊**（期刊目录 + 粘贴框 + 印刷线）/ **频道** / **机房**。视觉概念「刊 + 朱批」：纸墨双色 + 唯一强调色朱红；中文衬线 Noto Serif SC；Reader 三栏（纵向 Source Timeline 脊柱 / 文章 + 单一悬浮播放器 / 朱批边注）。
-15. agy 调用记录 agy 版本；Web 只走 SSH 隧道 → 今晚不做移动端 QA。
+1. **频道两阶段**：`TUNING`（调试中）→ `LOCKED`（已定稿）。调试期用样片试跑、对照、改学习目标、再试跑，满意后定稿；定稿后每期自动生产、自动交付，没有逐期审阅。可以随时回到调试期。
+2. **人的介入点只有三类**：频道调试与定稿；系统告警（模型、YouTube 登录等）；可选的事后重跑。
+3. **校注**：系统没把握的地方（代码里叫 flag）对用户统一叫「校注」。调试期在对照视图里逐条看，作为改学习目标的依据；稳定期不是待办，写进 Notion 每期页面末尾的折叠区块；已定稿频道页显示最近几期的校注数。数量异常升高时自动提示回到调试期，这一设想尚未实现。
+4. **去掉逐期审阅**：没有审定 / 驳回、印章、审阅待办和 Notion「待审阅」属性。`sources.review` 只保留旧数据，不驱动界面与交付；原始媒体的保留期从交付完成起算。
+5. **交付跟随频道阶段**：调试中的频道不写 Notion，草稿不会反复改写知识库；定稿时按定稿单交付各样片采用的那一版；已定稿频道生产完成即交付。频道阶段取代了 `channels.delivery_policy`。
+6. **Notion 是阅读出口**：内容、校注、状态都写进 Notion，日常在 Notion 里读；Web 是调试台与控制台，阅读器改为「对照视图」，用于对照原视频。刊首页的本期卡片给出「在 Notion 阅读」，各期标题点进去是对照视图。
+7. **导航三个**：刊（生产线 + 最近出刊）/ 频道 / 机房。「待你拍板」只保留频道定稿与系统告警。
 
-16. **模型输入一律为 Proxy**（2026-10-05 实测后裁决）：agy 自 1.2.2 起（官方 changelog：防止大文件撑爆上下文）`view_file` 拒绝 >100 MB 文件，本机自动升级后触发，Run-014 式 619 MB 流复制 Chunk 不再可读。CHUNK 改为从原片精确起点重编码 1 fps、原分辨率、GOP 60 s、CRF 32 的 Proxy（50 min ≈ 92 MB，Ticker/价格清晰可读），超限按 CRF 36 → 720p 阶梯降级；Boundary 窗口 2 fps。副作用：offset 精确等于起点（不再依赖关键帧），agy 峰值内存显著下降。
-17. **`--json-schema` 只用于小输出**（同日实测）：整段理解在 schema 模式下把输出预算耗在 thinking、返回空 topics；contract repair 随后编造了占位主题。裁决：大输出阶段把 Schema 写进 Prompt 并本地校验（Run-014 路径）；内容为空 / 不合规 / 工具偏航 → 重新生成一次；repair 仅限无法解析的文本，且不得编造。
+## §R3 频道页（2026-10-26）
 
-18. **对照实验结论（2026-10-05，docs/experiments-2026-10-05.md）**：保持 50+5 分段（整段一次理解丢失约一半知识点、时间定位误差中位数 151–206 s）；1 fps 理解代理与原画差异在噪声内；2 fps 边界窗口与全画质窗口相当；**取消对模型边界的 ASR 吸附**（会变差），仅对兜底区间吸附——修订第 7 条。
+机制见 [channel-page.md](channel-page.md)。
 
-19. **分段接缝**（实验 S）：合并前用规则截断前一段末尾的粗主题（被后一段 ≥2 个细主题覆盖时截到重叠起点），默认开启；提示词做法实测无效。
+1. **一页三栏**：样片 × 版本矩阵在上，原片、设置卡、Notion 预览三栏在下，取代原来的五个标签页。理由：每个设置的效果和出处同时可见，调试到定稿在一屏内完成。
+2. **采用分两种语义**：默认跟随最新完成，「钉住」后不再被之后的试跑覆盖。定稿单把要写入、保留或替换的期钉住（「等跑完」除外），定稿后再提交运行时清掉钉住。理由：多数时候跟随最新最省事；钉住保护用户选定的版本，定稿时冻结要交付的版本，定稿后的重跑又应照常替换。
+3. **定稿单一次提交、全有或全无**：逐期决定写入 / 保留库里的页 / 换成新版本 / 等跑完。理由：频道不会停在「定了一半」的状态，每期写什么在定稿时一次说清。
+4. **只替换资产刊写过的页**：库里已有的页，只有资产刊写过的才可替换，用户自建的只能保留。理由：用户的页上可能有笔记，归档会连笔记一起带走。
+5. **预览与交付同源、只读**：预览复用交付的构建计划，不写 Notion。理由：所见即所写，试设置不污染知识库。
+6. **换库在界面里完成**：映射按属性名迁移，固定关联要重选，并记下是否测试副本。理由：不再依赖命令行；定稿时能看清写入的是正式库还是测试副本。
+7. **题眼跟随采用的运行**：运行被采用时才写入一期的题眼（跟随最新完成时会自动采用），钉住期间试跑跑完不改。理由：对外显示的题眼应与将要交付的版本一致。
+8. **版本不可变**：改学习目标或重新编译都生成新的规程草稿，不改旧版本。理由：便于对比和追溯；导入的规程借重新编译补上逐句对应。
+9. **取消「喜欢 / 备注」和单独的确认规程**：分别被钉住和定稿单取代，旧数据保留。
 
-**推迟：** Playbook 编译器与 Onboarding UI、轻量 Discovery（transcript-based）、RSS 自动收录、PromptAmendment、M lane 并行、媒体 proxy A/B、systemd-run scope（先确认 user systemd 可用）。
+## §R 生产与模型（2026-10-05 起）
 
-## §R2 意图澄清后的调整（2026-10-06，PRD v0.2.1）
+- **§R-1 失败处理**：空响应或不合规时同一提示重新生成一次；模型登录失效或额度用尽时暂停队列、该期进入等待，不计失败；worker 停止或重启时杀掉进行中的 agy 进程组；模型调用有总超时和 5 分钟无输出看门狗。（`providers/agy.py`、`pipeline/runner.py`）
+- **§R-2 时间合同**：模型只报告它在画面里看到的局部时间码，全局时间由代码加上分段起点换算，并夹在 [0, 时长] 内；合并与知识单元的时间由代码从引用推出，不让模型做加法。理由：模型做时间加法和解析时间字符串是 Run-014 的主要错误来源。
+- **§R-3 分批生成**：知识单元先出骨架、再按每批 6 个补细节；文章先出大纲、再分章节生成。理由：控制单次输出规模，避免截断。（`pipeline/semantic.py`）
+- **§R-4 对象与状态**：校注（flag）、告警（alert，可自动解除）、待决定（decision）分开；生产状态在运行上、交付状态在一期上；Notion 页面属于一期（指向采用的运行），重跑不会产生第二篇（发布素材包目前按最后一次跑到 PACKAGE 的运行重建，见 [channel-page.md](channel-page.md) 已知问题）；知识单元主键由系统生成，模型给的标识只作 label。
+- **§R-5 小修不调用模型**：片段边界的微调按新边界确定性重切（`runner.apply_nudges`）。
+- **§R-6 下载格式**：优先 h264 / aac、不超过 1080p；高度低于 720 视为画质降级（`DEGRADED_FORMAT`）。理由：避免 AV1 / VP9 解码占满 CPU 和 10-bit 源。（`youtube.py`、`pipeline/acquire.py`）
+- **§R-7 片段边界**：在局部窗口里由模型给边界；模型失败时按单元区间确定性剪辑并留 `BOUNDARY_FALLBACK` 校注，保证总能出片。按第 18 条，只对兜底区间做 ASR 吸附。（`pipeline/media_stages.py`）
+- **§R-8 校注预审（REVIEW_CHECK）**：纯文本调用（每 8 个片段一批，某批失败只记警告），检查片段首尾半句、代词悬空、结论前结束、混入下一主题，以及计划 / 已执行 / 条件类陈述与 ASR 是否一致；只产出校注，不改写内容。
+- **§R-9 片段编码统一**：h264 high、yuv420p、30 fps、faststart，并为每段生成海报；媒体自检核对编码和 moov 位置。（`media/ffmpeg.py`）
+- **§R-11 Notion 交付**：每期一行；块映射加续传前读回对账，崩溃后不重复追加；交付独立于生产，没配 token 时交付记为 `BLOCKED`。（`delivery.py`）
+- **§R-12 磁盘水位**：剩余空间不少于 max(15 GB, 6 × 预估源文件) 才下载，否则该期等待 `DISK_LOW`。（`pipeline/acquire.py`）
+- **§R-16 模型输入一律用代理视频**：理解阶段用从分段起点重新编码的 1 fps 代理视频，边界窗口先用 2 fps；超过 agy 的读取上限（`VIEW_FILE_LIMIT`，agy 1.4.5 约 25 MB）时先加大压缩、再降分辨率（边界窗口同时降到 1 fps）。agy 版本变化后，worker 空闲时先读一个接近上限的样片自检，读不对就暂停生产。理由：agy 拒绝读取超过上限的文件，而且上限会随版本变化；附带好处是时间偏移精确等于分段起点。（`media/ffmpeg.py` 的 `PROXY_LADDER`、`providers/agy.py` 的 `media_health`）
+- **§R-17 `--json-schema` 只用于小输出**：大输出把 Schema 写进提示词并在本地校验；修复只针对无法解析的文本，且不得编造。理由：schema 模式下长输出会把预算耗在思考上、返回空内容。（`llm.py`）
+- **§R-18 分段 50 分钟 + 5 分钟重叠**：整段一次理解会丢失约一半知识点，时间定位误差中位数 151–206 秒；1 fps 理解代理与原画差异在噪声内；ASR 吸附会让模型边界变差。实验见 [history/experiments-2026-10-05.md](history/experiments-2026-10-05.md)。
+- **§R-19 分段接缝**：合并前截断前一段末尾、已被后一段细主题覆盖的粗主题（设置 `seam_policy`，默认 `trim`）；只靠提示词处理实测无效。
 
-> 依据 Notion「PRD v0.2 → v0.2.1 · 人的介入点澄清：频道调试期与稳定期」（已采纳）。**本节优先于 §R 与正文中关于逐期审阅的描述**：§R-4 的 `review` 状态、§R-11「应用内照常审阅」、§R-12「审阅完成 N 天后」、§R-14「刊 + 朱批」、§1.3 主流程末尾的 Review、ADR-4 的交付策略。
+## §R5 目标与补丁的寿命（2026-10-27）
 
-**裁决：**
-1. **频道两阶段**：`TUNING`（调试中）→ `LOCKED`（已定稿）。调试期：选 2–3 期样片试跑 → 对照视图看结果与校注 → 改 Prompt → 重跑对比 → 定稿。定稿 = Playbook `ACTIVE` + 开启 RSS 自动收录。稳定期每期自动生产、自动交付 Notion，没有逐期审阅。
-2. **人的介入点只有三类**：频道调试与定稿（含之后主动回到调试期）；系统告警（agy / YouTube 登录）；可选的事后重跑。
-3. **Flag 对用户统一叫「校注」**（UI 与 Notion 文案；代码内仍叫 flag）。调试期在对照视图里逐条处理，作为改 Prompt 的依据；稳定期不作为待办：写入 Notion 每期页面末尾的折叠「校注」区块，并按频道统计数量，异常升高时提示该频道可能要回到调试期。
-4. **去掉逐期审阅**：审定 / 需修改 / 驳回、钤印与牌记印章位、首页审阅待办、Notion「待审阅」状态属性。`sources.review` 不再驱动 UI 与交付；媒体保留期改为从交付完成起算（原为审阅完成）。
-5. **交付跟随频道阶段**：`TUNING` 频道的样片不写 Notion（避免草稿反复改写知识库），定稿时交付各样片的最新一版；`LOCKED` 频道生产完成即交付。`channels.delivery_policy`（auto / after_approval）由频道阶段取代。
-6. **Notion 是唯一数据源**（内容、校注、状态）。Web = 调试台 + 控制台，不是日常阅读入口；阅读器改为「对照视图」，入口在频道调试台与生产线条目上，每期主链接指向 Notion 页面。
-7. **导航**：「刊」→ 生产线 + 最近出刊（链到 Notion）；「频道」→ 主舞台（调试台）；「机房」不变。「待你拍板」只保留频道定稿（原 `CONFIRM_PLAYBOOK`）与系统告警。
+1. **目标扩展**：服务于所有值得留档、转成文字学习的视频，而不只是交易复盘。交易专用的部分（转写提示词里的标的、读图案例式的截图位置）应该由频道规程决定；以说话为主的视频可以走"转写 + 文本模型"的便宜路径，画面信息多的视频才需要多模态理解。
+2. **补丁要登记**：给模型和工具的限制打的补丁，都在 [benchmarks.md](benchmarks.md) 的登记表里写明依赖哪条限制、怎么测、通过后怎么简化。理由：限制会随模型和工具升级而消失，补丁不应该在限制消失后继续增加复杂度。
+3. **每周跑基准**：`python -m assetizer.cli bench` 重新测这些限制，报告给出建议，是否删补丁由人决定。基准集要区分标准答案和参照答案。
+4. **生产 provider 可切换**：盒子设置 `llm_provider` 选择 agy（Google AI Pro 订阅额度）、兔子 API（按量计费）或 magpie（ChatGPT 订阅，用抽帧加转写代替视频），三者共用同一套提示词和校验。兔子 API 余额用完后不再充值，prodbox 回到 agy。
+5. **按阶段分配模型**：设置 `stage_providers` 把个别阶段交给另一个 provider，键是阶段名的第一段（`knowledge`、`review`、`selection`）。prodbox 把知识和选片交给 magpie：这两步产出给程序用的 JSON，要的是准确而不是文笔；写文章仍用 Gemini，因为文风是读者直接读到的。审查也留在 Gemini：它只拿到转写原文，GPT 会把转写里没说、但画面里有的细节标成"缺少依据"，2026-10-27 生产 7 期每个单元平均 1.5 条，Gemini 是 0.2 到 0.4 条。理由：agy 的每周额度是产量的瓶颈，交出去的这两步在基准视频上让 Gemini 的输出减少约一半。额度暂停时，所有在用的 provider 都恢复才继续队列。（`providers/__init__.py`、`llm.py`）
 
-**实施顺序**：① 改名「校注」、去掉逐期审阅、Notion 校注区块、交付跟随频道阶段；② 频道调试台（样片试跑、重跑对比、定稿即开启自动收录）；③ Notion 使用说明与 IA 文档同步。
+## §R4 运行环境（2026-10，迁移到懒猫之后）
 
-**② 已实现（2026-10-11）**：`samples` 表记录频道的样片；试跑 = 用指定规程版本为每期样片排一个 Run（只在 TUNING 允许，所以草稿永远进不了 Notion）；调试期频道没有 ACTIVE 规程时用最新草稿生产、不再等待定稿，该期自动成为样片；对比按时间重叠（≥50% 较短单元）对齐两版知识单元，并列出规则增删；「采用」把某一版设为这一期的当前版本；「回到调试期」暂停自动收录。频道最近视频：RSS（2026-10 起对所有频道 404/500）失败时改用 yt-dlp 平铺列出 videos + streams 两个标签页，日期为近似（按天比较）。
+做法见 [operations.md](operations.md)，迁移理由见 [history/lazycat-lpk-plan.md](history/lazycat-lpk-plan.md)。
 
-## 0. 设计约束（来自用户与证据）
+1. **懒猫 LPK**：生产在 prodbox，web 与 worker 两个服务共用一个运行时镜像；应用代码随包挂载，agy、它的登录态和数据都在持久卷里。理由：agy 会自动升级，不能锁进镜像；改代码不必重建镜像。
+2. **可并行生产**：设置 `worker_slots`（默认 1，上限 16）决定同时生产几期，取代 v0.2 的串行单 worker。理由：懒猫有足够内存，每期峰值约 4–5 GB。
+3. **YouTube 登录用 CookieCloud**：直接用用户 Chrome 里的登录态，取代服务器 Chromium + noVNC 远程登录。代码里仍保留服务器 Chromium 兜底和远程登录接口（OVH 时期用），懒猫上不配置。
+4. **访问控制**：本机回环、带登录用户头的懒猫网关、或带有效 Cloudflare Access JWT 的公共域名，三者之一；POST 只收 JSON。取代「仅 SSH 隧道」。
+5. **Telegram 通知（可选）**：生产失败、告警出现与解除、worker 异常重启、试跑跑完和每日摘要推送给用户，不必打开机房。
 
-- 单台 OVH VPS：6 vCPU / 12 GB RAM / 无 swap / 99 GB 盘。**串行处理**，同一时间只允许 1 个 Source 在流水线中（Run-013 并发实验：H=1 默认）。
-- 模型路径固定为 **agy CLI 登录态**（Antigravity，`gemini-3.8-flash-high`），通过 `ModelProvider` 接口抽象，未来可换 Gemini API Key。
-- agy 每次带视频调用在 `~/.gemini/antigravity-cli/{conversations,brain}` 留下 ~600 MB；**每次调用结束、产物落盘后必须按 conversation_id 删除**。
-- YouTube：服务器 Chromium 持久化 profile + 用户通过 noVNC 远程屏幕登录；yt-dlp `cookiesfrombrowser` 读取。认证失败必须分类，不能把所有 403 当成"请登录"。
-- Notion：生产 token 用户之后配置；当前用临时 token 测试。
-- Run-014 中由 Codex 人工完成的两步必须自动化：Playbook Fidelity Audit、Boundary Sanity Check。
-- Run-014 的 clip/字幕在 Mac（mlx_whisper / videotoolbox）上跑；正式版全部在 Linux CPU 上：faster-whisper（int8）+ libx264。
-- UI 品质标准：Awwwards / Webby / FWA 获奖水准，反复自审直至达到。
+## 已被取代的 v0.2 条目
 
-## 1. 信息架构（IA）
-
-### 1.1 核心对象
-
-```
-Channel ──< ChannelPrompt(version) ──< Playbook(version, compiled, audited)
-   │
-   └──< Source ──< Run ──< Stage(checkpoint)   ──< ModelCall(telemetry)
-                    │
-                    ├──< KnowledgeUnit  (canonical semantic object)
-                    │       └──< Asset  (screenshot | clip | subtitle)
-                    ├── Article (markdown, KU markers)
-                    ├── Delivery: NotionPage, PublicationPackage
-                    └── Review (run-level decision + asset-level overrides)
-Attention (系统级待办：YouTube 认证、agy 登录失效、磁盘、Playbook 待确认、Run 失败)
-```
-
-| 对象 | 说明 | 关键属性 |
-|---|---|---|
-| Channel | 一个 YouTube 频道或其他来源作者 | mode: `TRACKED` / `DISCOVERY`；youtube_channel_id；display_name；delivery target |
-| ChannelPrompt | 用户 Raw Prompt，**用户意图 Source of Truth**，不可变版本 | text, sha256, origin(notion_url / manual), created_at |
-| Playbook | Raw Prompt 编译出的 Runtime Playbook | rules[{id, rule, quote, phases}], requirements[], fidelity[], audit, status: `DRAFT/NEEDS_CONFIRMATION/ACTIVE/SUPERSEDED` |
-| Source | 一个视频 | url, video_id, title, published_at, duration, media(path, sha256, bytes), media_state: `ABSENT/CACHED/PURGED` |
-| Run | 用固定 Playbook 版本处理一个 Source 的一次执行 | kind: `PRODUCTION`/`DISCOVERY`；status；stage；playbook_id；telemetry |
-| KnowledgeUnit | 产品核心对象 | 见 §5.2 Schema，`learning_priority` 与 `publication_priority` 分离 |
-| Asset | 截图、Clip（clean / subtitled）、SRT/ASS | kind, status: `GENERATED/WARNING/FAILED/NOT_SELECTED`, path, sha256, lineage(unit_id, source range) |
-| Review | 用户判断 | run decision: `PENDING/APPROVED/CHANGES_REQUESTED/REJECTED`；asset overrides；notes；active_seconds |
-
-### 1.2 导航（Web UI）
-
-1. **Desk（今日）**——默认首页。只回答"现在有什么需要我判断？"
-   - Attention 条（系统问题，最高优先）。
-   - Ready for Review（按完成时间）。
-   - In production（当前唯一运行中的 Run：阶段轨道 + 预计剩余）。
-   - Queue（排队中的 Source）。
-   - 一个永远可见的输入框：粘贴 URL → 提交。
-2. **Library（资产库）**——Channel → Source → Reader。
-   - **Reader** 是 Knowledge Unit 的第一个 Renderer：正文 + 内嵌 Clip + 截图，旁边是贴边 **Source Timeline**（整段视频的时间轴，KU 区段、Clip 条、截图刻度），随阅读位置联动——可追溯性做成界面本身。
-   - Review 操作在 Reader 内完成（Approve / Request changes / Reject；单个 Clip：Approve / Reject / 调整 Publication Priority）。
-3. **Channels（频道）**——Tracked / Discovery 两栏。
-   - Channel 详情：Raw Prompt 编辑器（版本列表、diff）、Playbook（规则、quote 溯源、Fidelity 矩阵）、确认按钮。
-   - Onboarding：Discovery 报告 → "加入长期关注" → "你主要为什么看这个频道？" → 生成 Raw Prompt 初稿 → 编译 → 确认一次。
-4. **Runs（运行）**——所有 Run 的生产记录：阶段时间线、模型调用、token、峰值内存、失败分类、重试按钮。
-5. **System（系统）**——agy 状态、YouTube 会话（含 noVNC 登录入口说明）、磁盘与媒体保留策略、Notion 目标配置、版本。
-
-### 1.3 主流程
-
-```
-粘贴 URL ─▶ resolve 元数据 ─▶ 匹配 Channel
-   ├─ TRACKED 且 Playbook ACTIVE ─▶ 排队 PRODUCTION Run
-   └─ 其他 ─▶ 排队 DISCOVERY Run ─▶ Discovery 报告
-                    └─ 用户"加入长期关注" ─▶ Onboarding ─▶ Playbook ACTIVE ─▶ （可选）对该 Source 再跑 PRODUCTION
-PRODUCTION Run ─▶ …自动… ─▶ Notion 页面（标注"待审"）+ Publication Package ─▶ READY_FOR_REVIEW
-Review ─▶ APPROVED（Notion 状态更新、Source 媒体进入保留期后清理）
-```
-
-**交付策略**（ADR-4）：默认 `auto`——生产完成即自动写 Notion 并在页首标注"待审阅"，与 Run-014 验证路径一致，`human_manual_upload_count = 0`；可按 Channel 切换为 `after_approval`。
-
-## 2. 系统架构
-
-```
-┌────────────── OVH VPS (debian, user=debian) ──────────────┐
-│ systemd --user                                            │
-│  assetizer-web.service   FastAPI + 静态前端  127.0.0.1:8770 │
-│  assetizer-worker.service 串行 Job Runner（单进程）          │
-│                                                           │
-│ /home/debian/assetizer/                                   │
-│   app/        代码 + venv                                  │
-│   data/assetizer.db   SQLite (WAL)                        │
-│   data/media/<video_id>/source.mkv     原始媒体缓存          │
-│   data/runs/<run_id>/…                 每 Run 工作目录       │
-│   data/packages/<run_id>/…             Publication Package │
-│   data/secrets/ (600)  notion token 等                    │
-└───────────────────────────────────────────────────────────┘
-访问：ssh -L 8770:127.0.0.1:8770 ovh-investment → http://localhost:8770
-（之后可选 Cloudflare Tunnel + Access，需用户确认）
-```
-
-- Web 与 Worker 分进程，只通过 SQLite 通信（jobs 表 + runs 表 + events 表）。Worker 崩溃不影响 UI；UI 重启不影响生产。
-- Worker 主循环：取最早 `QUEUED` 的 Run → 依次执行 Stage → 每个 Stage 成功写 checkpoint。启动时把 `RUNNING` 但进程已不在的 Run 标为 `INTERRUPTED` 并从最后 checkpoint 自动续跑（一次），再失败就停在 `FAILED` 等用户。
-- 前端：Vite + React + TypeScript，构建为静态文件随后端发布；无 UI 组件库，自有设计系统。
-- 实时：前端轮询 `/api/events?after=` 长轮询（简单可靠，SSE 可后补）。
-
-## 3. 目录结构（仓库）
-
-```
-assetizer/
-  pyproject.toml
-  src/assetizer/
-    config.py          路径、模型名、阈值（env + data/config.toml）
-    db.py              SQLite schema + 迁移 + 访问函数
-    models.py          Pydantic：KnowledgeUnit 等 Machine Contract
-    providers/agy.py   ModelProvider：agy 调用、schema 强制、遥测、会话清理
-    contracts/         每个 Stage 的 JSON Schema + prompt 模板（中文）
-    pipeline/
-      runner.py        Worker 主循环、Stage 调度、checkpoint
-      resolve.py acquire.py chunk.py understand.py merge.py knowledge.py
-      article.py select.py screenshots.py boundary.py clips.py subtitles.py
-      compose.py notion.py package.py cleanup.py discovery.py
-    playbook/compiler.py   requirement 抽取 → 编译 → quote 校验 → 独立审计
-    media/ffmpeg.py asr.py subtitle_algorithm.py
-    notion/client.py blocks.py   API、multipart 上传、markdown→blocks、readback
-    youtube.py         yt-dlp 封装 + 失败分类
-    web/app.py         FastAPI 路由
-    cli.py             `assetizer submit|status|worker|import-run|doctor`
-  web/                 前端源码
-  deploy/              systemd units、install.sh、sync.sh
-  tests/
-  docs/design.md
-```
-
-## 4. Pipeline（PRODUCTION Run）
-
-每个 Stage：输入=上游冻结产物（sha256 记录）；输出=Run 目录下文件 + DB 记录；幂等（产物存在且 hash 匹配即跳过）。
-
-| # | Stage | 实现要点 | 阻塞？ |
-|---|---|---|---|
-| 1 | RESOLVE | `yt-dlp -J`（cookies from profile），得到 channel_id、title、duration、upload_date | 是 |
-| 2 | ACQUIRE | ≤1080p `bv*[height<=1080]+ba`，mkv；按 video_id 缓存 + sha256；失败分类（§7） | 是 |
-| 3 | PLAYBOOK | 若 Channel 的 ACTIVE Playbook 存在则冻结引用；否则 Run 停在 `BLOCKED_PLAYBOOK` | 是 |
-| 4 | CHUNK | 时长 ≤ 55 min 单 Chunk；否则 50 min + 5 min overlap，stream copy | 是 |
-| 5 | UNDERSTAND | 每 Chunk 一次 agy 调用，`view_file` 仅一次、仅允许该文件；`--json-schema` | 是 |
-| 6 | MERGE | 只读结构化记录；多 Chunk 时执行，单 Chunk 直接透传 | 是 |
-| 7 | KNOWLEDGE | 生成 Knowledge Units（§5.2） | 是 |
-| 8 | ARTICLE | Markdown，`<!-- KU:unit_id -->` 标记；禁用词检查 | 是 |
-| 9 | SELECT | 每个 KU：SELECT / REJECT / CONTEXT_DEPENDENT | 否（失败则无 Clip） |
-| 10 | SCREENSHOTS | ffmpeg 抽帧，每 KU ≤ 2 | 否 |
-| 11 | BOUNDARY | 局部窗口（±30 s）agy 精修 → **自动 sanity**：窗口 ASR 词时间戳，把起点吸附到 ±6 s 内最近的句首停顿（gap ≥ 0.35 s），终点吸附到句末停顿；记录 delta；>10 s 标 major | 否 |
-| 12 | CLIPS | 从 Original Source-global 时间直接切；libx264 CRF 22 / preset veryfast / AAC 128k / faststart；只裁剪真正首尾静音（silencedetect −35 dB, ≥ 3 s） | 否 |
-| 13 | SUBTITLES | faster-whisper large-v3-turbo int8；Run-008 冻结断句算法；SRT + ASS + 烧录 720p 版；失败 = `FAILED_NON_BLOCKING` | 否 |
-| 14 | MEDIA_QA | ffprobe + 全解码 + 首尾帧 | 否 |
-| 15 | COMPOSE | 精确 KU 标记组合 Section ↔ KU ↔ Screenshot ↔ Clip，不做标题模糊匹配 | 是 |
-| 16 | NOTION | 页面创建 + 文件上传（≤20 MB 单段，否则 multipart 10 MB 分片）+ 分批 append 带 checkpoint + readback 校验 | 是（交付） |
-| 17 | PACKAGE | 目录结构 + manifest(sha256) + README | 是（交付） |
-| 18 | CLEANUP | 删除 chunks、boundary windows、wav、agy 会话；Source 媒体按保留策略 | 否 |
-
-DISCOVERY Run：1→2→4→5(Universal 上下文)→DISCOVERY_REPORT→18。不生成 Clip，不写 Notion（可选）。
-
-### 4.1 模型调用合同（来自 Run-014 经验）
-
-- 每次调用：独立目录 `calls/<stage>/attempt-N/`，保存 prompt、schema、stream-json 原始输出、response、invocation.json（session id、实际模型、tokens、wall time、峰值 RSS、view_file 次数、deviation）。
-- 结构化阶段一律带 `--json-schema`；仍做本地 JSON Schema 校验（provider SUCCESS 但不完整 JSON 必须拦截——Run-013 S03）。
-- 失败处理：最多 1 次同模型 **contract repair**（无媒体、只做格式转换，不补事实）；transient（429/5xx/超时）指数退避最多 2 次；`MODALITY_ROUTING_DEVIATION`（调用了非允许工具）立即终止该调用并记为失败；`PROVIDER_OUTPUT_LIMIT` 分类单列。
-- Prompt 超过 120 KB 用 stream-json stdin 传输（Run-014 Linux argv 限制）。
-- 内存：`GOMEMLIMIT=6GiB`、`GOGC=20`；Worker 串行保证同时只有一个 agy。
-- 调用结束、产物落盘后删除 agy 会话目录（按 conversation_id）。
-
-## 5. 数据合同
-
-### 5.1 Playbook 编译（替代 Codex 人工审计）
-
-1. **REQUIREMENTS**：从 Raw Prompt 抽取核心需求清单，每条带逐字 quote（代码校验 quote 是原文子串）。
-2. **COMPILE**：生成 rules[{id, rule, quote, phases[]}] + orchestration_notes + article_style；quote 必须逐字存在于原文（代码校验，失败即 `PROVENANCE_FAILURE`）。
-3. **AUDIT**：独立调用，只看 requirements 与 rules，逐条判 `PRESERVED/PARTIAL/DROPPED`。
-4. 规则：`DROPPED = 0` 且 quote 全部校验通过 → `ACTIVE`（可按 Channel 设置为必须人工确认）；否则 `NEEDS_CONFIRMATION`，Desk 出现 Attention。
-
-### 5.2 Knowledge Unit（canonical）
-
-```json
-{
-  "unit_id": "unit_07_tsla_gap_up_breakout",
-  "title": "…", "speaker": "…", "tickers": ["TSLA"],
-  "source_start": 1234.5, "source_end": 1388.0,
-  "knowledge_type": "TEACHING_EXAMPLE",
-  "learning_priority": 3,                       // 1–3 星
-  "publication_priority": "P1|P2|P3|ARCHIVE",
-  "summary": "…", "teacher_reasoning": "…",
-  "visual_evidence": ["…"],
-  "higher_timeframe_setup": null, "lower_timeframe_trigger": null,
-  "screenshot_anchors": [{"t": 1250.0, "reason": "…", "timeframe": "D", "visible_structure": "…"}],
-  "observation_tasks": ["…"],
-  "clip_candidate": true, "required_context": "…",
-  "claims": [{"kind": "STATEMENT|VISUAL_FACT|INTERPRETATION|PLAN|EXECUTED|HYPOTHETICAL", "text": "…", "t": 1260.0}],
-  "uncertainties": ["…"]
-}
-```
-
-时间一律用秒（float），渲染时再格式化；Run-014 的 `HH:MM:SS` 字符串是解析错误来源之一。
-
-### 5.3 Notion 页面结构
-
-页首 callout（Source、时长、Run 状态"待审阅"、可信度说明，一行）→ 学习导航 → 各 KU 小节：**先视频、再截图、再文字**（Closure §7.1 决策）→ 末尾折叠 toggle：Asset Index / QA / Hash。
-
-## 6. 数据库（SQLite）
-
-`channels, channel_prompts, playbooks, sources, runs, stages, model_calls, units, assets, reviews, events, attention, settings`。所有 JSON 产物文件仍为事实来源；DB 存索引与状态，便于 UI 查询。
-
-## 7. YouTube 获取失败分类
-
-`COOKIE_UNREADABLE`（profile 锁/不可读）、`AUTH_REQUIRED`（明确需登录/会员）、`BOT_CHALLENGE`（Sign in to confirm you're not a bot）、`RATE_LIMITED`（429）、`FORMAT_UNAVAILABLE`、`NETWORK`、`UNKNOWN`。只有 `AUTH_REQUIRED` 与持续 `BOT_CHALLENGE`（cookie 读取成功仍失败 ×2）才生成"请通过远程屏幕登录 YouTube"的 Attention。
-
-## 8. 媒体保留（小硬盘）
-
-- 磁盘水位 > 80% 时拒绝开始新 ACQUIRE（Attention）。
-- Source 原始媒体：Run 交付后保留 `7 天` 或至 Review 完成 + 2 天（取先到者，可配置）→ `PURGED`（保留 sha256 与元数据，可重新下载）。
-- Clips / 截图 / 字幕：保留（发布包的一部分）。Chunks / windows / wav：Stage 完成即删。
-
-## 9. 安全
-
-- Web 只监听 127.0.0.1；另设一个访问 token（首次启动生成，写 data/secrets），浏览器经 cookie 保存——防止同机其他进程误用。
-- Notion token 只存 `data/secrets/notion-token`（600），不入库、不入日志。
-
-## 10. 可观测性
-
-每次模型调用：tokens（input/output/thinking/cache）、wall、peak RSS；每 Stage：wall；每 Run：总机器时间、模型时间、媒体时间。金额：`COST_TELEMETRY_UNAVAILABLE`。
-
-## 11. UI 设计方向
-
-- 语气：研究笔记 / 编辑部，信息优先、克制。暖白纸面 + 墨色（浅色）；深墨蓝黑 + 纸色文字（深色）。
-- 字体：Display 衬线（Instrument Serif / Newsreader）+ UI 无衬线（Geist / Inter）+ 等宽（Geist Mono / JetBrains Mono）用于时间码与 Ticker；中文回落 PingFang SC / Noto Sans SC。
-- 标志性元素：**Source Timeline**（Reader 旁的整段视频时间轴，KU 区段/Clip/截图刻度，与正文滚动联动）；**Stage Rail**（生产阶段的细线轨道，当前阶段微动效）。
-- 动效：有意义且克制——状态变化、阶段推进、时间轴联动；尊重 `prefers-reduced-motion`。
-- 质量门：每个主要页面截图自审（桌面 1440、笔记本 1280、移动 390；浅/深色），对照获奖站点标准逐项检查排版节奏、层级、对齐、留白、细节状态（空/加载/错误）。
-
-## 12. ADR 候选
-
-1. ADR-1 串行单 Worker + SQLite，而非队列系统（资源约束 + 简单性）。
-2. ADR-2 agy CLI 作为唯一 v1 模型通道，接口抽象保留 API Key 路径。
-3. ADR-3 结构化输出：`--json-schema` + 本地校验 + ≤1 次无媒体 repair。
-4. ADR-4 交付默认 `auto`（先交付后审阅），Channel 可改 `after_approval`。
-5. ADR-5 Boundary 自动 sanity 用 ASR 停顿吸附，替代人工核验。
-6. ADR-6 Playbook 三步编译（需求抽取 / 编译 / 独立审计）+ 代码级 quote 溯源。
-7. ADR-7 时间统一为秒（float）。
-8. ADR-8 Web 仅 loopback + SSH 隧道访问。
+| v0.2 条目 | 现在 |
+|---|---|
+| ADR-1 串行单 worker；§0 同一时间只处理一期 | §R4-2 |
+| ADR-4 先交付后审阅、可改为审后交付；§1.3 末尾的 Review；§R-14「刊 + 朱批」 | §R2-4、§R2-5 |
+| ADR-5、§R-7 原文：用 ASR 停顿吸附模型边界 | §R-18：只吸附兜底区间 |
+| ADR-8、§R-15：Web 仅本机 + SSH 隧道 | §R4-4 |
+| §0：服务器 Chromium + noVNC 登录 YouTube | §R4-3 |
+| §1.2 导航 Desk / Library / Runs / System | §R2-7 |
+| §R-13、§5.1：编译器计划 | 已实现，见 [architecture.md](architecture.md) 与 `compiler.py` |
+| §2 OVH 系统架构、§3 计划中的目录结构、§4 阶段表、§6 表清单 | [architecture.md](architecture.md) |
+| §R-12 后半与 §8：「审阅完成后」删除媒体 | §R2-4：从交付完成起算 |

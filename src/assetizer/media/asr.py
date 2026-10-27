@@ -1,4 +1,4 @@
-"""Local ASR with faster-whisper (CPU, int8).
+"""ASR with faster-whisper: on a LAN GPU box when the `asr_url` setting names one, else locally (CPU, int8).
 
 Used for two things only: boundary sanity (word timestamps around a proposed
 cut) and best-effort subtitles. It is never the primary understanding path.
@@ -10,6 +10,11 @@ it back (2026-10-22: OOM while loading the 4th video's model); the child's exit
 returns all of it. Long audio is transcribed in windows cut at quiet moments,
 because faster-whisper extracts features for the whole array at once (a
 94-minute video peaked at +7 GB).
+
+With `asr_url` set (e.g. http://192.168.1.50:8790, the 4070 Ti box running
+scripts/gpu_asr/server.py) each window goes there instead; the windows, offsets
+and stitching stay here. When the box is off or fails mid-video, the child
+falls back to the CPU model for the whole video.
 """
 from __future__ import annotations
 
@@ -20,7 +25,10 @@ import signal
 import subprocess
 import sys
 import threading
+import urllib.parse
+import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 from .. import config
 
@@ -80,8 +88,39 @@ def transcribe_pcm(model, pcm, offset: float = 0.0, language: str | None = "zh",
     return {"segments": segments, "words": words, "language": lang or language}
 
 
+class RemoteWhisper:
+    """faster-whisper's ``model.transcribe(audio, ...)`` answered by scripts/gpu_asr/server.py, which decodes with
+    the same options as transcribe_pcm (large-v3-turbo, float16 on the GPU)."""
+
+    def __init__(self, url: str, token: str | None):
+        self.url, self.token = url.rstrip("/"), token
+        # the worker's HTTP(S)_PROXY points at Clash; the box is on the LAN
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with self.opener.open(self.url + "/healthz", timeout=5) as r:
+            json.load(r)
+
+    def transcribe(self, audio, *, language=None, initial_prompt=None, **_):
+        import numpy as np
+
+        pcm = np.round(audio * 32768.0).clip(-32768, 32767).astype(np.int16).tobytes()
+        query = urllib.parse.urlencode({k: v for k, v in (("language", language), ("prompt", initial_prompt)) if v})
+        req = urllib.request.Request(f"{self.url}/transcribe?{query}", data=pcm, method="POST",
+                                     headers={"Content-Type": "application/octet-stream"})
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        with self.opener.open(req, timeout=900) as r:
+            body = json.load(r)
+        segs = [SimpleNamespace(start=s["start"], end=s["end"], text=s["text"],
+                                words=[SimpleNamespace(**w) for w in s["words"]]) for s in body["segments"]]
+        return segs, SimpleNamespace(language=body.get("language"))
+
+
 def _command(wav: Path, out: Path, offset: float, language: str | None, initial_prompt: str | None) -> list[str]:
     cmd = [sys.executable, "-m", CHILD, str(wav), str(out), "--offset", repr(offset)]
+    from .. import db
+
+    if url := db.setting("asr_url"):
+        cmd += ["--remote", url]
     if language:
         cmd += ["--language", language]
     if initial_prompt:
@@ -123,13 +162,26 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--offset", type=float, default=0.0)
     p.add_argument("--language")
     p.add_argument("--prompt")
+    p.add_argument("--remote")
     a = p.parse_args(argv)
-    from faster_whisper import WhisperModel  # heavy import
-
     s = config.get()
-    model = WhisperModel(s.whisper_model, device="cpu", compute_type="int8",
-                         download_root=str(s.whisper_root), cpu_threads=6)
-    r = transcribe_pcm(model, _read_pcm(a.wav), a.offset, a.language, a.prompt)
+    pcm, r = _read_pcm(a.wav), None
+    if a.remote:
+        try:
+            r = transcribe_pcm(RemoteWhisper(a.remote, s.secret("asr-token")), pcm, a.offset, a.language, a.prompt)
+            r["device"] = f"remote {a.remote}"
+        except (OSError, ValueError, KeyError) as e:  # urllib errors are OSErrors
+            print(f"remote asr {a.remote} failed, using the CPU: {e}", file=sys.stderr)
+            fallback = f"{type(e).__name__}: {e}"[:300]
+    if r is None:
+        from faster_whisper import WhisperModel  # heavy import
+
+        model = WhisperModel(s.whisper_model, device="cpu", compute_type="int8",
+                             download_root=str(s.whisper_root), cpu_threads=6)
+        r = transcribe_pcm(model, pcm, a.offset, a.language, a.prompt)
+        r["device"] = "cpu"
+        if a.remote:
+            r["remote_failed"] = fallback
     tmp = a.out.with_name(a.out.name + ".tmp")
     tmp.write_text(json.dumps(r, ensure_ascii=False))
     tmp.replace(a.out)

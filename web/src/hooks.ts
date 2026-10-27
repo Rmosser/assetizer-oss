@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { get } from "./api";
+import { reduceMotion } from "./util";
 
 export type PollError = { message: string; auth: boolean; at: number };
 
@@ -42,6 +43,22 @@ export function useStored<T>(key: string, initial: T): [T, (v: T) => void] {
   const [v, setV] = useState<T>(() => { try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : initial; } catch { return initial; } });
   const set = useCallback((nv: T) => { setV(nv); try { localStorage.setItem(key, JSON.stringify(nv)); } catch { /* ignore */ } }, [key]);
   return [v, set];
+}
+
+/** Something that comes and goes (a toast, a docked bar): keep its last value on screen while it plays
+ *  its exit (`leaving`), then let it go. Under reduced motion it goes at once. */
+export function useLeaving<T>(value: T | null | undefined | false, ms = 240): { shown: T | null; leaving: boolean } {
+  const last = useRef<T | null>(value || null);
+  const [, gone] = useState(0);
+  if (value) last.current = value;
+  useEffect(() => {
+    if (value || last.current === null) return;
+    const drop = () => { last.current = null; gone((n) => n + 1); };
+    if (reduceMotion()) { drop(); return; }
+    const t = setTimeout(drop, ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return { shown: value || last.current, leaving: !value && last.current !== null };
 }
 
 export function useMedia(q: string) {

@@ -42,8 +42,9 @@ DB_PROPS = {
 }
 
 
-TOKEN_FIX = ("在服务器上执行 `printf '%s' 'ntn_新token' > ~/assetizer/data/secrets/notion-token && chmod 600 ~/assetizer/data/secrets/notion-token`，"
-             "并把 Integration 分享到目标数据库（数据库右上角 ··· → Connections）。")
+TOKEN_FIX = ("在本机终端执行 `lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; "
+             "cat > /lzcapp/var/assetizer/data/secrets/notion-token'`，粘贴新 token 后按 Ctrl-D；"
+             "并把 Integration 加到目标数据库（数据库右上角 ··· → Connections）。")
 
 
 def token_invalid(e: Exception) -> bool:
@@ -256,7 +257,7 @@ def registered_many(source_like: dict, video_ids: list[str]) -> dict[str, dict]:
             text = val.get("url") or "".join(t.get("plain_text", "") for t in val.get("rich_text", []) or [])
             for v in part:
                 if v in (text or "") and v not in out:
-                    out[v] = {"url": pg.get("url"), "title": _title(pg)}
+                    out[v] = {"id": pg.get("id"), "url": pg.get("url"), "title": _title(pg)}
     return out
 
 

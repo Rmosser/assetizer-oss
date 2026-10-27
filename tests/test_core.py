@@ -46,9 +46,14 @@ def test_error_classification():
     assert classify_error("INVALID_ARGUMENT ... function_declarations[0] schema") == "PROVIDER_SCHEMA_REJECTED"
     assert classify_error("You exceeded your current quota") == "PROVIDER_QUOTA"
     assert classify_error("HTTP 503 unavailable") == "PROVIDER_TRANSIENT"
+    assert classify_error('Eligibility check failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:'
+                          'loadCodeAssist": EOF') == "PROVIDER_TRANSIENT"
     assert classify_error("model output token limit reached") == "PROVIDER_OUTPUT_LIMIT"
     assert classify("ERROR: Sign in to confirm you’re not a bot") == "BOT_CHALLENGE"
     assert classify("HTTP Error 429: Too Many Requests") == "RATE_LIMITED"
+    assert classify("ERROR: [youtube] eu6OH1R3mL8: This live event will begin in a few moments.") == "LIVE_UPCOMING"
+    assert classify("[download] Got error: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol "
+                    "(_ssl.c:1032). Giving up after 5 retries") == "NETWORK"
 
 
 def test_video_id():
@@ -146,6 +151,7 @@ def test_safety_block_detection():
 
 
 def test_network_errors_are_transient():
+    assert classify_error("The stream was interrupted. Please continue the task you were working on.") == "PROVIDER_TRANSIENT"
     assert classify_error('request failed: read tcp 1.2.3.4:1->5.6.7.8:443: read: connection reset by peer') == "PROVIDER_TRANSIENT"
 
 
@@ -233,15 +239,12 @@ def test_notes_block_lists_doubts_in_source_order(home):
 
 
 def test_lock_on_confirm_enables_intake(home):
-    from fastapi.testclient import TestClient
-    from assetizer import db
+    from assetizer import db, tuning
     from assetizer.util import now
-    from assetizer.web import app as web
     t = now()
     db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, created_at, updated_at) VALUES ('wang','Wang','UCx','TRACKED',?,?)", t, t)
     pid = db.exec("INSERT INTO playbooks(channel_id, version, status, data, created_at) VALUES ('wang',1,'NEEDS_CONFIRMATION','{}',?)", t)
-    c = TestClient(web.app)
-    assert c.post(f"/api/playbooks/{pid}/confirm", json={}, headers={"host": "127.0.0.1"}).status_code == 200
+    tuning.confirm(pid)
     assert db.one("SELECT stage FROM channels WHERE id='wang'")["stage"] == "LOCKED"
     assert db.setting("ingest:wang")["enabled"] is True
 
@@ -1098,7 +1101,14 @@ for index, name, key, value in steps:
     step = "error_message" if os.environ.get("FAKE_AGY_REFUSE") and index == 2 else "agent_response"
     print(json.dumps({"step_update": {"conversation_id": cid, "step_index": index + 1, "step_type": step, "state": "DONE"}}), flush=True)
     time.sleep(0.3)
+if os.environ.get("FAKE_AGY_QUOTA"):  # the turn fails at the read because the quota ran out (2026-10-26)
+    msg = "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 101h13m11s."
+    print(json.dumps({"event": "error", "error": {"message": msg}}), flush=True)
+    print(json.dumps({"event": "result", "result": {"status": "ERROR", "error": msg, "conversation_id": cid}}), flush=True)
+    sys.exit(1)
+time.sleep(float(os.environ.get("FAKE_AGY_FLAIL", "0")))  # a model that lost its media and wanders off
 print(json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": answer, "conversation_id": cid, "usage": {}}}), flush=True)
+time.sleep(float(os.environ.get("FAKE_AGY_LINGER", "0")))  # agy 1.4.7 often stays up after its result
 """
 
 
@@ -1136,6 +1146,17 @@ def test_both_spellings_of_the_agy_media_read_are_accepted(fake_agy, home, tool,
     fake_agy(tool, param, str(clip), '{"ok": true}')
     r = AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
     assert r.receipt["status"] == "SUCCESS" and r.receipt["view_file_count"] == 1 and r.receipt["media_tool"] == tool
+
+
+def test_a_call_returns_as_soon_as_agy_reports_its_result(fake_agy, home, monkeypatch):
+    import time
+    from assetizer.providers.agy import AgyProvider
+    fake_agy(answer="在线")
+    monkeypatch.setenv("FAKE_AGY_LINGER", "120")
+    t = time.monotonic()
+    r = AgyProvider().call(home / "call", "只回复两个字：在线", kind="health")
+    assert r.text == "在线" and r.receipt["status"] == "SUCCESS" and "watchdog" not in r.receipt
+    assert time.monotonic() - t < 15
 
 
 def test_reading_any_other_file_is_still_a_deviation(fake_agy, home):
@@ -1226,6 +1247,12 @@ def test_a_run_whose_media_reads_all_deviate_waits_only_when_agy_itself_cannot_r
     monkeypatch.setattr(AgyProvider, "media_health", lambda self: {"ok": True, "version": "1.4.5", "tool": "read_file"})
     assert runner._hold_if_agy_cannot_read_media("v-r1", e) is False  # agy reads the self-test clip: this run's own problem
     assert db.setting("queue_paused") is None
+    # the self-test could not reach the model at all: an outage holds this run, production goes on
+    monkeypatch.setattr(AgyProvider, "media_health", lambda self: {"ok": False, "version": "1.4.7", "error": "PROVIDER_TRANSIENT"})
+    assert runner._hold_if_agy_cannot_read_media("v-r1", e) is True
+    assert db.one("SELECT wait_reason FROM runs WHERE id='v-r1'")["wait_reason"] == "NETWORK"
+    assert db.setting("queue_paused") is None
+    db.exec("UPDATE runs SET production='RUNNING', wait_reason=NULL WHERE id='v-r1'")
     monkeypatch.setattr(AgyProvider, "media_health", lambda self: {"ok": False, "version": "1.5.0", "tool": "open_media",
                                                                     "parameters": ["FilePath"], "error": "MODALITY_ROUTING_DEVIATION"})
     assert runner._hold_if_agy_cannot_read_media("v-r1", e) is True
@@ -1233,6 +1260,13 @@ def test_a_run_whose_media_reads_all_deviate_waits_only_when_agy_itself_cannot_r
     assert run["production"] == "WAITING" and run["wait_reason"] == "AGY_MEDIA_READ"
     assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
     assert runner._hold_if_agy_cannot_read_media("v-r1", ProviderError("PROVIDER_FAILURE")) is False
+    # the self-test ran out of quota: the run and production wait for the quota, which the health probe lifts
+    db.set_setting("queue_paused", None)
+    db.exec("UPDATE runs SET production='RUNNING', wait_reason=NULL WHERE id='v-r1'")
+    monkeypatch.setattr(AgyProvider, "media_health", lambda self: {"ok": False, "version": "1.4.7", "error": "PROVIDER_QUOTA"})
+    assert runner._hold_if_agy_cannot_read_media("v-r1", e) is True
+    assert db.one("SELECT wait_reason FROM runs WHERE id='v-r1'")["wait_reason"] == "PROVIDER_QUOTA"
+    assert db.setting("queue_paused")["reason"] == "PROVIDER_QUOTA"
 
 
 def test_agy_refusing_the_media_file_stops_the_call_at_once(fake_agy, home, monkeypatch):
@@ -1245,6 +1279,33 @@ def test_agy_refusing_the_media_file_stops_the_call_at_once(fake_agy, home, monk
         AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
     assert e.value.kind == "MEDIA_READ_FAILED" and "2048 bytes" in str(e.value)
     assert e.value.receipt["media_error"]["bytes"] == 2048 and e.value.receipt["status"] == "MEDIA_REFUSED"
+
+
+def test_a_quota_error_at_the_media_read_is_quota_not_a_refused_file(fake_agy, home, monkeypatch):
+    from assetizer.providers.agy import AgyProvider, ProviderError
+    clip = home / "clip.mp4"
+    clip.write_bytes(b"x" * 2048)
+    fake_agy("read_file", "Path", str(clip), "读不到")
+    monkeypatch.setenv("FAKE_AGY_REFUSE", "1")
+    monkeypatch.setenv("FAKE_AGY_QUOTA", "1")
+    with pytest.raises(ProviderError) as e:
+        AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
+    assert e.value.kind == "PROVIDER_QUOTA" and e.value.receipt["status"] == "FAILED"
+
+
+def test_agy_wandering_off_after_a_refused_file_is_stopped_after_the_grace(fake_agy, home, monkeypatch):
+    import time
+    from assetizer.providers import agy
+    clip = home / "clip.mp4"
+    clip.write_bytes(b"x" * 2048)
+    fake_agy("read_file", "Path", str(clip), "读不到")
+    monkeypatch.setenv("FAKE_AGY_REFUSE", "1")
+    monkeypatch.setenv("FAKE_AGY_FLAIL", "120")
+    monkeypatch.setattr(agy, "MEDIA_ERROR_GRACE", 1.0)
+    t = time.monotonic()
+    with pytest.raises(agy.ProviderError) as e:
+        agy.AgyProvider().call(home / "call", "读视频", kind="understand", media=[str(clip)])
+    assert e.value.kind == "MEDIA_READ_FAILED" and time.monotonic() - t < 15
 
 
 def test_the_media_self_test_reports_a_refused_file_size(fake_agy, canary, home, monkeypatch):
@@ -1286,7 +1347,7 @@ def test_a_cached_proxy_over_the_current_limit_is_encoded_again(home, monkeypatc
     s = config.get()
     calls = []
 
-    def fit(src, start, length, out):
+    def fit(src, start, length, out, **kw):
         calls.append(out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"x" * 10)
@@ -1350,6 +1411,70 @@ def test_asr_windows_are_stitched_on_one_timeline():
     assert [s["start"] for s in r["segments"]] == pytest.approx([100.0 + s + 1.0 for s in starts])
     assert [w["end"] for w in r["words"]] == pytest.approx([100.0 + s + 1.5 for s in starts])
     assert r["language"] == "zh"
+
+
+def test_remote_asr_runs_each_window_on_the_gpu_box_and_stitches_them_here(monkeypatch):
+    import importlib.util
+    import threading
+    from http.server import ThreadingHTTPServer
+    from pathlib import Path
+    import numpy as np
+    from assetizer.media import asr
+    monkeypatch.setenv("HF_HOME", "unused")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    spec = importlib.util.spec_from_file_location("gpu_asr_server", Path(__file__).parents[1] / "scripts/gpu_asr/server.py")
+    server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(server)
+
+    class Recording(_FakeWhisper):
+        def transcribe(self, audio, **kw):
+            self.audio = getattr(self, "audio", []) + [audio]
+            return super().transcribe(audio, **kw)
+
+    fake = Recording()
+    monkeypatch.setattr(server, "_load", lambda: fake)
+    monkeypatch.setattr(server, "_token", "s3cret")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{httpd.server_address[1]}"
+    pcm = _pcm(40 * 60, quiet=[(910, 911), (1795, 1796)])
+    try:
+        r = asr.transcribe_pcm(asr.RemoteWhisper(url, "s3cret"), pcm, offset=100.0, initial_prompt="涉及 QQQ、NVDA。")
+        with pytest.raises(OSError):  # 401
+            asr.transcribe_pcm(asr.RemoteWhisper(url, "wrong"), pcm[:asr.SR])
+    finally:
+        httpd.shutdown()
+    w = asr.windows(pcm)
+    assert len(fake.audio) == len(w)
+    for audio, (a, b) in zip(fake.audio, w):  # the samples arrive exactly as cut here
+        assert np.array_equal(audio, pcm[a:b].astype(np.float32) / 32768.0)
+    assert [x["end"] for x in r["words"]] == pytest.approx([100.0 + a / asr.SR + 1.5 for a, _ in w])
+
+
+def test_the_worker_hands_the_whisper_child_the_gpu_box_from_the_setting(home):
+    from pathlib import Path
+    from assetizer import db
+    from assetizer.media import asr
+    assert "--remote" not in asr._command(Path("a.wav"), Path("a.json"), 0.0, "zh", None)
+    db.set_setting("asr_url", "http://192.168.1.50:8790")
+    cmd = asr._command(Path("a.wav"), Path("a.json"), 0.0, "zh", None)
+    assert cmd[cmd.index("--remote") + 1] == "http://192.168.1.50:8790"
+
+
+def test_an_unreachable_gpu_box_falls_back_to_the_cpu(home, monkeypatch):
+    import json
+    import sys
+    import types
+    import wave
+    from assetizer.media import asr
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FakeWhisper))
+    wav, out = home / "a.wav", home / "a.json"
+    with wave.open(str(wav), "wb") as f:
+        f.setnchannels(1), f.setsampwidth(2), f.setframerate(asr.SR)
+        f.writeframes(_pcm(60).tobytes())
+    asr.main([str(wav), str(out), "--remote", "http://127.0.0.1:9"])  # nothing listens on the discard port
+    r = json.loads(out.read_text())
+    assert r["device"] == "cpu" and r["remote_failed"] and [x["word"] for x in r["words"]] == ["涨"]
 
 
 def test_asr_child_reads_wav_and_writes_json(home, monkeypatch):
@@ -1555,3 +1680,901 @@ def test_daily_digest(sent, monkeypatch):
     assert notify.digest_due()
     notify.send_digest()
     assert not notify.digest_due() and sent[-1].startswith("📋 Assetizer 日报（10-24 09:00）")
+
+
+# ---------------------------------------------------------------- LazyCat package (docs/lazycat-lpk-plan.md)
+def test_lazycat_gateway_needs_a_logged_in_user(tmp_path, monkeypatch):
+    import dataclasses
+    from fastapi.testclient import TestClient
+    from assetizer import config
+    from assetizer.web import app as web
+    config.override(dataclasses.replace(config.load(), home=tmp_path))
+    monkeypatch.setattr(web, "TRUST_LAZYCAT", True)
+    c = TestClient(web.app)
+    gateway = {"host": "web:8770", "x-forwarded-host": "assetizer.prodbox.heiyu.space"}  # as sniffed on dev
+    user = {**gateway, "x-hc-user-id": "demo"}
+    assert c.get("/api/overview", headers=gateway).status_code == 403
+    assert c.get("/api/overview", headers=user).status_code == 200
+    assert c.get("/api/overview", headers={**user, "x-forwarded-host": "evil.example"}).status_code == 403
+    assert c.get("/api/overview", headers={**user, "host": "assetizer.prodbox.heiyu.space"}).status_code == 403
+    assert c.get("/healthz", headers={"host": "127.0.0.1:8770"}).json() == {"ok": True}
+    monkeypatch.setattr(web, "TRUST_LAZYCAT", False)  # off outside LazyCat: the header alone admits nobody
+    assert c.get("/api/overview", headers=user).status_code == 403
+
+
+def test_container_worker_reports_a_crash_but_not_a_clean_stop(sent, monkeypatch):
+    from assetizer import config, db
+    from assetizer.pipeline import finish, runner
+    from assetizer.util import now
+    monkeypatch.setattr(runner, "kill_orphans", lambda: 0)
+    monkeypatch.setattr(finish, "sweep_agy_state", lambda: None)
+    monkeypatch.setattr(runner, "systemd_restarts", lambda: None)  # no systemd in the container
+    monkeypatch.setattr(runner, "container_exit_reason", lambda: "内存不足，被系统杀掉")
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('v',?,?)", now(), now())
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','RUNNING',?)", now())
+    run_dir = config.get().home / "run"
+    runner.Worker().recover()  # first start ever: nothing ran before
+    (run_dir / "worker.heartbeat").touch()
+    (run_dir / "worker.clean-exit").touch()  # a SIGTERM stop (upgrade, restart)
+    runner.Worker().recover()
+    assert sent == [] and not (run_dir / "worker.clean-exit").exists()
+    db.exec("UPDATE runs SET production='RUNNING' WHERE id='v-r1'")
+    runner.Worker().recover()  # heartbeat but no clean-exit mark: it died
+    assert len(sent) == 1 and "内存不足" in sent[0] and "v-r1" in sent[0]
+
+
+def test_container_exit_reason_counts_oom_kills(home, monkeypatch, tmp_path):
+    from assetizer.pipeline import runner
+    events = tmp_path / "memory.events"
+    monkeypatch.setattr(runner, "CGROUP_MEMORY_EVENTS", events)
+    events.write_text("low 0\nhigh 3\nmax 1\noom 1\noom_kill 1\n")
+    assert runner.container_exit_reason() == "内存不足，被系统杀掉"
+    assert runner.container_exit_reason() == "进程意外退出"  # the same kill is not counted twice
+    events.unlink()
+    assert runner.container_exit_reason() == "原因不明"
+
+
+def test_worker_runs_as_many_issues_at_once_as_the_box_allows(home, monkeypatch):
+    import threading
+    import time
+    from assetizer import db, delivery
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    t = now()
+    for v in ("a", "b", "c"):
+        db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES (?,'NOT_STARTED',?,?)", v, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?,?,'QUEUED',?)", f"{v}-r1", v, t)
+    release = {r: threading.Event() for r in ("a-r1", "b-r1", "c-r1")}
+    started, delivered = [], []
+    def execute(rid):
+        started.append(rid)
+        db.exec("UPDATE runs SET production='RUNNING' WHERE id=?", rid)
+        release[rid].wait(5)
+        db.exec("UPDATE runs SET production='COMPLETE' WHERE id=?", rid)
+        return "COMPLETE"
+    monkeypatch.setattr(runner, "execute", execute)
+    monkeypatch.setattr(runner.Worker, "housekeeping", lambda self: None)
+    monkeypatch.setattr(runner, "apply_nudges", lambda: False)
+    monkeypatch.setattr(delivery, "deliver_pending", lambda: delivered.append(threading.current_thread().name) or False)
+    w = runner.Worker()
+    assert w.tick() and started == ["a-r1"]  # one slot unless the box says otherwise: the old serial worker
+    db.set_setting("worker_slots", 2)
+    w.tick()
+    assert started == ["a-r1", "b-r1"] and not w.tick()  # both slots busy: the third waits
+    release["a-r1"].set()
+    while w.active["a-r1"].is_alive():
+        time.sleep(0.01)
+    delivered.clear()
+    assert w.tick() and delivered == ["MainThread"]  # a finished issue is delivered by the worker loop, never a run thread
+    w.tick()
+    assert started == ["a-r1", "b-r1", "c-r1"]
+    release["b-r1"].set(), release["c-r1"].set()
+    db.set_setting("worker_slots", "many")
+    assert runner.worker_slots() == 1
+    db.set_setting("worker_slots", 40)
+    assert runner.worker_slots() == 16
+
+
+def test_an_outage_that_outlasts_the_call_retries_holds_the_run_instead_of_failing_it(home, monkeypatch):
+    import time
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import ProviderError
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+
+    def knowledge(ctx):
+        raise ProviderError("PROVIDER_TRANSIENT", 'Eligibility check failed: Post "https://x/loadCodeAssist": EOF')
+    monkeypatch.setattr(runner, "STAGES", [("KNOWLEDGE", knowledge, True)])
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT production, wait_reason FROM runs WHERE id='v-r1'") == {"production": "WAITING", "wait_reason": "NETWORK"}
+    w = runner.Worker()
+    m = time.monotonic()
+    w.last.update({k: m for k in w.last}, retry=m - 1801)  # only the periodic retry is due, whatever the uptime
+    w.housekeeping()
+    assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
+
+
+# ---------------------------------------------------------------- channel page v2: pins, intake settings, preset names
+def test_a_pinned_version_survives_newer_runs_until_lock(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db, tuning
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("INSERT INTO sources(id, channel_id, created_at, updated_at) VALUES ('s1','w',?,?)", t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','s1',?)", t)
+    for rid in ("r1", "r2", "r3"):
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?,'s1','COMPLETE',?)", rid, t)
+    cur = lambda: db.one("SELECT current_run_id, adopt_pinned FROM sources WHERE id='s1'")  # noqa: E731
+    src = db.one("SELECT * FROM sources WHERE id='s1'")
+    runner.adopt_completed(src, "r1")
+    runner.adopt_completed(src, "r2")
+    assert cur() == {"current_run_id": "r2", "adopt_pinned": 0}  # not pinned: the newest finished run
+    tuning.adopt("s1", "r1")
+    runner.adopt_completed(src, "r3")
+    assert cur() == {"current_run_id": "r1", "adopt_pinned": 1}  # pinned: a newer run is only recorded
+    tuning.confirm(v2)
+    assert cur() == {"current_run_id": "r1", "adopt_pinned": 0}  # after 定稿 a rerun replaces the issue as usual
+
+
+def test_intake_keeps_its_minimum_and_never_backfills_the_pause(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db, ingest, tuning
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    assert c.post("/api/channels/w/ingest", json={"enabled": False, "min_minutes": 30}, headers=h).status_code == 200
+    tuning.confirm(v2)
+    cfg = db.setting("ingest:w")
+    assert cfg["enabled"] is True and cfg["min_minutes"] == 30
+    db.set_setting("ingest:w", {**cfg, "since": "2026-01-01T00:00:00+00:00"})  # locked long ago
+    tuning.retune("w")
+    assert db.setting("ingest:w")["min_minutes"] == 30
+    ingest.set_enabled("w", True)  # locked again: only what comes out from now on
+    cfg = db.setting("ingest:w")
+    assert cfg["min_minutes"] == 30 and cfg["since"] > "2026-01-01T00:00:00+00:00"
+    ingest.set_enabled("w", True, 45)  # already on: just the minimum changes
+    assert db.setting("ingest:w") == {**cfg, "min_minutes": 45}
+
+
+def test_preset_finds_the_video_link_under_either_name_and_warns_without_one():
+    from assetizer.notion import mapping as M
+    lib = json.loads(json.dumps(LIB))
+    lib["properties"]["参考链接"] = lib["properties"].pop("视频链接")
+    schema = M.schema_of(lib)
+    cfg = M.preset("wang-haibin", "lib", schema, "https://app.notion.com/p/0000000300008000a000000000000003")
+    assert cfg["properties"]["vl"] == {"name": "参考链接", "type": "url", "source": "video_url"}
+    assert M.warnings(cfg, schema) == {}
+    del cfg["properties"]["vl"]
+    assert list(M.warnings(cfg, schema)) == ["video_url"]
+
+
+# ---------------------------------------------------------------- channel page v2: Notion preview, pinned adoption, 定稿单
+class FakeNotion:
+    """Reads only: the library database and its pages. Any write is recorded so a test can say there was none."""
+
+    def __init__(self, schema=None):
+        self.calls = []
+        self.schema = schema or LIB
+
+    def _req(self, method, path, idempotent=None, **kw):
+        self.calls.append((method, path))
+        if method == "GET" and path == "/databases/lib":
+            return {"id": "lib", "url": "https://www.notion.so/lib", "title": [{"plain_text": "知识领袖长期追踪库"}], **self.schema}
+        raise AssertionError(f"unexpected Notion call {method} {path}")
+
+    def page(self, pid):
+        self.calls.append(("GET", f"/pages/{pid}"))
+        return {"id": pid, "icon": {"type": "emoji", "emoji": "📈"},
+                "properties": {"Name": {"type": "title", "title": [{"plain_text": "交易员汤姆"}]}}}
+
+
+def _preview_fixture(home):
+    from assetizer import config, db
+    from assetizer.notion import mapping as M
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, created_at, updated_at) VALUES ('trader-tom','交易员汤姆','UCt','TRACKED',?,?)", t, t)
+    db.exec("""INSERT INTO sources(id, url, channel_id, title, headline, published_at, info, created_at, updated_at)
+               VALUES ('s1','https://www.youtube.com/watch?v=s1','trader-tom','09/08/2026 技术分析视频','最后跑完那次的题眼','20260908','{}',?,?)""", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, summary, created_at) VALUES ('r1','s1','COMPLETE',?,?)",
+            json.dumps({"units": 2, "model": {"calls": 3}}), t)
+    for uid, title, start in [("u1", "MRNA 双重缺口回补", 99.0), ("u2", "TSLA 跳空突破", 915.0)]:
+        db.exec("INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, data) VALUES (?,'r1','s1',?,0,?,?,?,'{}')",
+                uid, uid, title, start, start + 60)
+    for sid, kind, uids in [("secI", "INTRO", []), ("sec1", "UNIT", ["u1"]), ("sec2", "UNIT", ["u2"]), ("secO", "OUTRO", [])]:
+        db.exec("INSERT INTO sections(id, run_id, ord, kind, unit_ids, markdown) VALUES (?,'r1',0,?,?,'')", sid, kind, json.dumps(uids))
+    run = config.get().runs_dir / "r1"
+    (run / "article").mkdir(parents=True)
+    shot = run / "shot.jpg"
+    shot.write_bytes(b"jpg")
+    aid = db.exec("INSERT INTO assets(run_id, source_id, unit_id, kind, status, path, created_at) VALUES ('r1','s1','u1','screenshot','GENERATED',?,?)",
+                  str(shot), t)
+    (run / "composition.json").write_text(json.dumps({"blocks": [
+        {"kind": "INTRO", "section_id": "secI", "markdown": "本期复盘围绕生物科技与半导体。"},
+        {"kind": "UNIT", "section_id": "sec1", "unit_id": "u1", "markdown": "## 01. MRNA 双重缺口回补\n两个缺口在同一价格带重叠，**成交量**极度萎缩。",
+         "screenshots": [{"path": str(shot), "t": 132, "reason": "日线双缺口"}]},
+        {"kind": "UNIT", "section_id": "sec2", "unit_id": "u2", "markdown": "## 02. TSLA 跳空突破\n长周末前减持。"},
+        {"kind": "OUTRO", "section_id": "secO", "markdown": "| 优先级 | 时间 |\n|---|---|\n| 1 | 01:39 |"}]}))
+    (run / "article" / "outline.json").write_text(json.dumps({"headline": "美股图表读图与交易执行学习导航"}))
+    cfg = M.preset("trader-tom", "lib", M.schema_of(LIB), "0000000500008000a000000000000005")
+    M.save("trader-tom", {**cfg, "heading": "{channel} - {date8}美股市场复盘"})
+    return aid
+
+
+def test_notion_preview_renders_unsaved_edits_from_one_run_and_never_writes(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import preview as PV
+    from assetizer.notion import mapping as M
+    from assetizer.web import app as web
+    aid = _preview_fixture(home)
+    n = FakeNotion()
+    monkeypatch.setattr(web, "_notion", lambda: n)
+    PV.forget()
+    saved = M.get("trader-tom")
+    props = {**saved["properties"], "title": {"name": "Name", "type": "title", "source": "template", "value": "{channel} · {headline}"},
+             "own": {"name": "内容所属", "type": "select", "source": "fixed", "value": "没有这个选项"}}
+    c = TestClient(web.app)
+    r = c.post("/api/channels/trader-tom/notion/preview", json={"run_id": "r1", "config": {"properties": props}},
+               headers={"host": "127.0.0.1"}).json()
+    # 本期题眼 comes from this run's outline, not from whichever run of the issue finished last
+    assert r["title"] == [{"text": "交易员汤姆", "var": "channel"}, {"text": " · "}, {"text": "美股图表读图与交易执行学习导航", "var": "headline"}]
+    assert r["heading"] == [{"text": "交易员汤姆", "var": "channel"}, {"text": " - "}, {"text": "20260908", "var": "date8"}, {"text": "美股市场复盘"}]
+    assert r["icon"] == {"emoji": "📈"}
+    assert r["problems"] == {"own": "「内容所属」没有选项「没有这个选项」"}
+    rows = {p["id"]: p for p in r["properties"]}
+    assert rows["up"]["value"] == [{"id": "00000005-0000-8000-a000-000000000005", "title": "交易员汤姆"}]
+    assert rows["acc"]["value"] == "公开视频" and rows["ct"]["writable"] is False
+    by_key = {b["key"]: b for b in r["blocks"]}
+    assert by_key["src"]["origin"] == "frame" and by_key["src"]["tpl"] is True
+    assert by_key["sec1:h"] == {"type": "heading_3", "text": [{"t": "01. MRNA 双重缺口回补"}], "key": "sec1:h",
+                                "origin": "unit", "unit_ids": ["u1"], "tpl": False}
+    assert by_key["sec1:shot0"]["type"] == "image" and by_key["sec1:shot0"]["asset_id"] == aid
+    assert any(s.get("b") and s["t"] == "成交量" for b in r["blocks"] if b["key"].startswith("sec1:p") for s in b.get("text", []))
+    assert by_key["runinfo"]["origin"] == "tail" and by_key["runinfo"]["children"]
+    assert all(m == "GET" for m, _ in n.calls)
+    assert M.get("trader-tom") == saved  # a preview never saves
+
+
+def test_adopt_pins_or_follows_the_newest_finished_run(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db, tuning
+    from assetizer.util import now
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("INSERT INTO sources(id, channel_id, current_run_id, created_at, updated_at) VALUES ('s1','w','r2',?,?)", t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','s1',?)", t)
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at, finished_at) VALUES ('r1','s1',?,'COMPLETE',?,'2026-10-01')", v1, t)
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at, finished_at) VALUES ('r2','s1',?,'COMPLETE',?,'2026-10-02')", v2, t)
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    assert c.post("/api/sources/s1/adopt", json={"run_id": "r1"}, headers=h).json() == {"ok": True, "run_id": "r1", "pinned": True}
+    wb = tuning.workbench("w")
+    assert wb["samples"][0]["adopt"] == {"run_id": "r1", "pinned": True}
+    assert {p["version"]: p["adopt_count"] for p in wb["playbooks"]} == {1: 1, 2: 0}
+    assert c.post("/api/sources/s1/adopt", json={"pinned": False}, headers=h).json() == {"ok": True, "run_id": "r2", "pinned": False}
+    assert db.one("SELECT current_run_id, adopt_pinned FROM sources WHERE id='s1'") == {"current_run_id": "r2", "adopt_pinned": 0}
+
+
+def test_headline_follows_the_adopted_run(home):
+    from fastapi.testclient import TestClient
+    from assetizer import config, db
+    from assetizer.pipeline.runner import adopt_completed
+    from assetizer.util import now
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("INSERT INTO sources(id, channel_id, title, current_run_id, adopt_pinned, created_at, updated_at) VALUES ('s1','w','原标题','r1',1,?,?)", t, t)
+    for rid, pb, head in (("r1", v1, "旧题眼"), ("r2", v2, "新题眼")):
+        db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at, finished_at) VALUES (?,'s1',?,'COMPLETE',?,?)", rid, pb, t, t)
+        (config.get().runs_dir / rid / "article").mkdir(parents=True)
+        (config.get().runs_dir / rid / "article" / "outline.json").write_text(json.dumps({"headline": head}))
+    row = lambda: db.one("SELECT current_run_id, headline FROM sources WHERE id='s1'")  # noqa: E731
+    adopt_completed(db.one("SELECT * FROM sources WHERE id='s1'"), "r2")  # pinned: a trial that finishes does not take over
+    assert row() == {"current_run_id": "r1", "headline": None}
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    assert c.get("/api/sources/s1?run=r2", headers=h).json()["source"]["headline"] == "新题眼"
+    db.exec("UPDATE sources SET adopt_pinned=0 WHERE id='s1'")
+    adopt_completed(db.one("SELECT * FROM sources WHERE id='s1'"), "r2")
+    assert row() == {"current_run_id": "r2", "headline": "新题眼"}
+    c.post("/api/sources/s1/adopt", json={"run_id": "r1"}, headers=h)
+    assert row() == {"current_run_id": "r1", "headline": "旧题眼"}
+
+
+def _lock_fixture():
+    from assetizer import db
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    v3 = db.exec("INSERT INTO playbooks(channel_id, version, status, data, created_at) VALUES ('w',3,'NEEDS_CONFIRMATION','{}',?)", now())
+    t = now()
+    # s1 new to the library · s2 a page Assetizer wrote · s3 still running a newer version · s4 the user's own library page
+    for sid, page, cur, pb in [("s1", None, "r1", v2), ("s2", "pg-2", "r2", v1), ("s3", None, "r3", v1), ("s4", None, "r5", v1)]:
+        db.exec("INSERT INTO sources(id, channel_id, title, notion_page_id, current_run_id, created_at, updated_at) VALUES (?,'w',?,?,?,?,?)",
+                sid, f"样片{sid}", page, cur, t, t)
+        db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w',?,?)", sid, t)
+        db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at) VALUES (?,?,?,'COMPLETE',?)", cur, sid, pb, t)
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at) VALUES ('r4','s3',?,'RUNNING',?)", v2, t)
+    return v1, v2, v3
+
+
+def test_lock_preview_says_what_each_sample_would_get(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import delivery
+    from assetizer.web import app as web
+    v1, v2, v3 = _lock_fixture()
+    monkeypatch.setattr(delivery, "registered_many", lambda src, ids: {
+        "s2": {"id": "pg2", "url": "https://notion.so/pg2", "title": "样片s2"}, "s4": {"id": "pg-x", "url": "https://notion.so/x", "title": "旧页"}})
+    r = TestClient(web.app).get(f"/api/channels/w/lock-preview?playbook_id={v2}", headers={"host": "127.0.0.1"}).json()
+    rows = {s["source_id"]: s for s in r["samples"]}
+    assert r["tested"] is True and r["library_checked"] is True
+    assert rows["s1"]["library"] is None and rows["s1"]["adopted"] == {"run_id": "r1", "version": 2, "pinned": False}
+    assert rows["s2"]["library"]["owned"] is True and rows["s2"]["can_replace"] is True
+    assert rows["s4"]["library"]["owned"] is False and rows["s4"]["can_replace"] is False
+    assert rows["s3"]["running"] == {"run_id": "r4", "version": 2, "state": "RUNNING"}
+    assert {c["version"]: c["tested"] for c in r["candidates"]} == {3: False, 2: True, 1: True}
+
+
+def test_lock_writes_keeps_replaces_or_waits_per_sample_all_or_nothing(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.web import app as web
+    v1, v2, v3 = _lock_fixture()
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, status, created_at) VALUES ('w','s1',?,'PENDING','2026-10-26')", v3)
+    queued = lambda: db.one("SELECT status FROM trial_queue WHERE channel_id='w'")["status"]  # noqa: E731
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    lock = lambda pid, samples, ingest=None: c.post("/api/channels/w/lock", headers=h,  # noqa: E731
+                                                     json={"playbook_id": pid, "samples": samples, "ingest": ingest})
+    r = lock(v3, [])
+    assert r.status_code == 409 and "还没在样片上跑过" in r.json()["detail"]
+    r = lock(v2, [{"source_id": "s4", "action": "replace"}])
+    assert r.status_code == 409 and "只能保留" in r.json()["detail"]
+    assert lock(v2, [{"source_id": "s1", "action": "wait"}]).status_code == 409
+    assert db.one("SELECT stage FROM channels WHERE id='w'")["stage"] == "TUNING" and queued() == "PENDING"  # refused: nothing changed
+    r = lock(v2, [{"source_id": "s2", "action": "replace"}, {"source_id": "s3", "action": "wait"}, {"source_id": "s4", "action": "keep"}],
+             {"enabled": True, "min_minutes": 20})
+    assert r.status_code == 200 and r.json()["write"] == 2 and r.json()["keep"] == 1 and r.json()["wait"] == 1
+    src = {s["id"]: s for s in db.q("SELECT id, delivery, delivery_reason, adopt_pinned, deliver_after_run, current_run_id FROM sources")}
+    assert db.one("SELECT stage FROM channels WHERE id='w'")["stage"] == "LOCKED" and queued() == "CANCELLED"
+    assert db.one("SELECT status FROM playbooks WHERE id=?", v2)["status"] == "ACTIVE"
+    assert src["s1"]["delivery"] == "NOT_STARTED" and src["s1"]["adopt_pinned"] == 1
+    assert src["s2"]["delivery"] == "STALE"
+    assert (src["s3"]["delivery"], src["s3"]["deliver_after_run"], src["s3"]["adopt_pinned"]) == ("HELD", "r4", 0)
+    assert (src["s4"]["delivery"], src["s4"]["delivery_reason"]) == ("REGISTERED", "库里已有，定稿时选择保留")
+    assert db.setting("ingest:w")["min_minutes"] == 20
+    # the awaited run finishes: it becomes the issue's version and the hold is gone
+    runner.adopt_completed(db.one("SELECT * FROM sources WHERE id='s3'"), "r4")
+    assert db.one("SELECT current_run_id, deliver_after_run FROM sources WHERE id='s3'") == {"current_run_id": "r4", "deliver_after_run": None}
+
+
+def test_a_held_sample_falls_back_to_its_adopted_version_when_the_run_fails(home):
+    from assetizer import db, tuning
+    from assetizer.pipeline import runner
+    v1, v2, v3 = _lock_fixture()
+    tuning.lock("w", v2, [{"source_id": "s3", "action": "wait"}])
+    runner._fail("r4", RuntimeError("片段超时"))
+    assert db.one("SELECT current_run_id, delivery, deliver_after_run FROM sources WHERE id='s3'") == \
+        {"current_run_id": "r3", "delivery": "NOT_STARTED", "deliver_after_run": None}
+
+
+def test_retune_drops_holds(home):
+    from assetizer import db, tuning
+    v1, v2, v3 = _lock_fixture()
+    tuning.lock("w", v2, [{"source_id": "s3", "action": "wait"}])
+    tuning.retune("w")
+    assert db.one("SELECT delivery, deliver_after_run FROM sources WHERE id='s3'") == {"delivery": "NOT_STARTED", "deliver_after_run": None}
+
+
+# ---------------------------------------------------------------- channel page v2: 稿纸, workbench tracks, compare by content, retarget
+def test_clauses_remember_where_they_stand_in_the_prompt():
+    from assetizer.compiler import split_clauses
+    raw = "# 一、目标\n\n我想学习**读图**。不要硬凑数量；\n\n例如：\n* “这个缺口”\n"
+    cl = split_clauses(raw)
+    assert [raw[c["start"]:c["end"]] for c in cl] == ["我想学习**读图**。", "不要硬凑数量；", "例如：\n* “这个缺口”"]
+
+
+def _annotated_playbooks():
+    from assetizer import db
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, mode, created_at, updated_at) VALUES ('tom','汤姆','TRACKED',?,?)", t, t)
+    text = "# 一、学习地图\n\n找出**读图片段**。不要硬凑数量。\n\n简单报涨跌幅可以忽略。\n\n处理完后保存成文件。"
+    pr = db.exec("INSERT INTO channel_prompts(channel_id, version, text, sha256, created_at) VALUES ('tom',1,?,'h',?)", text, t)
+    old = {"rules": [{"id": "rule_count", "rule": "根据实际值得学习的片段数量输出，不硬凑"}]}
+    new = {"rules": [{"id": "rule_count", "label": "选段与数量", "rule": "根据实际值得学习的片段数量输出，不按固定数量硬凑"},
+                     {"id": "rule_filter", "rule": "忽略简单报涨跌幅与闲聊"}],
+           "facets": [{"key": "tasks", "label": "观察任务", "type": "list", "description": "截图后看哪里", "clause_ids": ["C001"]}]}
+    audit = {"clauses": [{"id": "C001", "text": "找出读图片段。", "section": "一、学习地图"},
+                         {"id": "C002", "text": "不要硬凑数量。", "section": "一、学习地图"},
+                         {"id": "C003", "text": "简单报涨跌幅可以忽略。", "section": "一、学习地图"},
+                         {"id": "C004", "text": "处理完后保存成文件。", "section": "一、学习地图"}],
+             "clause_map": [{"clause_id": "C001", "disposition": "RULE", "target": "rule_count", "reason": ""},
+                            {"clause_id": "C002", "disposition": "RULE", "target": "rule_count", "reason": ""},
+                            {"clause_id": "C003", "disposition": "RULE", "target": "rule_filter", "reason": ""},
+                            {"clause_id": "C004", "disposition": "ORCHESTRATION", "target": "", "reason": "保存路径由系统承担"}],
+             "policy_conflicts": []}
+    db.exec("INSERT INTO playbooks(channel_id, version, status, data, audit, origin, created_at) VALUES ('tom',1,'ACTIVE',?,'{}','seed:run-014',?)",
+            json.dumps(old), t)
+    return db.exec("INSERT INTO playbooks(channel_id, prompt_id, version, status, data, audit, origin, created_at) VALUES ('tom',?,2,'NEEDS_CONFIRMATION',?,?,'compiler:p1',?)",
+                   pr, json.dumps(new), json.dumps(audit), t), text
+
+
+def test_annotations_place_each_clause_in_the_prompt_and_name_what_changed(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    pid, text = _annotated_playbooks()
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    a = c.get(f"/api/playbooks/{pid}/annotations", headers=h).json()
+    assert a["has_provenance"] is True and a["prompt"]["version"] == 1
+    assert [text[x["start"]:x["end"]] for x in a["clauses"]] == ["找出**读图片段**。", "不要硬凑数量。", "简单报涨跌幅可以忽略。", "处理完后保存成文件。"]
+    assert [(x["disposition"], x["rule_id"]) for x in a["clauses"]][-1] == ("ORCHESTRATION", None)
+    assert [r["label"] for r in a["rules"]] == ["选段与数量", "忽略简单报涨跌幅…"]  # no short name yet: its opening words
+    assert a["coverage"] == {"clauses": 4, "used": 3, "system": 1, "redundant": 0, "ignored": 0}
+    assert [x["to"]["label"] for x in a["vs_previous"]["changed"]] == ["选段与数量"]
+    assert [x["label"] for x in a["vs_previous"]["added"]] == ["忽略简单报涨跌幅…"] and a["vs_previous"]["removed"] == []
+    imported = db.one("SELECT id FROM playbooks WHERE version=1")["id"]
+    assert c.get(f"/api/playbooks/{imported}/annotations", headers=h).json()["has_provenance"] is False
+    assert c.get("/api/playbooks/999/annotations", headers=h).status_code == 404
+
+
+def test_recompile_drafts_a_new_version_from_the_same_goal(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import compiler, db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    drafted, _ = _annotated_playbooks()
+    imported = db.one("SELECT id FROM playbooks WHERE version=1")["id"]
+    calls, later = [], []
+    monkeypatch.setattr(web, "_bg", lambda fn, *a, label="": later.append((fn, a)))
+    monkeypatch.setattr(compiler, "compile_prompt", lambda cid, pid, again=False: calls.append((cid, pid, again)) or db.exec(
+        "INSERT INTO playbooks(channel_id, prompt_id, version, status, data, audit, origin, created_at) "
+        "VALUES (?,?,3,'NEEDS_CONFIRMATION','{}','{}','compiler:p1',?)", cid, pid, now()))
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    goal = db.one("SELECT id FROM channel_prompts WHERE channel_id='tom'")["id"]
+    assert c.post(f"/api/playbooks/{imported}/recompile", headers=h, json={}).json() == {"prompt_id": goal, "compiling": True}
+    tom = lambda: next(x for x in c.get("/api/channels", headers=h).json()["channels"] if x["id"] == "tom")  # noqa: E731
+    assert tom()["compile"]["state"] == "running"  # the goal already has v2, so only a newer version means done
+    assert c.post(f"/api/playbooks/{drafted}/recompile", headers=h, json={}).status_code == 409
+    fn, args = later[0]
+    fn(*args)
+    assert calls == [("tom", goal, True)] and tom()["compile"]["state"] == "done"
+    a = c.get(f"/api/playbooks/{drafted}/annotations", headers=h).json()
+    assert a["has_labels"] is False  # rule_filter has no short name of its own
+    assert c.post("/api/playbooks/999/recompile", headers=h, json={}).status_code == 404
+    uni = db.exec("INSERT INTO playbooks(channel_id, version, status, data, audit, origin, created_at) VALUES (NULL,1,'ACTIVE','{}','{}','seed:universal',?)", now())
+    assert c.post(f"/api/playbooks/{uni}/recompile", headers=h, json={}).status_code == 400
+
+
+V7_SPANS = [[0, 605], [605, 1015], [1015, 1600], [1600, 1858], [1858, 2257], [2257, 2580], [2580, 2865], [2865, 2890], [2890, 3037],
+            [3037, 3075], [3075, 3147], [3147, 3249], [3249, 3336], [3336, 3382], [3382, 3448], [3448, 3515], [3515, 3610], [3610, 3767]]
+V8_SPANS = [[0, 605], [605, 1020], [1020, 1620], [1620, 2100], [2100, 2400], [2400, 2864], [2865, 2889], [2890, 3037], [3038, 3075],
+            [3076, 3147], [3148, 3197], [3198, 3248], [3249, 3335], [3336, 3382], [3383, 3448], [3449, 3514], [3515, 3610], [3611, 3650],
+            [3651, 3707], [3708, 3767]]
+
+
+def test_compare_names_split_merge_new_and_gone_units():
+    from assetizer.tuning import changes
+    A = [{"start": a, "end": b} for a, b in V7_SPANS]
+    B = [{"start": a, "end": b} for a, b in V8_SPANS]
+    old, new = changes(A, B)
+    assert (new.count("new"), new.count("split"), new.count("merge"), old.count("gone")) == (1, 5, 1, 1)
+    assert old[5] == "gone" and new[4] == "new" and new[3] == "merge" and old[11] == "split"
+
+
+def test_workbench_draws_tracks_and_estimates_the_missing_trials(home):
+    from assetizer import db, tuning
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("INSERT INTO sources(id, channel_id, duration, created_at, updated_at) VALUES ('s1','w',3600,?,?), ('s2','w',1800,?,?)", t, t, t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','s1',?), ('w','s2',?)", t, t)
+    db.exec("""INSERT INTO runs(id, source_id, playbook_id, production, created_at, started_at, finished_at)
+               VALUES ('r1','s1',?,'COMPLETE',?,'2026-10-01T10:00:00+00:00','2026-10-01T11:30:00+00:00')""", v1, t)
+    db.exec("INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, learning_priority, data) VALUES ('u1','r1','s1','u1',0,'缺口',0,600,3,'{}')")
+    db.exec("""INSERT INTO flags(source_id, run_id, target_kind, target_id, kind, severity, title, origin, created_at)
+               VALUES ('s1','r1','UNIT','u1','AI_X','REVIEW','边界',  'AI_CHECK',?)""", t)
+    wb = tuning.workbench("w")
+    run = wb["samples"][0]["runs"][0]
+    assert run["track"] == [[0.0, 600.0, 3]] and run["flag_at"] == [300.0] and run["eta_seconds"] is None
+    per = {p["version"]: p for p in wb["playbooks"]}
+    assert per[1]["missing"] == 1 and per[2]["missing"] == 2
+    # 90 minutes for a 60-minute video: 1.5 min per video minute → s2 (30 min) is 45, both samples 135
+    assert per[1]["est_minutes"] == 45 and per[2]["est_minutes"] == 135
+
+
+def test_retarget_carries_mappings_by_name_and_asks_to_repick_relations(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import db, preview as PV
+    from assetizer.notion import mapping as M
+    from assetizer.util import now
+    from assetizer.web import app as web
+    _preview_fixture(home)
+    lib2 = {"properties": {name: {**p, "id": p["id"] + "2"} for name, p in LIB["properties"].items()}}
+
+    class Two(FakeNotion):
+        def _req(self, method, path, idempotent=None, **kw):
+            if method == "GET" and path == "/databases/11111111-2222-3333-4444-555555555555":
+                self.calls.append((method, path))
+                return {"id": "11111111-2222-3333-4444-555555555555", "url": "u", "title": [{"plain_text": "知识领袖长期追踪库"}], **lib2}
+            return super()._req(method, path, idempotent, **kw)
+    monkeypatch.setattr(web, "_notion", lambda: Two())
+    PV.forget()
+    db.exec("UPDATE sources SET delivery='BLOCKED', delivery_reason='NOTION_MAPPING：x' WHERE id='s1'")
+    r = TestClient(web.app).post("/api/channels/trader-tom/notion/target", headers={"host": "127.0.0.1"},
+                                 json={"database": "https://www.notion.so/111111112222333344445555555555555", "is_test_copy": False}).json()
+    cfg = M.get("trader-tom")
+    assert cfg["database_id"] == "11111111-2222-3333-4444-555555555555" and cfg["is_test_copy"] is False
+    assert set(cfg["properties"]) == {"title2", "own2", "acc2", "date2", "up2", "sum2", "vl2"}
+    assert "value" not in cfg["properties"]["up2"] and r["repick"] == ["Re-上级 项目"] and r["test_copy"] is False
+    assert db.one("SELECT delivery FROM sources WHERE id='s1'")["delivery"] == "NOT_STARTED"
+    assert now()  # keeps the import used
+
+
+def test_channels_report_paused_deliveries_and_recent_issues(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    _preview_fixture(home)
+    db.exec("UPDATE sources SET delivery='BLOCKED', delivery_reason='NOTION_MAPPING：会员/公开没有选项' WHERE id='s1'")
+    c = TestClient(web.app)
+    h = {"host": "127.0.0.1"}
+    ch = next(x for x in c.get("/api/channels", headers=h).json()["channels"] if x["id"] == "trader-tom")
+    assert ch["blocked"] == 1 and ch["held"] == 0 and ch["ingest"]["every_minutes"] == 30
+    db.exec("UPDATE sources SET current_run_id='r1' WHERE id='s1'")
+    issues = c.get("/api/channels/trader-tom/recent", headers=h).json()["issues"]
+    assert [(i["id"], i["units"], i["notes"]) for i in issues] == [("s1", 2, 0)]
+
+
+# ---------------------------------------------------------------- 兔子 API provider
+@pytest.fixture
+def fake_tuzi(home, monkeypatch):
+    """A local stand-in for api.tu-zi.com's Gemini streaming endpoint; set ``reply`` to (status, body) per test."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from assetizer.providers import tuzi
+    state = {"requests": [], "reply": None}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            state["requests"].append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
+            status, payload = state["reply"]
+            data = payload.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/event-stream" if status == 200 else "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    monkeypatch.setattr(tuzi, "BASE_URL", f"http://127.0.0.1:{httpd.server_address[1]}")
+    (home / "secrets").mkdir(exist_ok=True)
+    (home / "secrets" / "tuzi-api-key").write_text("sk-test")
+    yield state
+    httpd.shutdown()
+
+
+def _sse(*chunks):
+    import json
+    return "".join(f"data: {json.dumps(c, ensure_ascii=False)}\n\n" for c in chunks)
+
+
+def test_tuzi_streams_the_answer_with_the_video_inline_and_the_schema_enforced(fake_tuzi, home):
+    import base64
+    from assetizer.providers.tuzi import MEDIA_NOTE, TuziProvider
+    clip = home / "chunk.mp4"
+    clip.write_bytes(b"video-bytes")
+    fake_tuzi["reply"] = (200, _sse(
+        {"candidates": [{"content": {"parts": [{"text": "想一想", "thought": True}, {"text": '{"ok": '}]}}]},
+        {"candidates": [{"content": {"parts": [{"text": "true}"}]}, "finishReason": "STOP"}],
+         "usageMetadata": {"promptTokenCount": 900, "candidatesTokenCount": 7, "thoughtsTokenCount": 40}}))
+    r = TuziProvider().call(home / "call", "用 view_file 读取视频", kind="understand", media=[str(clip)],
+                            schema={"type": "object", "properties": {"ok": {"type": "boolean"}}}, effort="medium")
+    assert r.text == '{"ok": true}' and r.receipt["status"] == "SUCCESS"
+    assert r.receipt["usage"] == {"input_tokens": 900, "output_tokens": 7, "thinking_tokens": 40}
+    req = fake_tuzi["requests"][0]
+    assert req["path"].startswith("/v1beta/models/gemini-3.8-flash:streamGenerateContent") and req["auth"] == "Bearer sk-test"
+    media, text = req["body"]["contents"][0]["parts"]
+    assert base64.b64decode(media["inline_data"]["data"]) == b"video-bytes" and media["inline_data"]["mime_type"] == "video/mp4"
+    assert text["text"].endswith(MEDIA_NOTE)
+    cfg = req["body"]["generationConfig"]
+    assert cfg["thinkingConfig"] == {"thinkingLevel": "medium"} and cfg["responseMimeType"] == "application/json"
+    again = TuziProvider().call(home / "call", "用 view_file 读取视频", kind="understand", media=[str(clip)])
+    assert again.reused and len(fake_tuzi["requests"]) == 1  # a finished call is never paid for twice
+
+
+@pytest.mark.parametrize("status,body,kind", [
+    (401, '{"error": {"message": "invalid token"}}', "AGY_AUTH_REQUIRED"),
+    (429, '{"error": {"message": "upstream saturated"}}', "PROVIDER_TRANSIENT"),
+    (403, '{"error": {"message": "用户额度不足, 剩余额度: ¥0.01"}}', "PROVIDER_QUOTA"),
+    (400, '{"error": {"message": "insufficient_user_quota"}}', "PROVIDER_QUOTA"),
+    (502, "bad gateway", "PROVIDER_TRANSIENT"),
+])
+def test_tuzi_http_errors_map_to_the_pipeline_kinds(fake_tuzi, home, status, body, kind):
+    from assetizer.providers.agy import ProviderError
+    from assetizer.providers.tuzi import TuziProvider
+    fake_tuzi["reply"] = (status, body)
+    with pytest.raises(ProviderError) as e:
+        TuziProvider().call(home / "call", "hi", kind="t")
+    assert e.value.kind == kind and e.value.receipt["status"] == "FAILED"
+
+
+def test_tuzi_cut_off_at_the_output_limit_is_an_output_limit(fake_tuzi, home):
+    from assetizer.providers.agy import ProviderError
+    from assetizer.providers.tuzi import TuziProvider
+    fake_tuzi["reply"] = (200, _sse({"candidates": [{"content": {"parts": [{"text": "很长"}]}, "finishReason": "MAX_TOKENS"}]}))
+    with pytest.raises(ProviderError) as e:
+        TuziProvider().call(home / "call", "hi", kind="t")
+    assert e.value.kind == "PROVIDER_OUTPUT_LIMIT"
+
+
+def test_tuzi_stream_cut_before_its_finish_reason_is_retried_not_taken(fake_tuzi, home):
+    from assetizer.providers.agy import ProviderError
+    from assetizer.providers.tuzi import TuziProvider
+    fake_tuzi["reply"] = (200, _sse({"candidates": [{"content": {"parts": [{"text": '{"selections": [{"unit'}]}}]}))
+    with pytest.raises(ProviderError) as e:
+        TuziProvider().call(home / "call", "hi", kind="selection")
+    assert e.value.kind == "PROVIDER_TRANSIENT" and e.value.transient
+
+
+def test_the_box_setting_picks_the_provider(home):
+    from assetizer import db, providers
+    from assetizer.providers.agy import AgyProvider
+    from assetizer.providers.tuzi import TuziProvider
+    assert isinstance(providers.get(), AgyProvider)
+    db.set_setting("llm_provider", "tuzi")
+    assert isinstance(providers.get(), TuziProvider) and providers.get().version() == "tuzi:gemini-3.8-flash"
+
+
+def test_a_rejected_answer_is_regenerated_with_the_reason_it_was_rejected(home):
+    import json
+    from assetizer.llm import LLM, ContractError
+    from assetizer.providers.agy import CallResult
+    prompts = []
+
+    class Echo:  # answers in full only when told what the last answer lacked
+        def call(self, call_dir, prompt, **kw):
+            prompts.append(prompt)
+            n = 3 if "上一次的输出没有通过校验" in prompt else 2
+            return CallResult(json.dumps({"items": list(range(n))}), {"status": "SUCCESS"})
+
+    def check(o):
+        if len(o["items"]) < 3:
+            raise ContractError("MISSING_UNITS", f"{len(o['items'])}/3 items")
+
+    schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "integer"}}}, "required": ["items"]}
+    o = LLM(provider=Echo()).structured(home / "calls", "selection", "选出全部单元", schema, check=check)
+    assert o == {"items": [0, 1, 2]} and len(prompts) == 2
+    assert "MISSING_UNITS: 2/3 items" in prompts[1] and "上一次的输出没有通过校验" not in prompts[0]
+
+
+# ---------------------------------------------------------------- weekly benchmark
+def test_bench_score_finds_units_by_time_and_ticker():
+    from assetizer.bench.quality import score
+    units = [{"tickers": ["NTLA"], "start": 0, "end": 98}, {"tickers": ["MRNA"], "start": 99, "end": 163},
+             {"tickers": [], "start": 1000, "end": 1100}, {"tickers": ["TSLA"], "start": 2000, "end": 2100}]
+    topics = [{"tickers": ["ntla", "TEM"], "start": 10, "end": 90}, {"tickers": ["AAPL"], "start": 100, "end": 160},
+              {"tickers": [], "start": 1150, "end": 1300}, {"tickers": ["TSLA"], "start": 2300, "end": 2400}]
+    s = score(units, topics)
+    # NTLA by ticker and time; MRNA overlaps only an AAPL topic; the ticker-less unit by time within the 60 s window;
+    # TSLA's topic starts 200 s after the unit ends
+    assert s == {"recall": 0.5, "start_error_median": 80.0, "within_60s": 0.25}
+
+
+def test_bench_chunks_the_video_like_the_pipeline():
+    from assetizer.bench.quality import chunk_plan
+    assert chunk_plan(3504) == [(0.0, 3000), (2700, 804)]
+    assert chunk_plan(1800) == [(0.0, 1800)]
+
+
+def test_bench_golden_files_hold_together():
+    from assetizer.bench import golden
+    gs = golden()
+    assert gs and all(g["url"].endswith(g["id"]) for g in gs)
+    for g in gs:
+        ids = {u["id"] for u in g["units"]}
+        assert all(0 <= u["start"] < u["end"] <= g["duration"] + 1 for u in g["units"])
+        assert all(b["unit"] in ids and b["start"] < b["end"] for b in g["boundaries"])
+
+
+class _BenchProvider:
+    """Reads the canary number back while the clip is small enough, and answers the long list in full only when the
+    schema is enforced."""
+
+    def __init__(self, limit_mb):
+        self.limit = limit_mb
+
+    def version(self):
+        return "fake"
+
+    def call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None):
+        import json
+        from pathlib import Path
+        from assetizer.providers.agy import CallResult, ProviderError
+        if media:
+            if Path(media[0]).stat().st_size > self.limit * 1024 * 1024:
+                raise ProviderError("PROVIDER_FAILURE", "HTTP 413: request too large")
+            return CallResult(Path(media[0]).with_suffix(".code").read_text(), {"wall_seconds": 1, "usage": {"input_tokens": 900}})
+        n = 300 if schema else 120
+        return CallResult(json.dumps({"items": [{"n": i, "text": "要点"} for i in range(1, n + 1)]}),
+                          {"wall_seconds": 2, "usage": {"output_tokens": n * 150}})
+
+
+def test_bench_probes_measure_the_size_limit_and_the_output_length(home, monkeypatch):
+    from assetizer.bench import probes
+    monkeypatch.setattr(probes, "_canary_clip", lambda path, code, size: (path.write_bytes(b"x" * size),
+                                                                          path.with_suffix(".code").write_text(code)))
+    r = probes.run_all(_BenchProvider(limit_mb=50), home / "probes")
+    assert [x["ok"] for x in r["media_size"]["rows"]] == [True, True, False] and r["media_size"]["largest_ok_mb"] == 48
+    assert "413" in r["media_size"]["rows"][2]["error"]
+    ol = r["output_length"]
+    assert ol["enforced"]["complete"] and not ol["embedded"]["complete"] and ol["embedded"]["items"] == 120
+
+
+def test_bench_report_compares_with_last_week_and_says_what_could_go(home):
+    from assetizer.bench import report
+    q = lambda wr, cr: {"units": 30, "variants": {  # noqa: E731
+        "whole": {"recall": wr, "start_error_median": 40.0, "within_60s": 0.6, "topics": 20, "calls": 1, "input_tokens": 1, "wall": 1},
+        "chunked": {"recall": cr, "start_error_median": 38.0, "within_60s": 0.7, "topics": 28, "calls": 2, "input_tokens": 1, "wall": 1}}}
+    probes = {"media_size": {"rows": [{"mb": 48, "ok": True}], "largest_ok_mb": 48},
+              "output_length": {"items_asked": 300, "enforced": {"complete": True, "output_tokens": 45000}, "embedded": {"complete": False}}}
+    report.write({"stamp": "2026-10-27_1000", "provider": "fake", "probes": probes, "quality": {"vid": q(0.4, 0.9)}}, home / "reports")
+    r = report.write({"stamp": "2026-11-03_1000", "provider": "fake", "probes": probes, "quality": {"vid": q(0.88, 0.9)}}, home / "reports")
+    md = (home / "reports" / "2026-11-03_1000.md").read_text()
+    assert "对比上次 2026-10-27_1000" in md and "88%（上次 40%）" in md
+    said = dict(report.verdicts(r))
+    assert "放宽" in said["C1"] and "取消分批" in said["C4"] and "强制 schema" in said["C5"] and "追平" in said["C2/C3"]
+
+
+# ---------------------------------------------------------------- magpie: an image model in place of the video model
+@pytest.fixture
+def fake_magpie(home, monkeypatch):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from assetizer import db
+    from assetizer.providers import magpie
+    state = {"requests": [], "reply": None}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            state["requests"].append({"path": self.path, "auth": self.headers.get("Authorization"),
+                                      "body": json.loads(self.rfile.read(int(self.headers["Content-Length"])))})
+            status, payload = state["reply"]
+            data = payload.encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    db.set_setting("magpie_url", f"http://127.0.0.1:{httpd.server_address[1]}")
+    (home / "secrets").mkdir(exist_ok=True)
+    (home / "secrets" / "magpie-api-key").write_text("sk-magpie-test")
+
+    def fake_frames(video, out):
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.jpg").write_bytes(b"jpeg-a")
+        (out / "b.jpg").write_bytes(b"jpeg-b")
+        return [(0.0, out / "a.jpg"), (65.0, out / "b.jpg")]
+    monkeypatch.setattr(magpie, "frames", fake_frames)
+    monkeypatch.setattr(magpie, "transcript", lambda video, out: [{"start": 1.0, "end": 4.0, "text": "看一下特斯拉"}])
+    yield state
+    httpd.shutdown()
+
+
+def _events(*evs):
+    import json
+    return "".join(f"data: {json.dumps(e, ensure_ascii=False)}\n\n" for e in evs)
+
+
+def test_magpie_sends_frames_and_speech_in_place_of_the_video(fake_magpie, home):
+    import base64
+    from assetizer.providers.magpie import MEDIA_NOTE, MagpieProvider
+    clip = home / "chunk.mp4"
+    clip.write_bytes(b"video")
+    fake_magpie["reply"] = (200, _events(
+        {"type": "codex.rate_limits", "primary": {"used_percent": 12}},
+        {"type": "response.output_text.delta", "delta": '{"ok": '}, {"type": "response.output_text.delta", "delta": "true}"},
+        {"type": "response.completed", "response": {"status": "completed", "usage": {
+            "input_tokens": 2500, "output_tokens": 100, "output_tokens_details": {"reasoning_tokens": 40}}}}))
+    r = MagpieProvider().call(home / "call", "用 view_file 读取视频", kind="understand-CH01", media=[str(clip)],
+                              schema={"type": "object", "properties": {"ok": {"type": "boolean"}}}, effort="medium")
+    assert r.text == '{"ok": true}' and r.receipt["status"] == "SUCCESS"
+    assert r.receipt["usage"] == {"input_tokens": 2500, "output_tokens": 60, "thinking_tokens": 40}
+    assert r.receipt["rate_limits"] == {"primary": {"used_percent": 12}} and r.receipt["frames"] == 2
+    req = fake_magpie["requests"][0]
+    assert req["path"] == "/v1/responses" and req["auth"] == "Bearer sk-magpie-test"
+    body = req["body"]
+    assert body["model"] == "codex/gpt-6.1-terra" and body["stream"] and body["reasoning"] == {"effort": "medium"}
+    assert body["text"]["format"]["type"] == "json_schema" and body["text"]["format"]["strict"] is False
+    parts = body["input"][0]["content"]
+    assert parts[0]["text"].endswith(MEDIA_NOTE)
+    assert [p["text"] for p in parts if p["type"] == "input_text"][1:3] == ["画面 [00:00:00]", "画面 [00:01:05]"]
+    images = [p for p in parts if p["type"] == "input_image"]
+    assert base64.b64decode(images[1]["image_url"].split(",", 1)[1]) == b"jpeg-b"
+    assert "[00:00:01–00:00:04] 看一下特斯拉" in parts[-1]["text"]
+
+
+@pytest.mark.parametrize("reply,kind", [
+    ((200, _events({"type": "response.output_text.delta", "delta": "很长"},
+                   {"type": "response.incomplete", "response": {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}})),
+     "PROVIDER_OUTPUT_LIMIT"),
+    ((429, '{"error": {"message": "You have hit your usage limit. Try again in 3 hours."}}'), "PROVIDER_QUOTA"),
+    ((200, _events({"type": "response.output_text.delta", "delta": '{"cut'})), "PROVIDER_TRANSIENT"),
+    ((401, '{"error": {"message": "invalid gateway key"}}'), "AGY_AUTH_REQUIRED"),
+])
+def test_magpie_failures_map_to_the_pipeline_kinds(fake_magpie, home, reply, kind):
+    from assetizer.providers.agy import ProviderError
+    from assetizer.providers.magpie import MagpieProvider
+    fake_magpie["reply"] = reply
+    with pytest.raises(ProviderError) as e:
+        MagpieProvider().call(home / "call", "hi", kind="t")
+    assert e.value.kind == kind
+
+
+def test_a_frame_reading_provider_takes_the_sharpest_proxy_in_one_encode(home, monkeypatch):
+    from assetizer.media import ffmpeg
+    tried = []
+
+    def fake_proxy(src, start, length, out, fps=1.0, crf=30, max_height=1080, audio_kbps=48):
+        tried.append(crf)
+        out.write_bytes(b"x" * 100)
+        return out
+    monkeypatch.setattr(ffmpeg, "model_proxy", fake_proxy)
+    monkeypatch.setattr(ffmpeg, "VIEW_FILE_LIMIT", 24)
+    out, enc = ffmpeg.fit_proxy(home / "src.mkv", 0, 3000, home / "p.mp4", limit=None)
+    assert tried == [32] and enc["height"] == 1080
+
+
+def test_the_box_setting_can_pick_magpie(home):
+    from assetizer import db, providers
+    db.set_setting("llm_provider", "magpie")
+    p = providers.get()
+    assert p.version() == "magpie:codex/gpt-6.1-terra" and p.media_size_limit is None
+
+
+def test_stage_providers_send_text_stages_to_another_provider(home, monkeypatch):
+    from assetizer import db, providers
+    from assetizer.llm import LLM
+    from assetizer.providers.agy import CallResult
+    asked = []
+
+    def fake_call(name):
+        def call(self, d, prompt, **kw):
+            asked.append((kw["kind"], name))
+            return CallResult('{"ok": true}', {"status": "SUCCESS"}, False)
+        return call
+    from assetizer.providers.agy import AgyProvider
+    from assetizer.providers.magpie import MagpieProvider
+    monkeypatch.setattr(AgyProvider, "call", fake_call("agy"))
+    monkeypatch.setattr(MagpieProvider, "call", fake_call("magpie"))
+    db.set_setting("stage_providers", {"knowledge": "magpie", "selection": "magpie"})
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    llm = LLM()
+    for stage in ("knowledge-detail-03", "selection", "article-outline"):
+        llm.structured(home / "calls", stage, "p", schema)
+    assert [n for _, n in asked] == ["magpie", "magpie", "agy"]
+    assert [type(p).__name__ for p in providers.in_use()] == ["AgyProvider", "MagpieProvider"]
+    assert providers.stage_key("selection:repair") == "selection"

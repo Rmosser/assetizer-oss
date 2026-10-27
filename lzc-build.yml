@@ -1,0 +1,11 @@
+manifest: ./lzc-manifest.yml
+buildscript: sh scripts/lzc/build_content.sh
+contentdir: ./dist
+pkgout: ./.pkgout
+icon: ./web/public/seal-512.png
+
+images:
+  runtime:
+    dockerfile: docker/runtime.Dockerfile
+    context: docker
+    builder: local

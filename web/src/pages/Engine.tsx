@@ -137,7 +137,7 @@ export default function Engine() {
           {cc?.configured ? <button className="btn sm inst-act" onClick={() => setCcOpen(true)}>配置与测试</button> : (
             <>
               <button className="btn sm inst-act" onClick={() => setCcOpen(true)}>配置 CookieCloud</button>
-              {!phone && (
+              {!phone && data.youtube.profile && (
                 <details className="fold mini inst-alt">
                   <summary><i className="plus" aria-hidden /><span>在服务器 Chromium 里登录</span></summary>
                   <Cmd text={SSH} />

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { media } from "../api";
 import { typeset } from "../cjk";
-import { tc } from "../util";
+import { reduceMotion, smooth, tc } from "../util";
 
 type Shot = { id: number; start: number; meta?: { reason?: string } };
 
@@ -12,10 +12,19 @@ export function Lightbox({ shots, index, onClose }: { shots: Shot[]; index: numb
   const track = useRef<HTMLDivElement>(null);
   const [i, setI] = useState(index);
   const [zoom, setZoom] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const left = useRef(false);
+  const close = () => {
+    if (left.current) return;
+    left.current = true;
+    if (reduceMotion()) return onClose();
+    setLeaving(true);
+    setTimeout(onClose, 200);
+  };
   useEffect(() => {
     const d = ref.current!;
     d.showModal();
-    const onCancel = (e: Event) => { e.preventDefault(); onClose(); };
+    const onCancel = (e: Event) => { e.preventDefault(); close(); };
     d.addEventListener("cancel", onCancel);
     document.documentElement.classList.add("modal-open");
     requestAnimationFrame(() => track.current?.children[index]?.scrollIntoView({ inline: "start", block: "nearest" }));
@@ -24,7 +33,7 @@ export function Lightbox({ shots, index, onClose }: { shots: Shot[]; index: numb
   const go = (n: number) => {
     const k = Math.max(0, Math.min(shots.length - 1, n));
     setZoom(false);
-    track.current?.children[k]?.scrollIntoView({ inline: "start", block: "nearest", behavior: "smooth" });
+    track.current?.children[k]?.scrollIntoView({ inline: "start", block: "nearest", behavior: smooth() });
     setI(k);
   };
   useEffect(() => {
@@ -41,7 +50,7 @@ export function Lightbox({ shots, index, onClose }: { shots: Shot[]; index: numb
   };
   const s = shots[i];
   return createPortal(
-    <dialog ref={ref} className="lightbox" aria-label="截图">
+    <dialog ref={ref} className={`lightbox${leaving ? " leaving" : ""}`} aria-label="截图">
       <div className={`lb-track${zoom ? " locked" : ""}`} ref={track} onScroll={onScroll}>
         {shots.map((x, k) => (
           <figure key={x.id} className={`lb-frame${zoom && k === i ? " zoom" : ""}`}>
@@ -59,7 +68,7 @@ export function Lightbox({ shots, index, onClose }: { shots: Shot[]; index: numb
           </div>
         )}
       </div>
-      <button className="lb-close" onClick={onClose} aria-label="关闭">
+      <button className="lb-close" onClick={close} aria-label="关闭">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
       </button>
     </dialog>,

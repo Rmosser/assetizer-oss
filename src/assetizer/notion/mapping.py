@@ -14,10 +14,11 @@ are simply left alone.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 
-from .. import db
+from .. import config, db
 
 TEMPLATES = {
     "default": "通用（视频 → 截图 → 正文）",
@@ -52,19 +53,20 @@ ACCESS_LABELS = {"public_live": "公开直播", "member_live": "会员直播", "
 NOT_WRITABLE = {"created_time", "last_edited_time", "created_by", "last_edited_by", "formula", "rollup",
                 "unique_id", "verification", "button", "people", "files", "email", "phone_number"}
 
-# Initial mappings for the channels the user already keeps in 知识领袖长期追踪库, by property name.
+# Initial mappings for the channels the user already keeps in 知识领袖长期追踪库, by property name
+# ("A|B": the first of these names the database has).
 PRESETS: dict[str, dict] = {
     "trader-tom": {
         "template": "reading-guide", "heading": "{channel} - {date} 美股市场复盘与读图学习导航", "icon": "parent",
         "by_name": {"Name": ("template", "{channel}-{date8}-{headline}"), "内容所属": ("fixed", "@交易员汤姆"),
                     "会员/公开": ("access", None), "内容发布日期": ("published_date", None),
-                    "Re-上级 项目": ("fixed", "$parent"), "AI 摘要": ("key_levels", None), "视频链接": ("video_url", None)},
+                    "Re-上级 项目": ("fixed", "$parent"), "AI 摘要": ("key_levels", None), "视频链接|参考链接": ("video_url", None)},
     },
     "wang-haibin": {
         "template": "chapters", "heading": "", "icon": "none",
         "by_name": {"Name": ("template", "{video_title}"), "内容所属": ("fixed", "王海滨"),
                     "会员/公开": ("access", None), "内容发布日期": ("published_datetime", None),
-                    "Re-上级 项目": ("fixed", "$parent"), "视频链接": ("video_url", None)},
+                    "Re-上级 项目": ("fixed", "$parent"), "视频链接|参考链接": ("video_url", None)},
     },
 }
 
@@ -95,8 +97,9 @@ def preset(channel_id: str, database_id: str, schema: dict, parent: str | None) 
     p = PRESETS.get(channel_id, {"template": "default", "heading": "", "icon": "none", "by_name": {}})
     by_name = {v["name"]: (pid, v) for pid, v in schema.items()}
     props = {}
-    for name, (source, value) in p["by_name"].items():
-        if name not in by_name:
+    for names, (source, value) in p["by_name"].items():
+        name = next((n for n in names.split("|") if n in by_name), None)
+        if not name:
             continue
         pid, sp = by_name[name]
         if value == "$parent":
@@ -113,6 +116,24 @@ def preset(channel_id: str, database_id: str, schema: dict, parent: str | None) 
             "properties": props}
 
 
+def remap(cfg: dict, schema: dict) -> tuple[dict, list[str]]:
+    """Carry a channel's mappings over to another database by property name. A fixed relation points at pages of
+    the old database's world, so its value is dropped and the property named for the user to pick again."""
+    by_name = {sp["name"]: (pid, sp) for pid, sp in schema.items()}
+    props, repick = {}, []
+    for m in (cfg.get("properties") or {}).values():
+        hit = by_name.get(m.get("name"))
+        if not hit:
+            continue
+        pid, sp = hit
+        nm = {**m, "type": sp["type"]}
+        if sp["type"] == "relation" and m.get("source") == "fixed" and m.get("value"):
+            nm.pop("value")
+            repick.append(sp["name"])
+        props[pid] = nm
+    return {**cfg, "properties": props}, repick
+
+
 # --------------------------------------------------------------------------- schema
 def schema_of(database: dict) -> dict:
     """GET /databases/{id} → {property id: {name, type, options?, relation_db?}}."""
@@ -122,6 +143,7 @@ def schema_of(database: dict) -> dict:
         e = {"name": name, "type": t}
         if t in ("select", "multi_select", "status"):
             e["options"] = [o["name"] for o in p[t].get("options", [])]
+            e["colors"] = {o["name"]: o.get("color", "default") for o in p[t].get("options", [])}
         if t == "relation":
             e["relation_db"] = p["relation"].get("database_id")
         out[p["id"]] = e
@@ -167,6 +189,16 @@ def problems(cfg: dict, schema: dict, page_ok=lambda pid: True) -> dict[str, str
     return out
 
 
+def warnings(cfg: dict, schema: dict) -> dict[str, str]:
+    """What still delivers but works less well (problems() is what stops delivery)."""
+    out: dict[str, str] = {}
+    linked = any(m.get("source") == "video_url" and pid in schema and schema[pid]["type"] in ("url", "rich_text")
+                 for pid, m in (cfg.get("properties") or {}).items())
+    if not linked:
+        out["video_url"] = "没有属性填视频链接：查不出库里已有的视频，同一期可能被写两次"
+    return out
+
+
 # --------------------------------------------------------------------------- values
 def access_kind(info: dict) -> str:
     live = (info.get("live_status") in ("was_live", "post_live", "is_live")) or bool(info.get("was_live"))
@@ -179,6 +211,14 @@ def _date(source: dict) -> str | None:
     return f"{pub[:4]}-{pub[4:6]}-{pub[6:8]}" if len(pub) == 8 and pub.isdigit() else None
 
 
+def run_headline(run_id: str) -> str | None:
+    """本期题眼 as this run wrote it (sources.headline is the adopted run's, for lists)."""
+    try:
+        return (json.loads((config.get().runs_dir / run_id / "article" / "outline.json").read_text()).get("headline") or "").strip() or None
+    except (OSError, ValueError):
+        return None
+
+
 def context(source: dict, run_id: str, channel: dict | None) -> dict:
     info = db.unj(source.get("info"), {}) or {}
     run = db.one("SELECT summary FROM runs WHERE id=?", run_id)
@@ -189,7 +229,7 @@ def context(source: dict, run_id: str, channel: dict | None) -> dict:
         "channel": (channel or {}).get("name") or source.get("channel_title") or "",
         "date": date or "", "date8": (date or "").replace("-", ""),
         "datetime": datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="minutes") if ts else date,
-        "headline": source.get("headline") or source.get("title") or "",
+        "headline": run_headline(run_id) or source.get("headline") or source.get("title") or "",
         "video_title": source.get("title") or source.get("id"),
         "url": source.get("url") or f"https://www.youtube.com/watch?v={source['id']}",
         "access": access_kind(info),
@@ -293,4 +333,4 @@ def preview(cfg: dict, schema: dict, ctx: dict | None) -> dict:
                          "mapping": m, "problem": probs.get(pid), "deleted": True})
     order = {"title": 0}
     rows.sort(key=lambda r: (r.get("deleted", False), order.get(r["type"], 1), not r.get("mapping"), r["name"] or ""))
-    return {"rows": rows, "problems": len(probs)}
+    return {"rows": rows, "problems": len(probs), "warnings": warnings(cfg, schema)}

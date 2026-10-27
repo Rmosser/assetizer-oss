@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import math
 import shutil
+import threading
 from pathlib import Path
 
 from .. import config, db, youtube
 from ..media import ffmpeg
 from ..util import fmt_tc, now, read_json, sha256_file, write_json
 from .context import RunContext, Waiting
+
+# Parallel runs share one egress: 7 downloads at once through it got their TLS connections cut mid-stream
+# ("UNEXPECTED_EOF_WHILE_READING", 5 of 7 failed, prodbox 2026-10-25), so downloads queue here while the rest
+# of each run goes on in parallel.
+DOWNLOADS = threading.BoundedSemaphore(2)
 
 
 def resolve(ctx: RunContext) -> dict:
@@ -20,6 +26,8 @@ def resolve(ctx: RunContext) -> dict:
     except youtube.AcquireError as e:
         if e.needs_human:
             raise Waiting("YOUTUBE_AUTH", str(e))
+        if e.kind == "LIVE_UPCOMING":  # yt-dlp refuses a scheduled live outright instead of reporting is_upcoming
+            raise Waiting("LIVE_IN_PROGRESS", "直播尚未开始，稍后自动重试")
         raise
     if info.get("live_status") in ("is_live", "is_upcoming"):
         raise Waiting("LIVE_IN_PROGRESS", "直播尚未结束，稍后自动重试")
@@ -78,10 +86,13 @@ def acquire(ctx: RunContext) -> dict:
         raise Waiting("DISK_LOW", f"剩余空间不足 {need / 1e9:.0f} GB")
     dest = s.media_dir / src["id"]
     try:
-        p = youtube.download(src["url"] or src["id"], dest)
+        with DOWNLOADS:
+            p = youtube.download(src["url"] or src["id"], dest)
     except youtube.AcquireError as e:
         if e.needs_human:
             raise Waiting("YOUTUBE_AUTH", str(e))
+        if e.kind == "NETWORK":  # the connection kept dropping: an outage, not this video — resume it later
+            raise Waiting("NETWORK", str(e))
         raise
     pr = ffmpeg.probe(p)
     v = [x for x in pr["streams"] if x["codec_type"] == "video"]
@@ -104,12 +115,14 @@ def _proxy(ctx: RunContext, pid: str, offset: float, length: float) -> tuple[Pat
     cache = s.media_dir / ctx.source["id"] / "proxies"
     name = f"{pid}_{offset:.0f}_{length:.0f}_{s.chunk_minutes}_{s.chunk_overlap_minutes}"
     mp4, meta = cache / f"{name}.mp4", cache / f"{name}.json"
+    from .. import providers
+    limit = getattr(providers.get(), "media_size_limit", ffmpeg.VIEW_FILE_LIMIT)
     # a proxy made under an older, larger agy limit is encoded again
-    if sha and mp4.exists() and meta.exists() and mp4.stat().st_size <= ffmpeg.VIEW_FILE_LIMIT:
+    if sha and mp4.exists() and meta.exists() and (limit is None or mp4.stat().st_size <= limit):
         m = read_json(meta)
         if m.get("media_sha256") == sha:
             return mp4, m.get("encoding") or {}
-    path, enc = ffmpeg.fit_proxy(ctx.media, offset, length, ctx.path("work", "chunks", f"{pid}.mp4"))
+    path, enc = ffmpeg.fit_proxy(ctx.media, offset, length, ctx.path("work", "chunks", f"{pid}.mp4"), limit=limit)
     if not sha:
         return path, enc
     cache.mkdir(parents=True, exist_ok=True)

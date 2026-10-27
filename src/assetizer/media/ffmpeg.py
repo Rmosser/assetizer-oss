@@ -215,11 +215,18 @@ def model_proxy(src: Path, start: float, length: float, out: Path, fps: float = 
     return out
 
 
-def fit_proxy(src: Path, start: float, length: float, out: Path, fps: float = 1.0) -> tuple[Path, dict]:
-    """Encode a proxy under VIEW_FILE_LIMIT, walking PROXY_LADDER."""
+_DEFAULT_LIMIT = object()
+
+
+def fit_proxy(src: Path, start: float, length: float, out: Path, fps: float = 1.0,
+              limit: "int | None | object" = _DEFAULT_LIMIT) -> tuple[Path, dict]:
+    """Encode a proxy under ``limit``, walking PROXY_LADDER. ``limit=None`` (a provider that takes frames from the
+    proxy rather than the file itself) keeps the first, sharpest rung: one decode of the source instead of up to six."""
+    if limit is _DEFAULT_LIMIT:
+        limit = VIEW_FILE_LIMIT
     # measured 2026-10-05: 50 min @1 fps CRF30 GOP10 = 131 MB (keyframes dominate) → long GOP first
     for crf, h, abr in PROXY_LADDER:
         model_proxy(src, start, length, out, fps=fps, crf=crf, max_height=h, audio_kbps=abr)
-        if out.stat().st_size <= VIEW_FILE_LIMIT:
+        if limit is None or out.stat().st_size <= limit:
             return out, {"fps": fps, "crf": crf, "height": h, "audio_kbps": abr, "bytes": out.stat().st_size}
     raise MediaError(f"proxy over view_file limit: {out.stat().st_size} bytes")

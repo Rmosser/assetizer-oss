@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from collections import Counter
+from difflib import SequenceMatcher
 
 from . import config, db
 from .contracts import prompts as P
@@ -31,10 +34,14 @@ DISPOSITIONS = ["RULE", "EXAMPLE", "ORCHESTRATION", "ARTICLE_STYLE", "REDUNDANT"
 
 
 def split_clauses(raw: str) -> list[dict]:
-    """Lines / list items / sentences → clauses. Headings and decoration are dropped."""
+    """Lines / list items / sentences → clauses. Headings and decoration are dropped.
+    start/end are the clause's character range in the raw prompt (for the 稿纸 margin notes)."""
     out: list[dict] = []
     heading = ""
-    for line in raw.splitlines():
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        base, offset = offset, offset + len(line)
+        line = line.rstrip("\r\n")
         t = line.strip()
         if not t or re.fullmatch(r"[-*_=#>`\s]+", t):
             continue
@@ -44,20 +51,25 @@ def split_clauses(raw: str) -> list[dict]:
         t = re.sub(r"^([-*+]|\d+[.)、])\s+", "", t).strip()
         t = t.lstrip("> ").strip()
         parts = [p.strip() for p in re.split(r"(?<=[。！？!?；;])\s*", t) if p.strip()]
+        cursor = 0
         for p in parts:
+            at = line.find(p, cursor)
+            cursor = at + len(p) if at >= 0 else cursor
             plain = re.sub(r"[*_`]+", "", p).strip()
             if len(plain) < 3 and not plain.endswith(("：", ":")):
                 continue
-            out.append({"id": f"C{len(out) + 1:03}", "text": plain, "section": heading})
+            out.append({"id": f"C{len(out) + 1:03}", "text": plain, "section": heading,
+                        "start": base + at if at >= 0 else None, "end": base + at + len(p) if at >= 0 else None})
     # fold short lead-ins ("例如：", "格式：") into the clause they introduce
     merged: list[dict] = []
-    carry = ""
+    carry, carry_start = "", None
     for c in out:
         if len(c["text"]) <= 24 and c["text"].endswith(("：", ":")):
             carry += c["text"]
+            carry_start = c["start"] if carry_start is None else carry_start
             continue
-        merged.append({**c, "text": carry + c["text"]})
-        carry = ""
+        merged.append({**c, "text": carry + c["text"], "start": carry_start if carry_start is not None else c["start"]})
+        carry, carry_start = "", None
     for i, c in enumerate(merged):
         c["id"] = f"C{i + 1:03}"
     return merged
@@ -68,7 +80,7 @@ def _norm(s: str) -> str:
 
 
 COMPILE_SCHEMA = P.obj({
-    "rules": P.arr(P.obj({"id": {"type": "string", "pattern": r"^[a-z0-9_]{3,60}$"}, "rule": P.STR,
+    "rules": P.arr(P.obj({"id": {"type": "string", "pattern": r"^[a-z0-9_]{3,60}$"}, "label": P.STR, "rule": P.STR,
                           "phases": P.arr({"type": "string", "enum": PHASES}, minItems=1),
                           "clause_ids": P.arr(P.STR, minItems=1)})),
     "facets": P.arr(P.obj({"key": {"type": "string", "pattern": r"^[a-z0-9_]{2,40}$"}, "label": P.STR,
@@ -98,7 +110,7 @@ def _compile_prompt(identity: dict, clauses: list[dict]) -> str:
   RULE（转成规则，target=规则 id）、EXAMPLE（只是示例/格式说明，target=它说明的规则 id）、
   ORCHESTRATION（执行环境/工具/保存路径类要求，由系统承担，不给 Worker）、ARTICLE_STYLE（文章写法）、
   REDUNDANT（与另一条款重复，target=那条规则 id）、IGNORED（必须在 reason 写明原因）。
-- rules：每条规则是对 Worker 的明确指令，保留用户原意中的**具体目录、条件、步骤**（例如列举的结构类型、多周期 Setup→Trigger），不要压缩成笼统表述；phases 标出规则作用的阶段；clause_ids 列出来源条款。
+- rules：每条规则是对 Worker 的明确指令，保留用户原意中的**具体目录、条件、步骤**（例如列举的结构类型、多周期 Setup→Trigger），不要压缩成笼统表述；label 是给用户看的 2–8 个字的中文短名（如「怎么看出来」「不造精度」）；phases 标出规则作用的阶段；clause_ids 列出来源条款。
 - facets：用户希望每个知识单元**额外**固定记录的专门栏目，没有就给空数组。key 用英文小写。系统已内置以下核心字段，facets 不得重复它们：
   标题、Ticker、起止时间、学习优先级、摘要、主讲人推理（老师怎么看出来）、视觉证据、截图锚点（时间/原因）、所需上下文、关键陈述、不确定性。
 - article_style：一段话概括文章写法（只来自 ARTICLE_STYLE 条款）。
@@ -119,8 +131,9 @@ PAIRS
 {json.dumps(pairs, ensure_ascii=False)}"""
 
 
-def compile_prompt(channel_id: str, prompt_id: int) -> int:
-    """Compile a channel prompt version into a NEEDS_CONFIRMATION playbook. Returns playbook id."""
+def compile_prompt(channel_id: str, prompt_id: int, again: bool = False) -> int:
+    """Compile a channel prompt version into a NEEDS_CONFIRMATION playbook. Returns playbook id.
+    ``again`` asks the model afresh instead of reusing the answer accepted for the same text last time."""
     ch = db.one("SELECT * FROM channels WHERE id=?", channel_id)
     pr = db.one("SELECT * FROM channel_prompts WHERE id=?", prompt_id)
     identity = {"channel": ch["name"], "speaker": ch["name"], "speaker_key": "host"}
@@ -132,6 +145,8 @@ def compile_prompt(channel_id: str, prompt_id: int) -> int:
         raise ContractError("CONTENT_FAILURE", "prompt has no clauses")
     by_id = {c["id"]: c for c in clauses}
     root = config.get().home / "compile" / f"{channel_id}-p{pr['version']}-{sha256_text(pr['text'])[:8]}"
+    if again:
+        root = root.with_name(f"{root.name}-r{int(time.time())}")
     llm = LLM()
 
     def check(o):
@@ -164,9 +179,11 @@ def compile_prompt(channel_id: str, prompt_id: int) -> int:
             grades += [{"rule_id": p["rule_id"], "status": "PARTIAL", "missing": f"审计失败：{e.kind}"} for p in pairs[bi:bi + 12]]
     data = {
         "identity": identity,
-        "rules": [{"id": r["id"], "rule": r["rule"], "quote": r["quote"], "phases": r["phases"], "clause_ids": r["clause_ids"]} for r in o["rules"]],
-        "facets": [{k: f[k] for k in ("key", "label", "type", "description")} for f in o["facets"]
-                   if f["key"] not in RESERVED_FACETS],
+        "rules": [{"id": r["id"], "label": (r.get("label") or "").strip()[:12], "rule": r["rule"], "quote": r["quote"],
+                   "phases": r["phases"], "clause_ids": r["clause_ids"]} for r in o["rules"]],
+        "facets": [{**{k: f[k] for k in ("key", "label", "type", "description")},
+                    "clause_ids": [i for i in f.get("clause_ids") or [] if i in by_id]}
+                   for f in o["facets"] if f["key"] not in RESERVED_FACETS],
         "article_style": o["article_style"],
     }
     audit = {
@@ -224,6 +241,100 @@ def add_prompt_version(channel_id: str, text: str, origin: str = "manual", note:
     v = (db.one("SELECT MAX(version) v FROM channel_prompts WHERE channel_id=?", channel_id) or {}).get("v") or 0
     return db.exec("INSERT INTO channel_prompts(channel_id, version, text, sha256, origin, note, created_at) VALUES (?,?,?,?,?,?,?)",
                    channel_id, v + 1, text, h, origin, note, now())
+
+
+def rule_label(r: dict) -> str:
+    """The rule's short name; rules compiled before labels existed fall back to their opening words."""
+    if (r.get("label") or "").strip():
+        return r["label"].strip()
+    text = (r.get("rule") or "").strip()
+    head = re.split(r"[，。；：、,.;:（(]", text, maxsplit=1)[0]
+    return head if len(head) <= 10 else head[:8] + "…"
+
+
+def _locate(raw: str):
+    """Find clause texts (markdown stripped) back in the raw prompt, in order: normalized text + index map."""
+    keep = [(i, ch) for i, ch in enumerate(raw) if ch not in "*_`"]
+    norm = "".join(ch for _, ch in keep)
+    idx = [i for i, _ in keep]
+    pos = 0
+
+    def find(text: str) -> tuple[int, int] | None:
+        nonlocal pos
+        for needle in (text, re.split(r"[：:]", text)[-1].strip()):
+            j = norm.find(needle, pos) if needle else -1
+            if j >= 0:
+                pos = j + len(needle)
+                return idx[j], idx[j + len(needle) - 1] + 1
+        return None
+    return find
+
+
+def _rule_diff(old: list[dict], new: list[dict]) -> dict:
+    """Rules of two versions matched by id, then by text (exact, then similar): what was added, changed, removed."""
+    used: set[int] = set()
+    added, changed = [], []
+    for r in new:
+        k = next((i for i, o in enumerate(old) if i not in used and r.get("id") and o.get("id") == r.get("id")), None)
+        if k is None:
+            k = next((i for i, o in enumerate(old) if i not in used and o["rule"].strip() == r["rule"].strip()), None)
+        if k is None:
+            best = max(((SequenceMatcher(None, o["rule"], r["rule"]).ratio(), i) for i, o in enumerate(old) if i not in used),
+                       default=(0.0, None))
+            k = best[1] if best[0] >= 0.6 else None
+        if k is None:
+            added.append(r)
+            continue
+        used.add(k)
+        if old[k]["rule"].strip() != r["rule"].strip():
+            changed.append({"from": old[k], "to": r})
+    return {"added": added, "changed": changed, "removed": [o for i, o in enumerate(old) if i not in used]}
+
+
+def annotations(playbook_id: int) -> dict:
+    """The 稿纸 for one playbook version: the prompt it was compiled from, every clause's range and fate,
+    the rules with short names, the facets, conflicts, coverage, and what changed since the version before."""
+    pb = db.one("""SELECT p.*, cp.text prompt_text, cp.version prompt_version, cp.note prompt_note FROM playbooks p
+                   LEFT JOIN channel_prompts cp ON cp.id=p.prompt_id WHERE p.id=?""", playbook_id)
+    if not pb:
+        raise LookupError(playbook_id)
+    data = db.unj(pb["data"], {}) or {}
+    audit = db.unj(pb["audit"], {}) or {}
+    clauses = audit.get("clauses") or []
+    cmap = {m["clause_id"]: m for m in audit.get("clause_map") or []}
+    text = pb["prompt_text"] or ""
+    find = _locate(text)
+    out = []
+    for c in clauses:
+        span = (c["start"], c["end"]) if c.get("start") is not None else find(c["text"]) if text else None
+        m = cmap.get(c["id"], {})
+        out.append({"id": c["id"], "text": c["text"], "section": c.get("section", ""),
+                    "start": span and span[0], "end": span and span[1],
+                    "disposition": m.get("disposition"), "rule_id": m.get("target") or None, "reason": m.get("reason")})
+    rules = [{**r, "label": rule_label(r)} for r in data.get("rules") or []]
+    prev = db.one("SELECT id, version, data FROM playbooks WHERE channel_id IS ? AND version<? ORDER BY version DESC LIMIT 1",
+                  pb["channel_id"], pb["version"])
+    diff = None
+    if prev:
+        d = _rule_diff(db.unj(prev["data"], {}).get("rules") or [], rules)
+        lab = lambda r: {"id": r.get("id"), "label": rule_label(r), "rule": r["rule"]}  # noqa: E731
+        diff = {"version": prev["version"], "added": [lab(r) for r in d["added"]], "removed": [lab(r) for r in d["removed"]],
+                "changed": [{"from": lab(x["from"]), "to": lab(x["to"])} for x in d["changed"]]}
+    counts = Counter(m.get("disposition") for m in cmap.values())
+    return {
+        "playbook": {"id": pb["id"], "version": pb["version"], "status": pb["status"], "origin": pb["origin"]},
+        "prompt": {"id": pb["prompt_id"], "version": pb["prompt_version"], "note": pb["prompt_note"], "text": text} if pb["prompt_id"] else None,
+        "has_provenance": bool(clauses and cmap),
+        "has_labels": all((r.get("label") or "").strip() for r in data.get("rules") or []),
+        "clauses": out,
+        "rules": rules,
+        "facets": data.get("facets") or [],
+        "article_style": data.get("article_style"),
+        "conflicts": audit.get("policy_conflicts") or [],
+        "coverage": {"clauses": len(clauses), "used": counts["RULE"] + counts["EXAMPLE"] + counts["ARTICLE_STYLE"],
+                     "system": counts["ORCHESTRATION"], "redundant": counts["REDUNDANT"], "ignored": counts["IGNORED"]},
+        "vs_previous": diff,
+    }
 
 
 def provenance_ok(rule_quote: str, raw: str) -> bool:

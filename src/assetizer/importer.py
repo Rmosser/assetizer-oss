@@ -172,7 +172,8 @@ def run14(root: Path) -> str:
     from .pipeline.runner import _summary
     db.exec("UPDATE runs SET summary=? WHERE id=?", db.j(_summary(run_id)), run_id)
     np = read_json(root / "notion/page.json") if (root / "notion/page.json").exists() else {}
-    db.exec("UPDATE sources SET current_run_id=?, delivery=?, notion_url=?, review='UNREVIEWED' WHERE id=?",
-            run_id, "DELIVERED" if np else "NOT_STARTED", np.get("url"), vid)
+    from .notion.mapping import run_headline
+    db.exec("UPDATE sources SET current_run_id=?, headline=?, delivery=?, notion_url=?, review='UNREVIEWED' WHERE id=?",
+            run_id, run_headline(run_id), "DELIVERED" if np else "NOT_STARTED", np.get("url"), vid)
     db.event("import", "导入 Run-014 生产验收结果", run_id)
     return run_id

@@ -17,7 +17,8 @@ from pathlib import Path
 
 from .. import config, db, notify, youtube
 from ..llm import ContractError
-from ..providers.agy import AgyProvider, ProviderError
+from .. import providers
+from ..providers.agy import ProviderError
 from ..util import now
 from . import acquire, finish, media_stages, semantic
 from .context import RunContext, StageWarning, Waiting
@@ -52,12 +53,12 @@ MEDIA_RECHECK_PAUSED = 3600  # seconds: while paused for AGY_MEDIA_READ, repeat 
 
 ALERT_TEXT = {
     "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
-                          "在本机终端执行 `ssh -t ovh-investment /home/debian/.local/bin/agy`，按提示完成 Google 登录。恢复后队列自动继续。"),
+                          "在本机终端执行 `lzc-cli docker -- exec -it cloudlazycatappassetizer-worker-1 "
+                          "/lzcapp/var/assetizer/home/.local/bin/agy`（默认盒子为 prodbox），按提示完成 Google 登录。恢复后队列自动继续。"),
     "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
     "YOUTUBE_AUTH": ("YouTube 需要登录或会员权限",
-                     "用了 CookieCloud 时：确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次。"
-                     "没用 CookieCloud 时：建立隧道 `ssh -L 6080:127.0.0.1:6080 ovh-investment`，浏览器打开 http://localhost:6080/vnc.html ，"
-                     "在远程 Chromium 中登录 YouTube。系统每 30 分钟自动重试。"),
+                     "确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次；还没配置 CookieCloud 时，"
+                     "在「机房」→「YouTube 会话」里配置。系统每 30 分钟自动重试。"),
     "DISK_LOW": ("磁盘空间不足，暂停下载", "系统会先清理过期原始媒体；仍不足时请在「机房」查看占用。"),
 }
 
@@ -78,6 +79,8 @@ def submit(url: str, priority: int = 0, playbook_id: int | None = None) -> dict:
     prev = db.one("SELECT current_run_id FROM sources WHERE id=?", vid)
     db.exec("INSERT INTO runs(id, source_id, kind, playbook_id, production, priority, revision_of, created_at) VALUES (?,?,?,?,?,?,?,?)",
             rid, vid, "PRODUCTION", playbook_id, "QUEUED", priority, prev and prev["current_run_id"], now())
+    # a run asked for after 定稿 is meant to replace the issue, whatever was pinned while tuning
+    db.exec("UPDATE sources SET adopt_pinned=0 WHERE id=? AND channel_id IN (SELECT id FROM channels WHERE stage='LOCKED')", vid)
     for i, name in enumerate(STAGE_NAMES):
         db.exec("INSERT OR IGNORE INTO stages(run_id, name, ord, status) VALUES (?,?,?,'PENDING')", rid, name, i)
     db.event("submit", f"已加入队列：{url}", rid)
@@ -229,6 +232,9 @@ def _execute(run_id: str) -> str:
             return "WAITING"
         if _hold_if_agy_cannot_read_media(run_id, e):
             return "WAITING"
+        if e.transient:  # still failing after the call's own retries: an outage, not this run — resume it later
+            _wait(run_id, "NETWORK", str(e))
+            return "WAITING"
         _fail(run_id, e)
         return "FAILED"
     except Exception as e:  # noqa: BLE001
@@ -240,15 +246,23 @@ def _execute(run_id: str) -> str:
     state = "COMPLETE_PARTIAL" if warned else "COMPLETE"
     summary = _summary(run_id)
     db.exec("UPDATE runs SET production=?, stage=NULL, finished_at=?, summary=? WHERE id=?", state, now(), db.j(summary), run_id)
-    from ..delivery import has_target
-    token = config.get().secret("notion-token")
-    delivery = "NOT_STARTED" if token and has_target(source) else "BLOCKED"
-    db.exec("""UPDATE sources SET current_run_id=?, delivery=CASE WHEN ? = 'BLOCKED' THEN 'BLOCKED'
-               WHEN notion_page_id IS NOT NULL THEN 'STALE' ELSE 'NOT_STARTED' END,
-               delivery_reason=?, review=CASE WHEN review='APPROVED' THEN 'UNREVIEWED' ELSE review END, updated_at=? WHERE id=?""",
-            run_id, delivery, None if delivery != "BLOCKED" else "NOTION_NOT_CONFIGURED", now(), source["id"])
+    adopt_completed(source, run_id)
     db.event("run", f"生产完成（{state}）", run_id, data=summary)
     return state
+
+
+def adopt_completed(source: dict, run_id: str) -> None:
+    """A finished run becomes the issue's version, unless the user pinned another one while tuning."""
+    from ..delivery import has_target
+    from ..notion.mapping import run_headline
+    token = config.get().secret("notion-token")
+    delivery = "NOT_STARTED" if token and has_target(source) else "BLOCKED"
+    db.exec("""UPDATE sources SET current_run_id=?, headline=?, delivery=CASE WHEN ? = 'BLOCKED' THEN 'BLOCKED'
+               WHEN notion_page_id IS NOT NULL THEN 'STALE' ELSE 'NOT_STARTED' END,
+               delivery_reason=?, review=CASE WHEN review='APPROVED' THEN 'UNREVIEWED' ELSE review END, updated_at=?
+               WHERE id=? AND (adopt_pinned=0 OR current_run_id IS NULL)""",
+            run_id, run_headline(run_id), delivery, None if delivery != "BLOCKED" else "NOTION_NOT_CONFIGURED", now(), source["id"])
+    db.exec("UPDATE sources SET deliver_after_run=NULL WHERE id=? AND deliver_after_run=?", source["id"], run_id)
 
 
 def _summary(run_id: str) -> dict:
@@ -275,6 +289,8 @@ def _fail(run_id: str, e: BaseException) -> None:
     db.exec("UPDATE runs SET production=?, error_class=?, error=?, finished_at=? WHERE id=?",
             state, kind, f"{e}\n{traceback.format_exc()[-1500:]}", now(), run_id)
     db.event("run", f"生产失败：{kind}", run_id, "error")
+    from ..tuning import release_hold
+    release_hold(run_id)
     if state == "FAILED":
         notify.run_failed(run_id, kind, str(e))
 
@@ -286,7 +302,7 @@ def pause_queue(reason: str) -> None:
 # ---------------------------------------------------------------- agy media reads (agy updates itself)
 def media_self_test() -> dict:
     """Run agy's media self-test and keep the result for the 机房; a pass remembers the agy version it passed on."""
-    h = AgyProvider().media_health()
+    h = providers.get().media_health()
     db.set_setting("agy_media_health", h)
     if h.get("ok"):
         db.set_setting("agy_media_version", h.get("version"))
@@ -295,6 +311,14 @@ def media_self_test() -> dict:
 
 def media_alert(h: dict) -> None:
     """Pause production and say what agy did instead, so the code can be taught agy's new way to read media."""
+    if h.get("error") in PAUSE_KINDS:
+        # the self-test never reached the media (2026-10-27: Antigravity's weekly quota ran out right after an
+        # update check): pause for that reason, which the health probe lifts, not as if agy could not read video
+        db.raise_alert(h["error"], "critical" if h["error"] == "AGY_AUTH_REQUIRED" else "warning", *ALERT_TEXT[h["error"]])
+        pause_queue(h["error"])
+        return
+    if h.get("error") in ("PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT"):
+        return  # the network, not agy: the next self-test decides
     mb = f"{(h.get('bytes') or 0) / 1048576:.0f} MB"
     if h.get("error") == "MEDIA_READ_FAILED":
         how = (f"拒绝读取 {mb} 的自检视频：它可能又调低了单个视频文件的大小上限。"
@@ -321,7 +345,12 @@ def _hold_if_agy_cannot_read_media(run_id: str, e: ProviderError) -> bool:
     h = media_self_test()
     if h.get("ok"):
         return False
-    _wait(run_id, "AGY_MEDIA_READ", str(e))
+    if h.get("error") in ("PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT"):
+        # the self-test itself hit the network (2026-10-25 prodbox: a flaky uplink, not an agy change):
+        # hold this run like any outage instead of pausing all production for an hour
+        _wait(run_id, "NETWORK", str(e))
+        return True
+    _wait(run_id, h["error"] if h.get("error") in PAUSE_KINDS else "AGY_MEDIA_READ", str(e))
     media_alert(h)
     return True
 
@@ -351,6 +380,36 @@ def exit_reason() -> str:
     return "内存不足，被系统杀掉" if "oom-kill" in out else "进程意外退出"
 
 
+CGROUP_MEMORY_EVENTS = Path("/sys/fs/cgroup/memory.events")
+HEARTBEAT_EVERY = 30  # seconds; a thread, so a run that blocks the main loop for an hour still shows the worker alive
+
+
+def worker_run_dir() -> Path:
+    d = config.get().home / "run"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def heartbeat_loop() -> None:
+    """Liveness for a container healthcheck (the LazyCat package): the worker process is up."""
+    beat = worker_run_dir() / "worker.heartbeat"
+    while True:
+        beat.touch()
+        time.sleep(HEARTBEAT_EVERY)
+
+
+def container_exit_reason() -> str:
+    """Without systemd: the container cgroup's OOM-kill count tells an OOM from any other crash."""
+    try:
+        events = dict(line.split() for line in CGROUP_MEMORY_EVENTS.read_text().splitlines())
+        kills = int(events.get("oom_kill", 0))
+    except (OSError, ValueError):
+        return "原因不明"
+    seen = db.setting("worker_oom_kills") or 0
+    db.set_setting("worker_oom_kills", kills)
+    return "内存不足，被系统杀掉" if kills > seen else "进程意外退出"
+
+
 def cgroup_memory() -> tuple[int, int] | None:
     """Anonymous memory of the worker's cgroup (worker, agy and whisper together) and its MemoryMax, in bytes."""
     try:
@@ -377,12 +436,24 @@ def memory_alert() -> None:
 
 
 # ---------------------------------------------------------------- worker loop
+def worker_slots() -> int:
+    """How many runs the worker produces at once: setting `worker_slots` (1–16, default 1). A run is mostly waiting
+    on agy (8 at once on prodbox peaked at 9.1 GB; 16 agy calls at once ran clean once the container proxy
+    allowed enough connections, 2026-10-26) and whisper takes turns, so it is set per box to fit that box."""
+    try:
+        return max(1, min(16, int(db.setting("worker_slots") or 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
 class Worker:
     def __init__(self, poll: float = 5.0):
         self.poll = poll
         self.stop = False
         self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
                      "memory": 0.0, "digest": 0.0}
+        self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it
+        self.finished: dict[str, str] = {}             # run id → final state, until reap() picks it up
 
     def recover(self) -> None:
         n = kill_orphans()
@@ -404,6 +475,12 @@ class Worker:
             if restarts > (db.setting("worker_nrestarts") or 0):
                 notify.worker_recovered(exit_reason(), interrupted)
             db.set_setting("worker_nrestarts", restarts)
+        else:  # a container: a SIGTERM stop leaves a clean-exit mark; its absence after an earlier start is a crash
+            run_dir = worker_run_dir()
+            clean = run_dir / "worker.clean-exit"
+            if (run_dir / "worker.heartbeat").exists() and not clean.exists():
+                notify.worker_recovered(container_exit_reason(), interrupted)
+            clean.unlink(missing_ok=True)
 
     def housekeeping(self) -> None:
         t = time.monotonic()
@@ -422,7 +499,7 @@ class Worker:
                     media_alert(h)
         elif not paused and t - self.last["media"] > MEDIA_CHECK_EVERY and not db.one("SELECT 1 FROM runs WHERE production='RUNNING'"):
             self.last["media"] = t
-            if AgyProvider().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
+            if providers.get().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
                 h = media_self_test()
                 db.event("worker", f"agy {h.get('version')} 读视频自检{'通过' if h.get('ok') else '没通过'}",
                          level="info" if h.get("ok") else "warn")
@@ -431,7 +508,8 @@ class Worker:
                     paused = db.setting("queue_paused")
         if paused and paused.get("reason") != "AGY_MEDIA_READ" and t - self.last["health"] > 600:
             self.last["health"] = t
-            h = AgyProvider().health()
+            hs = [p.health() for p in providers.in_use()]
+            h = next((x for x in hs if not x.get("ok")), hs[0])
             db.set_setting("agy_health", h)
             if h.get("ok"):
                 db.set_setting("queue_paused", None)
@@ -440,17 +518,19 @@ class Worker:
                 db.event("worker", "模型恢复，队列继续")
         if not paused and t - self.last["probe"] > 3 * 3600 and not db.one("SELECT 1 FROM runs WHERE production='RUNNING'"):
             self.last["probe"] = t  # idle-time login probe so the Engine lamp is current
-            h = AgyProvider().health()
+            h = providers.get().health()
             db.set_setting("agy_health", h)
             if not h.get("ok") and h.get("error") == "AGY_AUTH_REQUIRED":
                 db.raise_alert("AGY_AUTH_REQUIRED", "critical", *ALERT_TEXT["AGY_AUTH_REQUIRED"])
         if t - self.last["retry"] > 1800:
             self.last["retry"] = t
-            db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','DISK_LOW','LIVE_IN_PROGRESS')")
+            db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' "
+                    "AND wait_reason IN ('YOUTUBE_AUTH','DISK_LOW','LIVE_IN_PROGRESS','NETWORK')")
         if t - self.last["retention"] > 3600:
             self.last["retention"] = t
             retention()
-        if t - self.last["ingest"] > 1800:
+        from ..ingest import EVERY as INGEST_EVERY
+        if t - self.last["ingest"] > INGEST_EVERY:
             self.last["ingest"] = t
             from ..ingest import poll
             try:
@@ -465,24 +545,52 @@ class Worker:
             if notify.configured() and notify.digest_due():
                 notify.send_digest()
 
+    def start(self, run_id: str) -> None:
+        def work():
+            try:
+                self.finished[run_id] = execute(run_id)
+            except Exception as e:  # noqa: BLE001 — execute records its own failures; this is a crash around it
+                self.finished[run_id] = "FAILED"
+                db.event("worker", f"Worker 异常：{e}", run_id, "error", {"tb": traceback.format_exc()[-1500:]})
+        t = threading.Thread(target=work, name=f"run-{run_id}", daemon=True)
+        self.active[run_id] = t
+        t.start()
+
+    def reap(self) -> bool:
+        """Forget finished run threads; True when one of them completed (its issue is ready to deliver)."""
+        completed = False
+        for run_id in [k for k, t in self.active.items() if not t.is_alive()]:
+            del self.active[run_id]
+            completed |= self.finished.pop(run_id, "").startswith("COMPLETE")
+        return completed
+
     def tick(self) -> bool:
         self.housekeeping()
         if apply_nudges():
             return True
+        from ..delivery import deliver_pending
+        if self.reap():  # delivery stays on this thread, one issue at a time, so two runs never race for a page
+            deliver_pending()
+            return True
         if db.setting("queue_paused"):
             return False
-        from ..delivery import deliver_pending
-        r = db.one("SELECT id FROM runs WHERE production='QUEUED' ORDER BY priority DESC, created_at LIMIT 1")
-        if r:
-            state = execute(r["id"])
-            if state.startswith("COMPLETE"):
-                deliver_pending()
+        started = False
+        while len(self.active) < worker_slots():
+            skip = ",".join("?" * len(self.active)) or "''"
+            r = db.one(f"SELECT id FROM runs WHERE production='QUEUED' AND id NOT IN ({skip}) "
+                       "ORDER BY priority DESC, created_at LIMIT 1", *self.active)
+            if not r:
+                break
+            self.start(r["id"])
+            started = True
+        if started:
             return True
-        from ..tuning import dispatch_next
-        if dispatch_next():  # 调试台: the next queued trial run
-            return True
+        if len(self.active) < worker_slots():
+            from ..tuning import dispatch_next
+            if dispatch_next():  # 调试台: the next queued trial run
+                return True
         batch = db.setting("trial_batch")
-        if batch and not db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'"):
+        if batch and not self.active and not db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'"):
             db.set_setting("trial_batch", None)
             notify.trials_done(batch)
         return deliver_pending()
@@ -497,9 +605,14 @@ class Worker:
                     os.killpg(pg, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+            try:
+                (worker_run_dir() / "worker.clean-exit").touch()
+            except OSError:
+                pass
             os._exit(0)
 
         signal.signal(signal.SIGTERM, on_term)
+        threading.Thread(target=heartbeat_loop, name="worker-heartbeat", daemon=True).start()
         db.event("worker", "Worker 已启动")
         while not self.stop:
             try:

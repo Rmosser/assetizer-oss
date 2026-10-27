@@ -1,5 +1,7 @@
 # 需求：在「机房」图形化配置 CookieCloud 凭据
 
+> **状态：已实现**。Assetizer 是 CookieCloud 的只读消费者。「机房」面板配置读取入口的 origin（设置 `cookiecloud_origin`）和三项只写凭据：CookieCloud App Token，以及 Cloudflare Access 服务令牌的 Client ID 与 Secret（存在 `secrets/`，界面不回显）。面板可以测试连接，并用一个会员视频验证 YouTube 登录态；失败时按 CookieCloud 返回的 `code` 显示可读说明。下文的 Access 令牌名和来源 IP 白名单是 OVH 时期的配置，懒猫出口不同，以 Cloudflare Access 的现行策略为准。实现以 `src/assetizer/cookies.py` 和 `web/src/components/CookieCloud.tsx` 为准。
+
 - 提出方：CookieCloud 只读入口的交付方 · 2026-10-13
 - 执行方：Assetizer 的 agent
 - 前置：[`cookiecloud-read-ingress.md`](cookiecloud-read-ingress.md) 描述的只读入口已上线并通过边缘侧验证

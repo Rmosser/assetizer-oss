@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS sources (
   media_state TEXT NOT NULL DEFAULT 'ABSENT',         -- ABSENT | CACHED | PURGED
   transcript_path TEXT,
   current_run_id TEXT,
-  delivery TEXT NOT NULL DEFAULT 'NOT_STARTED',      -- NOT_STARTED | BLOCKED | DELIVERING | DELIVERED | STALE | FAILED | REGISTERED
+  adopt_pinned INTEGER NOT NULL DEFAULT 0,          -- 调试期：用户钉住的版本，新跑完的运行不替换它
+  deliver_after_run TEXT,                            -- 定稿时选了「等跑完」：这次运行结束前不交付（delivery=HELD）
+  delivery TEXT NOT NULL DEFAULT 'NOT_STARTED',      -- NOT_STARTED | BLOCKED | DELIVERING | DELIVERED | STALE | FAILED | REGISTERED | HELD
   delivery_reason TEXT,
   delivered_at TEXT,
   notion_page_id TEXT,
@@ -281,11 +283,13 @@ def connect() -> sqlite3.Connection:
     path = str(config.get().db_path)
     if conn is None or getattr(_local, "path", None) != path:
         config.get().ensure_dirs()
-        conn = sqlite3.connect(path, timeout=30, isolation_level=None, check_same_thread=False)
+        # the database lives on prodbox's spinning disk: with 16 runs encoding at once a commit waited out a
+        # 30 s lock and failed two runs mid-ACQUIRE (2026-10-26); a write now waits up to two minutes
+        conn = sqlite3.connect(path, timeout=120, isolation_level=None, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA busy_timeout=120000")
         conn.executescript(SCHEMA)
         _migrate(conn)
         _local.conn, _local.path = conn, path
@@ -301,6 +305,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "delivered_at" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN delivered_at TEXT")
         conn.execute("UPDATE sources SET delivered_at=updated_at WHERE delivery='DELIVERED'")
+    if "adopt_pinned" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN adopt_pinned INTEGER NOT NULL DEFAULT 0")
+    if "deliver_after_run" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN deliver_after_run TEXT")
     if "notion_database_id" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN notion_database_id TEXT")
         r = conn.execute("SELECT value FROM settings WHERE key='notion_database_id'").fetchone()

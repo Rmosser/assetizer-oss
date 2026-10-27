@@ -1,0 +1,19 @@
+# Whisper for assetizer on the 4070 Ti box: WSL debian-gpu, installed as /etc/systemd/system/assetizer-asr.service.
+# WSL runs systemd and keeps the VM up (.wslconfig vmIdleTimeout=-1, instanceIdleTimeout=-1); a Windows logon task
+# starts the distro after a reboot. Mirrored networking: space reaches it at 192.168.1.50:8790.
+[Unit]
+Description=assetizer GPU ASR (faster-whisper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=asr
+WorkingDirectory=/home/asr/voice-lab/asr
+Environment=LD_LIBRARY_PATH=/home/asr/voice-lab/envs/asr/lib/python3.12/site-packages/nvidia/cublas/lib:/home/asr/voice-lab/envs/asr/lib/python3.12/site-packages/nvidia/cudnn/lib
+ExecStart=/home/asr/voice-lab/envs/asr/bin/python -u /home/asr/voice-lab/asr/server.py --port 8790 --token-file /home/asr/voice-lab/asr/token
+Restart=on-failure
+# a Windows-side socket on 8790 (even TIME_WAIT) makes the bind fail under mirrored networking; it clears in ~2 min
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

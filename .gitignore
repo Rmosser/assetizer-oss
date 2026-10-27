@@ -12,3 +12,7 @@ src/assetizer/web/static/
 .env.*
 !.env.example
 *.tsbuildinfo
+dist/
+.pkgout/
+*.lpk
+.lzc-cli-cache/

@@ -67,6 +67,9 @@ def rss(channel_id: str) -> list[dict]:
     return out
 
 
+EVERY = 1800  # seconds between two looks at the channels' feeds (the worker loop calls poll())
+
+
 def poll() -> dict:
     from .pipeline.runner import submit
     queued = []
@@ -105,10 +108,16 @@ def poll() -> dict:
     return {"queued": queued}
 
 
-def set_enabled(channel_id: str, enabled: bool, min_minutes: int = 10) -> dict:
+def set_enabled(channel_id: str, enabled: bool, min_minutes: int | None = None) -> dict:
+    """Turn intake on or off. The minimum length changes only when given; switching on starts from now,
+    so neither the channel's back catalogue nor what came out while intake was paused is pulled in."""
     cfg = db.setting(f"ingest:{channel_id}") or {}
-    cfg.update(enabled=enabled, min_minutes=min_minutes)
-    if enabled and not cfg.get("since"):
-        cfg["since"] = now()  # never backfill
+    was_on = bool(cfg.get("enabled"))
+    cfg["enabled"] = enabled
+    if min_minutes is not None:
+        cfg["min_minutes"] = min_minutes
+    cfg.setdefault("min_minutes", 10)
+    if enabled and (not was_on or not cfg.get("since")):
+        cfg["since"] = now()
     db.set_setting(f"ingest:{channel_id}", cfg)
     return cfg

@@ -40,6 +40,10 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
 PUBLIC_HOST = os.environ.get("ASSETIZER_PUBLIC_HOST", "").lower()          # e.g. kan.example.com
 ACCESS_TEAM = os.environ.get("ASSETIZER_ACCESS_TEAM", "")                  # e.g. example-team
 ACCESS_AUD = os.environ.get("ASSETIZER_ACCESS_AUD", "")
+# On LazyCat the gateway logs the user in and forwards X-HC-User-Id to the `web` service by name (Host: web:8770,
+# X-Forwarded-Host: assetizer.<box>.heiyu.space); that name only resolves inside the app's own network.
+TRUST_LAZYCAT = os.environ.get("ASSETIZER_TRUST_LAZYCAT", "") == "1"
+LAZYCAT_SERVICE = "web"
 _certs: dict = {"at": 0.0, "keys": None}
 
 
@@ -64,11 +68,15 @@ def _access_ok(token: str | None) -> bool:
 
 @app.middleware("http")
 async def guard(request: Request, call_next):
-    """Loopback app: local Host via SSH tunnel, or the public Host only with a valid Access JWT.
-    Also blocks DNS rebinding and cross-site form posts."""
+    """Loopback app: local Host via SSH tunnel, the LazyCat gateway with a logged-in user, or the public Host only
+    with a valid Access JWT. Also blocks DNS rebinding and cross-site form posts."""
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
     if host in LOCAL_HOSTS:
         pass
+    elif TRUST_LAZYCAT and host == LAZYCAT_SERVICE:
+        forwarded = (request.headers.get("x-forwarded-host") or "").rsplit(":", 1)[0].lower()
+        if not forwarded.endswith(".heiyu.space") or not request.headers.get("x-hc-user-id"):
+            return JSONResponse({"error": "lazycat login required"}, status_code=403)
     elif PUBLIC_HOST and host == PUBLIC_HOST:
         if not _access_ok(request.headers.get("cf-access-jwt-assertion")):
             return JSONResponse({"error": "access required"}, status_code=403)
@@ -155,9 +163,7 @@ def overview():
 
 
 # rough per-stage cost model (seconds per source-minute), refined from history later
-STAGE_COST = {"RESOLVE": 0.1, "PLAYBOOK": 0, "ACQUIRE": 3, "CHUNK": 0.3, "UNDERSTAND": 12, "MERGE": 2, "KNOWLEDGE": 8,
-              "ARTICLE": 8, "SELECT": 1, "SCREENSHOTS": 0.5, "BOUNDARY": 14, "CLIPS": 30, "SUBTITLES": 10, "MEDIA_QA": 2,
-              "REVIEW_CHECK": 2, "COMPOSE": 0, "PACKAGE": 0.2, "CLEANUP": 0, "TRANSCRIBE": 0}
+from ..tuning import STAGE_COST  # noqa: E402
 
 
 def _eta(run: dict) -> float | None:
@@ -234,8 +240,10 @@ def source(sid: str, run: str | None = None):
     playbook = db.one("SELECT id, channel_id, version, status, data FROM playbooks WHERE id=?", r["playbook_id"]) if r and r.get("playbook_id") else None
     if playbook:
         playbook["facets"] = db.unj(playbook.pop("data"), {}).get("facets", [])
+    from ..notion.mapping import run_headline
+    head = run_headline(rid) if rid and rid != s.get("current_run_id") else s.get("headline")  # a trial run has its own 题眼
     return {
-        "source": {k: v for k, v in s.items() if k not in ("info",)} | {"info": db.unj(s.get("info"), {})},
+        "source": {k: v for k, v in s.items() if k not in ("info",)} | {"info": db.unj(s.get("info"), {}), "headline": head},
         "run": _run_view(r), "units": units, "assets": assets, "playbook": playbook,
         "sections": [{**x, "unit_ids": db.unj(x["unit_ids"], [])} for x in db.q("SELECT * FROM sections WHERE run_id=? ORDER BY ord", rid)],
         "flags": flags,
@@ -269,17 +277,23 @@ def _playbook_view(p: dict) -> dict:
 
 def _compile_state(cid: str, prompt: dict | None, pbs: list[dict]) -> dict | None:
     """Is the newest prompt version compiled? (compiles run in the background)"""
+    def pending(since: str) -> dict:
+        err = db.one("""SELECT ts, message FROM events WHERE kind='compile' AND level='error' AND ts>=? AND message LIKE ?
+                        ORDER BY id DESC LIMIT 1""", since, f"%（{cid}）%")
+        return {"state": "failed", "error": err["message"], "at": err["ts"]} if err else {"state": "running", "since": since}
+    again = db.setting(f"recompile:{cid}")
+    if again and not any(p["id"] > again["after"] for p in pbs):  # its goal already has a version: done is a newer one
+        return pending(again["since"])
     if not prompt:
         return None
     if any(p.get("prompt_id") == prompt["id"] for p in pbs):
         return {"state": "done"}
-    err = db.one("""SELECT ts, message FROM events WHERE kind='compile' AND level='error' AND ts>=? AND message LIKE ?
-                    ORDER BY id DESC LIMIT 1""", prompt["created_at"], f"%（{cid}）%")
-    return {"state": "failed", "error": err["message"], "at": err["ts"]} if err else {"state": "running", "since": prompt["created_at"]}
+    return pending(prompt["created_at"])
 
 
 @app.get("/api/channels")
 def channels():
+    from ..ingest import EVERY
     out = []
     pending = {d["ref"]: d for d in db.q("SELECT * FROM decisions WHERE resolved_at IS NULL AND kind='CONFIRM_PLAYBOOK'")}
     for c in db.q("SELECT * FROM channels ORDER BY mode DESC, created_at"):
@@ -290,8 +304,11 @@ def channels():
         ncfg = db.setting(f"notion:{c['id']}") or {}
         busy = db.one("""SELECT COUNT(*) n FROM runs r JOIN samples sm ON sm.source_id=r.source_id AND sm.channel_id=?
                          WHERE r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')""", c["id"])["n"]
+        held = db.one("""SELECT SUM(delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%') blocked, SUM(delivery='HELD') held
+                         FROM sources WHERE channel_id=?""", c["id"])
         out.append({**c, "playbooks": pbs, "prompts": prompts, "sources": stats["n"], "last_source": stats["last"],
-                    "ingest": db.setting(f"ingest:{c['id']}") or {"enabled": False},
+                    "ingest": {**(db.setting(f"ingest:{c['id']}") or {"enabled": False}), "every_minutes": EVERY // 60},
+                    "blocked": held["blocked"] or 0, "held": held["held"] or 0,
                     "notion": {"configured": bool(ncfg.get("database_id")), "database_title": ncfg.get("database_title"),
                                "template": ncfg.get("template")},
                     "samples": db.one("SELECT COUNT(*) n FROM samples WHERE channel_id=?", c["id"])["n"], "samples_busy": busy,
@@ -306,6 +323,12 @@ def channels():
 def _cookie_status() -> dict:
     from ..cookies import status
     return status()
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness for the container healthcheck: the web process answers. No database or agy work."""
+    return {"ok": True}
 
 
 @app.get("/api/engine")
@@ -474,24 +497,29 @@ def retry(rid: str):
     return {"ok": True}
 
 
-@app.post("/api/playbooks/{pid}/confirm")
-def confirm_playbook(pid: int):
-    p = db.one("SELECT * FROM playbooks WHERE id=?", pid)
-    if not p:
+@app.post("/api/playbooks/{pid}/recompile")
+def recompile_playbook(pid: int):
+    """Compile the learning goal behind a version again into a new draft: an imported playbook gets its
+    sentence-by-sentence provenance, an old one its rule short names. The version itself stays as it is."""
+    from ..compiler import compile_prompt
+    pb = db.one("SELECT id, channel_id, prompt_id, version FROM playbooks WHERE id=?", pid)
+    if not pb:
         raise HTTPException(404)
-    db.exec("UPDATE playbooks SET status='SUPERSEDED' WHERE channel_id=? AND status='ACTIVE'", p["channel_id"])
-    db.exec("UPDATE playbooks SET status='ACTIVE', activated_at=? WHERE id=?", now(), pid)
-    db.exec("UPDATE decisions SET resolved_at=?, outcome='CONFIRMED' WHERE kind='CONFIRM_PLAYBOOK' AND ref=?", now(), str(pid))
-    db.exec("""UPDATE runs SET production='QUEUED', wait_reason=NULL WHERE production='WAITING' AND wait_reason='PLAYBOOK_CONFIRMATION'
-               AND source_id IN (SELECT id FROM sources WHERE channel_id=?)""", p["channel_id"])
-    # 定稿 (design §R2-1): the channel leaves tuning, its held samples go to Notion, new uploads come in by RSS
-    ch = db.one("SELECT * FROM channels WHERE id=?", p["channel_id"]) if p["channel_id"] else None
-    if ch:
-        db.exec("UPDATE channels SET stage='LOCKED', updated_at=? WHERE id=?", now(), ch["id"])
-        if ch["mode"] == "TRACKED" and ch["youtube_channel_id"]:
-            from ..ingest import set_enabled
-            set_enabled(ch["id"], True)
-    return {"ok": True}
+    cid = pb["channel_id"]
+    if not cid:
+        raise HTTPException(400, "通用规程没有学习目标原文")
+    prompt = (db.one("SELECT id FROM channel_prompts WHERE id=?", pb["prompt_id"]) if pb["prompt_id"]
+              else db.one("SELECT id FROM channel_prompts WHERE channel_id=? ORDER BY version DESC LIMIT 1", cid))
+    if not prompt:  # imported, and nobody has written the goal down here yet
+        raise HTTPException(400, "这一版没有学习目标原文，先写学习目标")
+    pbs = db.q("SELECT id, prompt_id FROM playbooks WHERE channel_id=?", cid)
+    latest = db.one("SELECT id, created_at FROM channel_prompts WHERE channel_id=? ORDER BY version DESC LIMIT 1", cid)
+    if (_compile_state(cid, latest, pbs) or {}).get("state") == "running":
+        raise HTTPException(409, "这个频道正在编译，等它完成")
+    db.set_setting(f"recompile:{cid}", {"playbook_id": pid, "after": max(p["id"] for p in pbs), "since": now()})
+    _bg(compile_prompt, cid, prompt["id"], True, label=f"Playbook 编译（{cid}）")
+    db.event("compile", f"{cid} 按 v{pb['version']} 的学习目标重新编译")
+    return {"prompt_id": prompt["id"], "compiling": True}
 
 
 @app.post("/api/youtube/remote-browser")
@@ -591,7 +619,7 @@ def cookiecloud_test_video(body: VideoTest):
 
 class Ingest(BaseModel):
     enabled: bool
-    min_minutes: int = 10
+    min_minutes: int | None = None
 
 
 @app.post("/api/channels/{cid}/ingest")
@@ -706,20 +734,6 @@ def channel_trial_clear(cid: str):
     return {"cancelled": n, **tuning.workbench(cid)}
 
 
-class VoteBody(BaseModel):
-    liked: bool
-    note: str | None = None
-
-
-@app.post("/api/runs/{rid}/vote")
-def run_vote(rid: str, body: VoteBody):
-    from .. import tuning
-    try:
-        return tuning.vote(rid, body.liked, body.note)
-    except ValueError as e:
-        _tuning_error(e)
-
-
 @app.get("/api/compare")
 def compare_runs(a: str, b: str):
     from .. import tuning
@@ -730,17 +744,58 @@ def compare_runs(a: str, b: str):
 
 
 class AdoptBody(BaseModel):
-    run_id: str
+    run_id: str | None = None
+    pinned: bool = True
 
 
 @app.post("/api/sources/{sid}/adopt")
 def adopt_run(sid: str, body: AdoptBody):
     from .. import tuning
     try:
-        tuning.adopt(sid, body.run_id)
+        return {"ok": True, **tuning.adopt(sid, body.run_id, body.pinned)}
     except ValueError as e:
         _tuning_error(e)
-    return {"ok": True}
+
+
+@app.get("/api/channels/{cid}/lock-preview")
+def channel_lock_preview(cid: str, playbook_id: int):
+    """定稿单: per sample what would be written, whether the library already has it (checked live) and whether
+    that page may be replaced (only pages Assetizer wrote itself)."""
+    from .. import tuning
+    from ..delivery import registered_many
+    try:
+        out = tuning.lock_preview(cid, playbook_id)
+    except ValueError as e:
+        _tuning_error(e)
+    try:
+        lib = registered_many({"channel_id": cid}, [s["source_id"] for s in out["samples"]])
+        out["library_checked"] = True
+    except Exception as e:  # noqa: BLE001
+        lib, out["library_checked"], out["library_error"] = {}, False, str(e)[:200]
+    norm = lambda x: (x or "").replace("-", "")  # noqa: E731
+    for s in out["samples"]:
+        pg = lib.get(s["source_id"])
+        own = s.pop("notion_page_id")
+        s["library"] = pg and {"url": pg.get("url"), "title": pg.get("title"), "owned": bool(own) and norm(own) == norm(pg.get("id"))}
+        s["can_replace"] = bool(own) and (not out["library_checked"] or bool(s["library"] and s["library"]["owned"]))
+    return out
+
+
+class LockBody(BaseModel):
+    playbook_id: int
+    samples: list[dict] = []
+    ingest: dict | None = None
+
+
+@app.post("/api/channels/{cid}/lock")
+def channel_lock(cid: str, body: LockBody):
+    from .. import tuning
+    try:
+        return tuning.lock(cid, body.playbook_id, body.samples, body.ingest)
+    except tuning.LockRefused as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        _tuning_error(e)
 
 
 @app.post("/api/channels/{cid}/retune")
@@ -761,12 +816,11 @@ def _notion():
     return n
 
 
-def _notion_view(cid: str, cfg: dict) -> dict:
-    from ..notion import mapping as M
+def _database(n, database_id: str, cached: bool = False) -> dict:
+    from .. import preview as PV
     from ..notion.client import NotionError
-    n = _notion()
     try:
-        dbo = n._req("GET", f"/databases/{cfg['database_id']}")
+        return PV.database(n, database_id) if cached else n._req("GET", f"/databases/{database_id}")
     except NotionError as e:
         from ..delivery import TOKEN_FIX, token_invalid
         if token_invalid(e):
@@ -774,6 +828,13 @@ def _notion_view(cid: str, cfg: dict) -> dict:
         if e.status in (403, 404):
             raise HTTPException(502, f"Integration 没有这个数据库的权限（{e.status}）：在数据库右上角 ··· → Connections 里添加它。")
         raise HTTPException(502, f"读不到目标数据库：{e}")
+
+
+def _notion_view(cid: str, cfg: dict) -> dict:
+    from ..notion import mapping as M
+    from ..notion.client import NotionError
+    n = _notion()
+    dbo = _database(n, cfg["database_id"])
     schema = M.schema_of(dbo)
     title = "".join(t.get("plain_text", "") for t in dbo.get("title", []))
     if title and cfg.get("database_title") != title:
@@ -792,6 +853,8 @@ def _notion_view(cid: str, cfg: dict) -> dict:
                 except NotionError:
                     titles[pid] = None
     return {"database": {"id": dbo["id"], "url": dbo.get("url"), "title": "".join(t.get("plain_text", "") for t in dbo.get("title", []))},
+            # an explicit flag once the target was picked in the app; older configs go by the 🧪 copy's name
+            "test_copy": bool(cfg["is_test_copy"]) if "is_test_copy" in cfg else "测试副本" in title,
             "config": {k: cfg.get(k) for k in ("template", "heading", "icon")}, **view, "page_titles": titles,
             "sample_source": s and {"id": s["id"], "title": s["title"]},
             "templates": M.TEMPLATES, "source_labels": {k: v[0] for k, v in M.SOURCES.items()},
@@ -826,25 +889,127 @@ class NotionMapping(BaseModel):
 @app.post("/api/channels/{cid}/notion")
 def channel_notion_save(cid: str, body: NotionMapping):
     from ..notion import mapping as M
+    from .. import preview as PV
     cfg = M.get(cid)
     if not cfg or not cfg.get("database_id"):
         raise HTTPException(409, "这个频道还没有 Notion 目标")
-    if body.template not in M.TEMPLATES:
-        raise HTTPException(400, "unknown template")
-    props = {}
-    for pid, m in body.properties.items():
-        if not m or not m.get("source"):
-            continue  # 不填
-        if m["source"] not in M.SOURCES:
-            raise HTTPException(400, f"unknown source {m['source']}")
-        props[pid] = {k: m[k] for k in ("name", "type", "source", "value") if k in m}
-    cfg = {**cfg, "properties": props, "template": body.template, "heading": body.heading.strip(), "icon": body.icon or "none"}
+    try:
+        cfg = PV.draft_config(cfg, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     M.save(cid, cfg)
     # sources paused on the old mapping try again now
     db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL
                WHERE channel_id=? AND delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%'""", cid)
     db.event("notion", f"已更新「{cid}」的 Notion 属性映射")
     return {"configured": True, **_notion_view(cid, cfg)}
+
+
+class PreviewBody(BaseModel):
+    run_id: str | None = None
+    config: dict | None = None
+
+
+@app.post("/api/channels/{cid}/notion/preview")
+def channel_notion_preview(cid: str, body: PreviewBody):
+    """The Notion page one run would become under the channel's config plus unsaved card edits. Reads Notion, never writes."""
+    from .. import preview as PV
+    from ..notion import mapping as M
+    ch = db.one("SELECT * FROM channels WHERE id=?", cid)
+    if not ch:
+        raise HTTPException(404)
+    saved = M.get(cid)
+    if not saved or not saved.get("database_id"):
+        return {"configured": False}
+    try:
+        cfg = PV.draft_config(saved, body.config)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if body.run_id:
+        r = db.one("SELECT r.id, r.source_id FROM runs r JOIN sources s ON s.id=r.source_id WHERE r.id=? AND s.channel_id=?",
+                   body.run_id, cid)
+        if not r:
+            raise HTTPException(404, "这一版不属于这个频道")
+        source, run_id = db.one("SELECT * FROM sources WHERE id=?", r["source_id"]), r["id"]
+    else:
+        source = db.one("""SELECT * FROM sources WHERE channel_id=? AND current_run_id IS NOT NULL
+                           ORDER BY published_at DESC, updated_at DESC LIMIT 1""", cid)
+        if not source:
+            return {"configured": True, "empty": True}
+        run_id = source["current_run_id"]
+    n = _notion()
+    return {"configured": True, **PV.build(n, _database(n, cfg["database_id"], cached=True), cfg, ch, source, run_id)}
+
+
+@app.get("/api/playbooks/{pid}/annotations")
+def playbook_annotations(pid: int):
+    """稿纸: the prompt a version came from, each clause's range and fate, rules with short names, what changed."""
+    from ..compiler import annotations
+    try:
+        return annotations(pid)
+    except LookupError:
+        raise HTTPException(404)
+
+
+@app.get("/api/channels/{cid}/recent")
+def channel_recent(cid: str, limit: int = 4):
+    """The latest issues of a locked channel, with their 校注 counts (the 定稿后 strip)."""
+    out = []
+    for s in db.q("""SELECT id, title, published_at, duration, delivery, delivery_reason, notion_url, current_run_id FROM sources
+                     WHERE channel_id=? AND current_run_id IS NOT NULL ORDER BY published_at DESC, created_at DESC LIMIT ?""",
+                  cid, max(1, min(limit, 20))):
+        run = db.one("SELECT summary FROM runs WHERE id=?", s["current_run_id"])
+        out.append({**s, "units": (db.unj(run["summary"], {}) or {}).get("units") if run else None,
+                    "notes": db.one("SELECT COUNT(*) n FROM flags WHERE run_id=? AND severity!='INFO'", s["current_run_id"])["n"]})
+    return {"issues": out}
+
+
+@app.get("/api/notion/databases")
+def notion_databases(q: str = ""):
+    """Databases the integration can see, for picking a channel's target in the app."""
+    from ..notion.client import NotionError
+    try:
+        res = _notion().search(q.strip())
+    except NotionError as e:
+        raise HTTPException(502, f"Notion 搜索失败：{e}")
+    return {"databases": [{"id": d["id"], "url": d.get("url"),
+                           "title": "".join(t.get("plain_text", "") for t in d.get("title", []))} for d in res]}
+
+
+class TargetBody(BaseModel):
+    database: str
+    parent_page_id: str | None = None
+    is_test_copy: bool = False
+
+
+@app.post("/api/channels/{cid}/notion/target")
+def channel_notion_target(cid: str, body: TargetBody):
+    """Point a channel at another database (what `assetizer notion-target` does): mappings follow by property name,
+    a fixed relation is left for the user to pick again."""
+    from .. import preview as PV
+    from ..notion import mapping as M
+    if not db.one("SELECT id FROM channels WHERE id=?", cid):
+        raise HTTPException(404)
+    try:
+        dbid = M.norm_id(body.database)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    n = _notion()
+    dbo = _database(n, dbid)
+    schema = M.schema_of(dbo)
+    old = M.get(cid) or {}
+    if old.get("properties"):
+        cfg, repick = M.remap(old, schema)
+    else:
+        cfg, repick = M.preset(cid, dbid, schema, body.parent_page_id), []
+    title = "".join(t.get("plain_text", "") for t in dbo.get("title", []))
+    cfg.update(database_id=dbid, database_title=title, is_test_copy=body.is_test_copy)
+    M.save(cid, cfg)
+    PV.forget(f"db:{dbid}")
+    db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL
+               WHERE channel_id=? AND delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%'""", cid)
+    db.event("notion", f"「{cid}」的 Notion 目标换成「{title}」")
+    return {"configured": True, "repick": repick, **_notion_view(cid, cfg)}
 
 
 @app.get("/api/notion/pages")

@@ -45,8 +45,8 @@ try {
     await dialog.getByLabel("App Token", { exact: true }).fill(token);
     // A successful mutation already returns fresh metadata. A failed refresh must not hide it or block testing.
     await page.route("**/api/engine", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"detail":"refresh unavailable"}' }));
-    await dialog.getByRole("button", { name: "保存", exact: true }).click();
-    await dialog.getByText("已保存。点「测试连接」确认能读到 cookies。", { exact: true }).waitFor();
+    await dialog.getByRole("button", { name: "保存第 2、3 步", exact: true }).click();
+    await dialog.getByText("已保存。接着做第 4 步：先「测试连接」，再「视频测试」。", { exact: true }).waitFor();
     assert.equal(await dialog.getByLabel("App Token", { exact: true }).inputValue(), "");
     assert.match(await dialog.locator(".cc-field").last().innerText(), /已配置 · 文件/);
     assert.equal(await dialog.getByRole("button", { name: "测试连接", exact: true }).isEnabled(), true);
@@ -65,7 +65,7 @@ try {
     await originField.getByRole("button", { name: "确认清除", exact: true }).click();
     await dialog.getByText("已清除。", { exact: true }).waitFor();
     assert.equal(await dialog.getByLabel("Origin", { exact: true }).inputValue(), "");
-    assert.equal(await dialog.getByRole("button", { name: "保存", exact: true }).isEnabled(), false);
+    assert.equal(await dialog.getByRole("button", { name: "保存第 2、3 步", exact: true }).isEnabled(), false);
     const saved = await (await context.request.get(`${url}/api/engine`)).json();
     assert.equal(saved.youtube.cookiecloud.origin, null);
     assert.equal(saved.youtube.cookiecloud.fields.app_token.configured, true);

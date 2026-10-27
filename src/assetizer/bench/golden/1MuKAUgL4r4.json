@@ -1,0 +1,557 @@
+{
+ "id": "1MuKAUgL4r4",
+ "url": "https://www.youtube.com/watch?v=1MuKAUgL4r4",
+ "title": "09/08/2026 技术分析视频 持仓/板块个股分析/关注列表/交易计划",
+ "channel": "trader-tom",
+ "genre": "trading-chart-review",
+ "visual": true,
+ "duration": 3504,
+ "media_sha256": "ddabf4d57157bc217781d871802c4592d8a67c5e111b24183a8e9f5ac248af66",
+ "media_bytes": 770347588,
+ "provenance": {
+  "units": "Run-014 knowledge units (2026-09-10), accepted as a whole by the user (POSITIVE), not checked one by one: a reference, not ground truth",
+  "boundaries": "Run-014 clip boundaries checked with local ASR and five frames at each end (24 units): ground truth"
+ },
+ "units": [
+  {
+   "id": "unit_01_ntla_undercut_and_tem_risk_control",
+   "title": "持仓复盘：NTLA前低破位收回（Undercut）与TEM减仓风控",
+   "tickers": [
+    "NTLA",
+    "TEM",
+    "HIMS"
+   ],
+   "start": 0.0,
+   "end": 98.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_02_mrna_dual_gap_fill_volume_contraction",
+   "title": "MRNA双重缺口重叠回补、EMA10测试与成交量极度萎缩",
+   "tickers": [
+    "MRNA"
+   ],
+   "start": 99.0,
+   "end": 163.0,
+   "priority": "P1",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_03_biotech_sector_gap_support_reaction",
+   "title": "生物科技板块回调中的相对强度：缺口回补承接与均线收复",
+   "tickers": [
+    "XBI",
+    "IBB",
+    "CRSP",
+    "BEAM",
+    "GH",
+    "LLY"
+   ],
+   "start": 164.0,
+   "end": 308.0,
+   "priority": "P2",
+   "knowledge_type": "SECTOR_ANALYSIS"
+  },
+  {
+   "id": "unit_04_breakout_differentiation_gap_resistance_testing",
+   "title": "突破质量分化与缺口阻力测试：事不过三逻辑",
+   "tickers": [
+    "TXG",
+    "CAI",
+    "HNGE",
+    "HIMS"
+   ],
+   "start": 309.0,
+   "end": 451.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_05_semiconductors_resistance_and_no_chase_rule",
+   "title": "半导体板块阻力压制、拒绝追高与二次盘整交易预案",
+   "tickers": [
+    "SMTC",
+    "LITE",
+    "SIMO",
+    "TER",
+    "VICR",
+    "MKSI",
+    "ENTG"
+   ],
+   "start": 452.0,
+   "end": 697.0,
+   "priority": "P1",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_06_three_green_candles_rule_and_confluence_pivot",
+   "title": "数据中心板块：三连阳不追规则与跳空突破中枢回踩确认",
+   "tickers": [
+    "WGMI",
+    "NBIS",
+    "CRWV"
+   ],
+   "start": 698.0,
+   "end": 914.0,
+   "priority": "P1",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_07_tsla_gap_up_breakout_and_trade_management",
+   "title": "TSLA跳空大涨突破缺口、长周末风控减持与跨周期双预案",
+   "tickers": [
+    "TSLA"
+   ],
+   "start": 915.0,
+   "end": 1119.0,
+   "priority": "P1",
+   "knowledge_type": "TRADE_MANAGEMENT"
+  },
+  {
+   "id": "unit_08_alm_consolidation_breakout_and_uuuu_retest",
+   "title": "ALM紧凑盘整突破与UUUU突破缺口回踩确认",
+   "tickers": [
+    "ALM",
+    "UUUU"
+   ],
+   "start": 1120.0,
+   "end": 1194.0,
+   "priority": "P1",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_09_gap_reclaim_and_biotech_watchlist_plans",
+   "title": "缺口收复（Gap Reclaim）与生物科技观察池次日计划",
+   "tickers": [
+    "TXG",
+    "NTLA",
+    "TEM",
+    "HNGE",
+    "CRSP"
+   ],
+   "start": 1195.0,
+   "end": 1304.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_10_confluence_support_and_real_estate_tech_pivot",
+   "title": "房产科技股Z与OPEN：多重拐点前低与缺口起点共振支撑",
+   "tickers": [
+    "Z",
+    "OPEN"
+   ],
+   "start": 1305.0,
+   "end": 1394.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_11_execution_triggers_and_risk_reward_evaluation",
+   "title": "执行触发信号（Trigger）识别与赔率/流动性多维筛选",
+   "tickers": [
+    "FIGR",
+    "NKTR",
+    "ORKA",
+    "CAI",
+    "DNTH",
+    "PRAX"
+   ],
+   "start": 1395.0,
+   "end": 1660.0,
+   "priority": "P2",
+   "knowledge_type": "EXECUTION_TRIGGER"
+  },
+  {
+   "id": "unit_12_late_breakout_vs_breakdown_avoidance",
+   "title": "NTAP尾盘收敛盘整突破 vs CAVA跌破关键缺口支撑失效",
+   "tickers": [
+    "NTAP",
+    "CAVA"
+   ],
+   "start": 1661.0,
+   "end": 1771.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_13_mrna_core_focus_and_sector_dispersion",
+   "title": "MRNA核心关注池（T0级别）确立与同板块集中不分散原则",
+   "tickers": [
+    "MRNA",
+    "MP",
+    "UUUU",
+    "CELH",
+    "BE"
+   ],
+   "start": 1772.0,
+   "end": 1932.0,
+   "priority": "P1",
+   "knowledge_type": "RISK_MANAGEMENT"
+  },
+  {
+   "id": "unit_14_mega_cap_gap_reactions_and_discipline",
+   "title": "巨头缺口反应与交易纪律：谷歌空仓避震荡与亚马逊完全补缺",
+   "tickers": [
+    "GOOG",
+    "AMZN",
+    "HOOD"
+   ],
+   "start": 1933.0,
+   "end": 2195.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_15_big_tech_divergence_and_overhead_gap_suppression",
+   "title": "大科技股走势分化与微软向下跳空缺口压制",
+   "tickers": [
+    "MSFT",
+    "META",
+    "AAPL",
+    "NVDA",
+    "TSLA"
+   ],
+   "start": 2196.0,
+   "end": 2316.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_16_software_subsector_divergence_cybersecurity_leadership",
+   "title": "软件子板块结构分化：工作流软件破位清仓与网络安全抗跌",
+   "tickers": [
+    "DUOL",
+    "NOW",
+    "NET",
+    "RBRK",
+    "PANW",
+    "FTNT",
+    "CRWD"
+   ],
+   "start": 2317.0,
+   "end": 2700.0,
+   "priority": "P1",
+   "knowledge_type": "SECTOR_ANALYSIS"
+  },
+  {
+   "id": "unit_17_ttd_gap_processing_and_watchlist_tiers",
+   "title": "TTD跳空缺口处理与自选观察池T0/T1梯队管理",
+   "tickers": [
+    "TTD",
+    "APP",
+    "NET",
+    "RBRK"
+   ],
+   "start": 2700.0,
+   "end": 2727.0,
+   "priority": "P3",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_18_hubs_breakout_pullback_confluence",
+   "title": "HUBS突破双顶次回踩：日线50均线与周线均线共振支撑",
+   "tickers": [
+    "HUBS"
+   ],
+   "start": 2727.0,
+   "end": 2764.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_19_kvyo_key_level_gap_delay_and_intu_undercut",
+   "title": "KVYO关键压力位遇阻缺口回踩预期与INTU破前低流动性过滤",
+   "tickers": [
+    "KVYO",
+    "INTU"
+   ],
+   "start": 2764.0,
+   "end": 2802.0,
+   "priority": "P3",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_20_path_textbook_pullback_and_right_side",
+   "title": "PATH突破缺口回踩与大阴线杀跌下的右侧止跌等待",
+   "tickers": [
+    "PATH"
+   ],
+   "start": 2864.0,
+   "end": 2894.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_21_cybersecurity_consolidation_details",
+   "title": "网络安全高位横盘盘整（Tight Base）与警报线设置",
+   "tickers": [
+    "PANW",
+    "FTNT"
+   ],
+   "start": 2896.0,
+   "end": 2924.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_22_okta_gap_resistance_and_zs_launch_support",
+   "title": "OKTA缺口阻力下方高位蓄势与ZS启动低点防守",
+   "tickers": [
+    "OKTA",
+    "ZS",
+    "CRWD"
+   ],
+   "start": 2927.0,
+   "end": 2987.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_23_twst_cup_handle_inside_day_expectation",
+   "title": "TWST杯柄形态突破与高位孕线（Inside Day）顺势中继预期",
+   "tickers": [
+    "TWST"
+   ],
+   "start": 3033.0,
+   "end": 3059.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_24_cai_explosive_momentum_pullback_framework",
+   "title": "CAI爆发性走势波段节律（放量急拉+缩量回调）与选强逻辑",
+   "tickers": [
+    "CAI",
+    "LLY"
+   ],
+   "start": 3074.0,
+   "end": 3100.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_25_portfolio_risk_control_and_aesthetic_filters",
+   "title": "投资组合风控哲学：同类形态精选1-2只与低位超跌/破位过滤",
+   "tickers": [
+    "STRL",
+    "RDW",
+    "CNH",
+    "AGX",
+    "PL"
+   ],
+   "start": 3122.0,
+   "end": 3202.0,
+   "priority": "P2",
+   "knowledge_type": "RISK_MANAGEMENT"
+  },
+  {
+   "id": "unit_26_rblx_bottom_breakout_and_staged_trim_plan",
+   "title": "RBLX长期大底部突破与48美元阶梯式分批止盈（Trim）计划",
+   "tickers": [
+    "RBLX"
+   ],
+   "start": 3338.0,
+   "end": 3355.0,
+   "priority": "P2",
+   "knowledge_type": "TRADE_MANAGEMENT"
+  },
+  {
+   "id": "unit_27_figr_missed_breakout_and_retest_rule",
+   "title": "FIGR盘中错失突破复盘与严禁追高、回踩测试缺口入场规则",
+   "tickers": [
+    "FIGR"
+   ],
+   "start": 3365.0,
+   "end": 3389.0,
+   "priority": "P2",
+   "knowledge_type": "EXECUTION_TRIGGER"
+  },
+  {
+   "id": "unit_28_asst_extreme_volume_leader_consolidation_rule",
+   "title": "ASST底部异常巨量突破与领军股（Leader）首日不追等待收敛纪律",
+   "tickers": [
+    "ASST"
+   ],
+   "start": 3399.0,
+   "end": 3419.0,
+   "priority": "P2",
+   "knowledge_type": "CHART_READING"
+  },
+  {
+   "id": "unit_29_chym_acquisition_news_vs_trading_plan",
+   "title": "CHYM受收购消息跳涨与严守原定技术计划拒绝消息追单",
+   "tickers": [
+    "CHYM"
+   ],
+   "start": 3426.0,
+   "end": 3453.0,
+   "priority": "P2",
+   "knowledge_type": "TRADE_MANAGEMENT"
+  },
+  {
+   "id": "unit_30_next_day_focus_and_capital_preservation",
+   "title": "次日核心主线梳理与本金保护第一原则",
+   "tickers": [
+    "TSLA",
+    "UUUU",
+    "MRNA",
+    "PANW",
+    "FTNT",
+    "NET",
+    "APP"
+   ],
+   "start": 3468.0,
+   "end": 3504.0,
+   "priority": "P3",
+   "knowledge_type": "GENERAL_CONTEXT"
+  }
+ ],
+ "boundaries": [
+  {
+   "unit": "unit_01_ntla_undercut_and_tem_risk_control",
+   "start": 15.5,
+   "end": 98.0,
+   "status": "SANITY_PASS_WITH_MINOR_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_02_mrna_dual_gap_fill_volume_contraction",
+   "start": 99.0,
+   "end": 163.0,
+   "status": "SANITY_PASS"
+  },
+  {
+   "unit": "unit_03_biotech_sector_gap_support_reaction",
+   "start": 164.4,
+   "end": 308.0,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_04_breakout_differentiation_gap_resistance_testing",
+   "start": 308.7,
+   "end": 451.2,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_05_semiconductors_resistance_and_no_chase_rule",
+   "start": 451.1,
+   "end": 697.8,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_06_three_green_candles_rule_and_confluence_pivot",
+   "start": 697.8,
+   "end": 912.0,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_07_tsla_gap_up_breakout_and_trade_management",
+   "start": 912.0,
+   "end": 1123.4,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_08_alm_consolidation_breakout_and_uuuu_retest",
+   "start": 1128.9,
+   "end": 1191.1,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_09_gap_reclaim_and_biotech_watchlist_plans",
+   "start": 1195.6,
+   "end": 1304.0,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_10_confluence_support_and_real_estate_tech_pivot",
+   "start": 1305.0,
+   "end": 1395.1,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_11_execution_triggers_and_risk_reward_evaluation",
+   "start": 1444.0,
+   "end": 1638.0,
+   "status": "SANITY_PASS"
+  },
+  {
+   "unit": "unit_12_late_breakout_vs_breakdown_avoidance",
+   "start": 1661.8,
+   "end": 1743.9,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_13_mrna_core_focus_and_sector_dispersion",
+   "start": 1772.0,
+   "end": 1890.6,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_15_big_tech_divergence_and_overhead_gap_suppression",
+   "start": 2196.0,
+   "end": 2265.9,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_16_software_subsector_divergence_cybersecurity_leadership",
+   "start": 2382.0,
+   "end": 2493.9,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_18_hubs_breakout_pullback_confluence",
+   "start": 2726.1,
+   "end": 2760.7,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_20_path_textbook_pullback_and_right_side",
+   "start": 2861.0,
+   "end": 2893.2,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_22_okta_gap_resistance_and_zs_launch_support",
+   "start": 2924.7,
+   "end": 2990.7,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_23_twst_cup_handle_inside_day_expectation",
+   "start": 3037.1,
+   "end": 3056.0,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_24_cai_explosive_momentum_pullback_framework",
+   "start": 3071.8,
+   "end": 3097.6,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_25_portfolio_risk_control_and_aesthetic_filters",
+   "start": 3109.0,
+   "end": 3199.0,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_26_rblx_bottom_breakout_and_staged_trim_plan",
+   "start": 3335.3,
+   "end": 3352.4,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_28_asst_extreme_volume_leader_consolidation_rule",
+   "start": 3395.2,
+   "end": 3414.0,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  },
+  {
+   "unit": "unit_29_chym_acquisition_news_vs_trading_plan",
+   "start": 3423.0,
+   "end": 3443.1,
+   "status": "SANITY_PASS_WITH_ADJUSTMENT"
+  }
+ ]
+}

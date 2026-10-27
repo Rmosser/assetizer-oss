@@ -73,7 +73,8 @@ def transcribe(ctx: RunContext) -> dict:
     r["media_sha256"] = ctx.source.get("media_sha256")
     write_json(out, r)
     db.exec("UPDATE sources SET transcript_path=? WHERE id=?", str(out), ctx.source["id"])
-    return {"words": len(r["words"]), "segments": len(r["segments"])}
+    return {"words": len(r["words"]), "segments": len(r["segments"]), "device": r.get("device"),
+            **({"remote_failed": r["remote_failed"]} if r.get("remote_failed") else {})}
 
 
 def _transcript(ctx: RunContext) -> dict | None:

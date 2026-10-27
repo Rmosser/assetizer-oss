@@ -39,6 +39,8 @@ ARGV_LIMIT = 120_000
 # media self-test then pauses production, and its alert says which tool and parameters to add here.
 MEDIA_READ = {"view_file": "AbsolutePath", "read_file": "Path"}
 LIVE_PGIDS: set[int] = set()  # process groups of in-flight agy calls (killed on worker shutdown)
+# after an error step at a media read, how long agy gets to say why before it is stopped
+MEDIA_ERROR_GRACE = 30.0
 
 
 class ProviderError(RuntimeError):
@@ -64,7 +66,13 @@ class CallResult:
 
 _TRANSIENT_RE = re.compile(r"\b(429|500|502|503|504)\b|resource_exhausted|unavailable|deadline exceeded|timed out|"
                            r"temporarily|overloaded|rate limit|connection reset|broken pipe|unexpected eof|"
-                           r"connection refused|tls handshake|no such host|i/o timeout", re.I)
+                           r"connection refused|tls handshake|no such host|i/o timeout|"
+                           # Go's net/http when the connection drops mid-request: `Post "https://…": EOF`
+                           # (2026-10-25: two runs failed at once on prodbox during a short egress outage)
+                           r"\": eof\b|"
+                           # agy's own result when the model stream drops; until calls ended at their result the
+                           # watchdog killed these and they counted as timeouts (VigCKskxyeE-r1, 2026-10-26)
+                           r"stream was interrupted", re.I)
 _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sign in again|invalid_grant|"
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
 
@@ -119,6 +127,13 @@ def gemini_schema(node: Any) -> Any:
         else:
             out[k] = gemini_schema(v)
     return out
+
+
+def _stop(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
 
 
 def classify_error(text: str) -> str:
@@ -212,6 +227,7 @@ class AgyProvider:
         seen_tool_steps: set = set()
         media_pending: str | None = None  # a media read whose outcome (answer or error step) has not come yet
         last_error_text = ""
+        grace: list[threading.Timer] = []  # stops agy after an error step at a media read
         with (call_dir / "stderr.log").open("w") as err, (call_dir / "raw-output.jsonl").open("w") as out:
             ws = call_dir / "ws"  # empty workspace: nothing for an agentic model to explore
             ws.mkdir(exist_ok=True)
@@ -259,6 +275,13 @@ class AgyProvider:
                     e = json.loads(line)
                 except ValueError:
                     continue
+                if receipt.get("media_error"):  # only listening for why the read failed
+                    if e.get("event") == "error":
+                        last_error_text = json.dumps(e, ensure_ascii=False)
+                    if e.get("event") == "result":
+                        result = e.get("result") or {}
+                        break
+                    continue
                 if e.get("event") == "init":
                     receipt["conversation_id"] = e.get("conversation_id") or e.get("init", {}).get("conversation_id")
                     receipt["actual_model"] = e.get("init", {}).get("model")
@@ -269,10 +292,15 @@ class AgyProvider:
                     (call_dir / "conversation.txt").write_text(receipt["conversation_id"])  # survives a kill
                 if media_pending and su.get("step_type") not in (None, "tool"):
                     if su["step_type"] == "error_message":
-                        # agy refused the media file (2026-10-22: a 26 MB proxy); without it the model only flails
+                        # agy refused the media file (2026-10-22: a 26 MB proxy) or the turn failed at the read for
+                        # another reason (2026-10-26: the weekly quota ran out there, and the queue paused as if
+                        # agy could not read media). Give agy a moment to say which, then stop it: without the
+                        # media the model only flails.
                         receipt["media_error"] = {"path": media_pending, "bytes": Path(media_pending).stat().st_size}
-                        os.killpg(proc.pid, signal.SIGTERM)
-                        break
+                        grace.append(threading.Timer(MEDIA_ERROR_GRACE, _stop, (proc.pid,)))
+                        grace[-1].daemon = True
+                        grace[-1].start()
+                        continue
                     media_pending = None
                 if su.get("step_type") == "tool" and su.get("tool_name") == "finish":
                     pass  # structured output is delivered through the finish tool
@@ -301,12 +329,17 @@ class AgyProvider:
                     last_error_text = json.dumps(e, ensure_ascii=False)
                 if e.get("event") == "result":
                     result = e.get("result") or {}
+                    # nothing follows the result, but agy 1.4.7 often stays up after it: 73 of 324 calls on
+                    # prodbox idled into the 5-minute watchdog (2026-10-25), 6.9 of 16.5 call-hours
+                    break
             try:
-                proc.wait(timeout=60)
+                proc.wait(timeout=60 if result is None else 5)
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
             done.set()
+            for g in grace:
+                g.cancel()
             LIVE_PGIDS.discard(proc.pid)
         if stdin_file:
             stdin_file.close()
@@ -329,7 +362,12 @@ class AgyProvider:
 
         if killed[0]:
             receipt["watchdog"] = killed[0]
-        if receipt.get("media_error"):
+        cause = classify_error(" ".join([str((result or {}).get("error", "")), last_error_text]))
+        if receipt.get("media_error") and cause != "PROVIDER_FAILURE":  # quota, auth, network: not the media
+            receipt["status"] = "FAILED"
+            kind_err = receipt["error_class"] = cause
+            receipt["error_excerpt"] = " ".join([str((result or {}).get("error", "")), last_error_text])[-1500:]
+        elif receipt.get("media_error"):
             receipt["status"] = "MEDIA_REFUSED"
             kind_err = "MEDIA_READ_FAILED"
             receipt["error_excerpt"] = f"agy refused the media file ({receipt['media_error']['bytes']} bytes)"

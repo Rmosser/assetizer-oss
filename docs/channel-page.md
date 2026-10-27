@@ -1,0 +1,155 @@
+# 频道页：设计原理与实现说明
+
+一个频道一页（`/channels/{cid}`），把「从 YouTube 到 Notion」这条流水线摆在眼前：上方是**样片 × 版本**矩阵，下方三栏依次是**原片**、**五张设置卡**和**Notion 页面**。修 bug 或微调前先读本页；这些设计背后的长期决定见 [design.md](design.md) §R2、§R3，系统结构见 [architecture.md](architecture.md)。
+
+## 1. 设计目标
+
+- **看得见因果**：每个设置都能在右侧 Notion 预览里立刻看到结果，在左侧原片里找到出处。悬停一个事实，三栏里对应的字段、设置和 Notion 值一起点亮。
+- **一屏完成调试到定稿**：试跑、比较、采用、改学习目标、改 Notion 设置、定稿都在同一页，不在标签页之间来回切换。
+- **只写资产刊自己的东西**：预览只读不写；定稿时库里已有的页默认保留，只有资产刊写过的页才可替换。
+- **少字**：布局已经说明的事不再加次级标签和说明文字。状态用位置、颜色、轨道表达。
+- **颜色纪律**：高亮和选中一律用墨色；**朱红只用于冲突、失败、挡住交付的问题、校注刻度和「定」章**。新增 UI 不要打破这条。
+
+## 2. 三种状态
+
+频道状态由 `modeOf()`（`components/channel/Header.tsx`）推出，页面结构随之变化：
+
+| 状态 | 条件 | 页头 | 上方条 | 卡片壹 |
+|---|---|---|---|---|
+| 发现中 | 频道还没有任何规程 | 「发现中」 | 唯一一期（`DiscoveryBar`） | 「为什么长期看」+ 起草学习目标 |
+| 调试中 | `stage = TUNING` | 「调试中」+「定稿 vN」 | 样片 × 版本矩阵（`Matrix`） | 本版新增 / 改动 / 冲突 |
+| 已定稿 | `stage = LOCKED` | 收录状态 +「回到调试期」 | 最近几期 + 校注趋势（`LockedBar`） | 只读；有新草稿时提示回到调试期试跑 |
+
+已定稿频道若有期数被 Notion 映射问题挡住（`/api/channels` 的 `blocked > 0`），页头改为朱红「交付暂停」，卡片叁自动展开出问题的属性。
+
+## 3. 核心语义（改动前务必理解）
+
+### 3.1 采用：跟随最新完成 / 钉住
+
+每期样片有一个「采用」的版本（`sources.current_run_id`），交付时写的就是它。
+
+- **跟随最新完成**（默认，`adopt_pinned = 0`）：这期新跑完的版本自动成为采用版本（`runner.adopt_completed`）。
+- **钉住**（`adopt_pinned = 1`）：用户指定某一版；之后跑完的试跑只记录，不覆盖。
+- 定稿单把写入、保留、换成新版本的期钉住，残留的试跑跑完也不会顶替要交付的那一版；「等跑完」的期不钉。定稿后再提交运行（`runner.submit`：重跑、新视频）时清掉钉住，重跑照常替换；「重试」沿用原运行，不清钉住。
+- `sources.headline`（题眼）跟着采用的运行写入：运行跑完并被采用时才改写（跟随最新完成时会自动采用），钉住期间试跑跑完不改。预览和交付按运行读题眼（`mapping.run_headline`）。
+
+接口：`POST /api/sources/{sid}/adopt`，`{run_id, pinned}`；`pinned: false` 表示改回跟随最新完成。
+
+### 3.2 定稿单：一次提交，全有或全无
+
+`tuning.lock()` 在一个事务里完成：规程转 `ACTIVE`、频道转 `LOCKED`、逐期样片落实决定、设置收录。每期四选一：
+
+| 决定 | 何时出现 | 结果 |
+|---|---|---|
+| 写入 | 库里没有这一期 | 定稿后交付采用的那一版 |
+| 保留库里的页 | 库里已有 | 不写，记 `REGISTERED` |
+| 换成新版本 | 库里已有，**且那一页是资产刊写的** | 旧页归档后写新页（`STALE`） |
+| 等跑完 | 还有运行在跑、且未钉住 | 记 `HELD`；跑完交付新版，失败交付原采用版（`release_hold`） |
+
+- **只替换资产刊自己写过的页**：定稿单只在库里那一页就是这期记下的 `notion_page_id` 时提供「换成新版本」（`channel_lock_preview` 的 `owned`）；服务端 `lock()` 拒绝没有 `notion_page_id` 的期做替换；交付时还会再查一次库（`delivery.registered`），已有别的页就登记为 `REGISTERED`，不新建。用户自建的页因此只能保留，不会连同上面的笔记一起被归档。
+- 库里有没有：按目标库里映射为「视频链接」的属性查视频 id（`delivery.registered_many`）。**目标库没有视频链接属性时查不到任何页**，定稿单会把每期都当成「写入」。
+- 还在排队的试跑在定稿时取消；回到调试期（`retune`）清掉所有 `HELD`，并暂停自动收录。
+- 所选版本必须至少在一期样片上跑完过（`tuning.tested`），否则拒绝（409）。
+- 还没有跑完任何版本的样片：没有运行在跑时，定稿单显示「还没有完成的版本」，定稿后不会写入（`deliver_pending` 只处理有 `current_run_id` 的期）；有运行在跑时显示「等 vN 跑完」，那次运行跑完后自动成为采用版并写入。
+
+### 3.3 试跑队列
+
+- 试跑只在调试期允许；调试中的运行在定稿前不交付。定稿时写入的是每期采用的那一版，不一定是定稿版本跑出来的。
+- `trial_queue` 严格按顺序派发：已有排队中的运行时不派新的；遇到 YouTube 登录或磁盘问题整体等待；某期自己在等（例如直播没结束）时跳过它派下一期（`tuning.dispatch_next`）。
+- 「试跑 N 期 · 约 X」的估时 = 本频道最近 20 次完成运行「每分钟视频耗时」的中位数 × 视频时长（`minutes_per_video_minute`），没有历史时用各阶段预设耗时（`STAGE_COST`）。进行中运行的剩余时间只按 `STAGE_COST` 逐阶段估算，时长未知按 1 小时算。一律写「约」。
+
+### 3.4 学习目标、规程与稿纸
+
+- 界面上只显示一个版本号，就是**规程版本**；学习目标（原始 Prompt）的修订挂在规程下面。
+- 稿纸 = 学习目标原文 + 页边批注。批注来自 `GET /api/playbooks/{pid}/annotations`：每个子句在原文里的位置和去处（落实为哪条规则、系统承担、重复、未采用）、规则短名、冲突、覆盖统计、与上一版相比新增 / 改动 / 删除的规则。
+- 导入的规程没有逐句对应；没有短名的旧规程用规则开头几个字代替短名（`compiler.rule_label`）。两种情况稿纸都提供「重新编译出新草稿」：`POST /api/playbooks/{pid}/recompile` 用同一份学习目标重新编译（导入的规程取频道最新的学习目标），不复用上次的模型答复，原版本不变。重新编译期间编译状态显示「编译中」（以出现更新的规程版本为完成）。
+- 已定稿频道的稿纸不能改原文；导入的或缺短名的版本仍可「重新编译出新草稿」。
+
+### 3.5 对比上一版
+
+`/api/compare?a=&b=` 按时间重叠给两版的知识单元归类：重叠占自身时长 ≥ 0.6 视为对应；一对一为相同，一对多为拆出，多对一为合并，没有对应的为新增 / 不再单列（`tuning.changes`）。标注落在原片的两条轨道、原片单元列表的标签（旧版单元标「vN · 不再单列」）、Notion 预览的章节标题标签（拆出 / 合并 / 新）和顶部对比条。在 Notion 预览里，「不再单列」的单元只列在对比条里，不去猜它落进了哪一章。
+
+## 4. Notion 预览
+
+- **与交付同源**：预览由 `preview.build()` 生成，正文复用交付用的同一套构建计划（`templates.PLANS[模板]` 或 `delivery._default_plan`，再加 `delivery._tail`），所以预览和真实写入一致。每个块带 `origin`（unit / intro / outro / frame / tail）、`unit_ids`、`asset_id`，供点亮和跳转使用。
+- **只读、带缓存**：库结构和关联页标题缓存 60 秒（`preview.cached`），预览请求不写 Notion。换库时清掉缓存；在 Notion 里改了库结构，最多 60 秒后反映到预览。
+- **未保存的改动也算**：卡片贰、叁、肆的编辑形成 draft，前端防抖 300 ms 后连同 draft 请求 `POST /api/channels/{cid}/notion/preview`（`preview.draft_config` 合并到已保存配置上）。有改动时底部浮出保存条，关闭或刷新页面时提醒；保存条在时，提示条浮在它上方，不压住「放弃 / 保存」。
+- **问题项**：属性类型变了、选项不存在、属性被删时，预览返回 `problems`；卡片叁在该行标朱红，交付暂停时自动展开它。报错文案在行内去掉已显示的属性名（`brief()`）。
+- **换库**：卡片叁「换库」用 `GET /api/notion/databases` 列出 integration 能访问的数据库，`POST /api/channels/{cid}/notion/target` 切换。映射按属性名迁移，固定关联要重选，同时记下是否测试副本。列表里看不到某个库，说明它没有被加到这个 integration 的 Connections 里。
+
+## 5. 点亮与连线
+
+- 可对应的元素都带 `data-k`（空格分隔的多个键）和 `data-side`（`src` 原片 / `mid` 设置 / `dst` Notion）。键的种类：
+  - `f:url|title|channel|date|access`：原片字段
+  - `tok:<变量>`：标题变量；`p:<属性 id>`：Notion 属性；`tpl`、`tpl:h1`：页面结构
+  - `u:<单元 id>`、`c:<章节序号>`：知识单元与它写进的章节；`a:<单元 id>`：对比时旧版的单元
+  - `r:<规则 id>`、`cl:<子句 id>`：稿纸里的规则与子句
+- 实现见 `components/channel/lit.ts`：事件委托找到悬停元素的键，然后**注入一条 CSS 规则**（`[data-k~="键"]` 加上 `lt-bg` / `lt-ring` / `lt-seg` 的高亮样式），而不是重渲染。Notion 预览可能有上千个块，靠 React 状态逐个改会卡。
+- 连线（`Wires.tsx`）只画 `f:`、`tok:`、`p:` 三类，路线走栏与栏之间的空隙，不横穿面板；只连视口内可见的元素；窗口窄于 1100px 不画。滚动和缩放时用 `requestAnimationFrame` 重算。连线以点亮的键为 React key：从一个事实直接移到下一个会重新描线，滚动重算只移动现有的线。
+- 卡片肆里带点亮样式的是选中的模板和页面大标题，悬停 Notion 预览里来自模板的块会点亮它们，反过来也一样。
+- 点单元或轨道，Notion 预览滚到对应章节（`c:` 键）。
+
+## 6. 布局与断点
+
+| 宽度 | 布局 |
+|---|---|
+| ≥ 1400px | 三栏：原片 · 设置卡 · Notion 页面；面板吸顶、各自滚动 |
+| 861–1399px | 两栏：设置卡 · 预览；预览头部的分段控件在「Notion 页面 / 原片」之间切换 |
+| ≤ 860px | 单栏：样片横滑卡片 + 版本胶囊；预览在上、设置卡折叠成「标题 + 一行摘要」 |
+
+- 断点在 `bits.tsx` 的 `useNarrow()`（860）和 `useCompact()`（1399），CSS 断点与之一致。改断点时两处一起改。
+- 手机上选到没跑完的样片或版本时，预览区显示它的状态和「试跑 / 重试」（`RunPending`），**不拿别的版本顶替**；等的那次跑完后自动显示。
+
+## 7. 样式约定与踩过的坑
+
+- 所有样式在 `web/src/channel.css`，类名以 `ch-` 开头，颜色用 `styles.css` 的变量（`--ink*`、`--paper*`、`--rule*`、`--zhu*`），深色模式在两处 `:root` 重定义。Notion 与 YouTube 复刻有自己的变量（`--nt-*`、`--yt-*`、`--o-*` 选项色）。
+- **类名不外泄**：`channel.css` 和其他样式打进同一个包、在全站生效。页面级类名以 `ch-` 开头；YouTube / Notion 复刻和稿纸内部的短类名（`.nb`、`.prop`、`.tk` 等）一律写在 `.chp` 之下（`channel.css` 里不带 `ch-` 的规则都以 `.chp ` 开头），不会套到其他页面上。同时避开 `styles.css` 的全局类名（`.page`、`.btn`、`.chev`、`.crumb`、`.go`、`.rail`、`.st`、`.tag`、`.chip` 等）：频道页曾因 `.page`、`.go` 撞名出现大块空白和行高错乱。
+- `button` 的重置在 `styles.css` 全局完成，不要在 `.chp` 下再写一遍：选择器更具体，会压掉 `.ch-btn` 的内边距。
+- 吸顶面板（`position: sticky`）会形成层叠上下文，里面的 `position: fixed` 元素会被后面的面板盖住。稿纸的编辑条因此用 `createPortal` 挂到 `body`。
+- 文本过长一律单行省略或限制行数（例如长文本属性 6 行），不让一个字段把面板撑开。
+- **动效成对**：会出现的东西也要有退场。展开收起用 `components/Fold.tsx`（grid 行 0fr ↔ 1fr，内容常驻、收起时 inert），不要用 `{open && …}` 让内容瞬间出现；弹窗用 `Sheet`，内容里主动关闭时调 `ref.close(then)`，先播退场再卸载；保存条、提示条这类条件渲染用 `useLeaving`（`hooks.ts`）。脚本里的平滑滚动用 `util.ts` 的 `smooth()`，CSS 的减少动态规则管不到它。
+- 换一格样片时，原片栏和 Notion 栏都保留上一格的内容并压暗，等新数据到了再换，不闪空状态。
+- `position: fixed` 又用 `left: 50%` + `translateX(-50%)` 居中的条（保存条、提示条）要写 `width: max-content`，否则可用宽度只有半个屏幕，手机上会被挤成几行。
+
+## 8. 文件地图
+
+| 文件 | 内容 |
+|---|---|
+| `web/src/pages/Channel.tsx` | 页面装配：数据加载、选中的格、draft、对比、布局分支、动作 |
+| `components/channel/Header.tsx` | 页头、频道切换菜单（`Switcher`）、状态、定稿 / 回到调试期 |
+| `components/channel/Matrix.tsx` | 桌面矩阵（`Grid`）、手机条带（`Strip`）、`RunPending`、`runFor` / `done` |
+| `components/channel/SourcePane.tsx` | 原片复刻：海报、单元轨道（含对比）、字段、单元列表与章节号 |
+| `components/channel/Cards.tsx` | 五张卡：学习目标、Notion 标题、属性（含 `PagePicker`）、页面结构、收录 |
+| `components/channel/NotionPane.tsx` | Notion 复刻：路径、标题分段、属性、正文块、对比条 |
+| `components/channel/Manuscript.tsx` | 稿纸与规则视图、差异、编辑与保存编译、重新编译 |
+| `components/channel/LockSheet.tsx` | 定稿单、换库（`TargetPicker`） |
+| `components/channel/StateBars.tsx` | 已定稿的最近几期、发现中的单期 |
+| `components/channel/lit.ts`、`Wires.tsx` | 点亮与连线 |
+| `components/channel/bits.tsx` | 格式化、图标、分段控件、开关、轨道、断点 hooks |
+| `components/channel/types.ts` | 页面用到的接口数据类型 |
+| `src/assetizer/preview.py` | Notion 预览 |
+| `src/assetizer/tuning.py` | 样片、试跑、采用、对比、定稿、回到调试期 |
+| `src/assetizer/pipeline/runner.py` | 跑完自动采用（`adopt_completed`）、定稿后提交时清钉住（`submit`） |
+| `src/assetizer/delivery.py` | 库内查重（`registered_many` / `registered`）与交付 |
+| `src/assetizer/web/app.py` | 频道页接口：定稿单的查库与 `owned` / `can_replace`、重新编译与编译状态 |
+| `src/assetizer/compiler.py` | 编译、子句位置、规则短名、批注 |
+| `src/assetizer/notion/mapping.py` | 映射、预设、问题与警告、换库迁移、题眼 |
+
+## 9. 页面用到的接口
+
+`/api/channels`（频道列表与状态）、`POST /api/channels/{cid}`（改名、学习原因）、`/api/overview`（告警灯）、`/api/channels/{cid}/workbench`、`/api/channels/{cid}/candidates`、`/api/channels/{cid}/samples/{sid}/remove`、`/api/channels/{cid}/trial-queue/clear`、`/api/runs/{rid}/retry`、`/api/channels/draft`、`/api/channels/track`、`/api/channels/{cid}/recent`、`/api/sources/{sid}?run=`、`/api/compare`、`/api/channels/{cid}/notion`（读 / 存）、`/api/channels/{cid}/notion/preview`、`/api/channels/{cid}/notion/target`、`/api/notion/databases`、`/api/notion/pages`、`/api/playbooks/{pid}/annotations`、`/api/playbooks/{pid}/recompile`、`/api/channels/{cid}/lock-preview`、`/api/channels/{cid}/lock`、`/api/channels/{cid}/retune`、`/api/channels/{cid}/trial`、`/api/channels/{cid}/samples`、`/api/channels/{cid}/ingest`、`/api/channels/{cid}/prompt`、`/api/sources/{sid}/adopt`。
+
+旧链接 `/channels/{cid}/<旧标签>` 会跳到新页面：`prompt` 跳稿纸，`playbook` 跳规则视图，其余回到主视图；页面位置写在地址里（`?sample=&run=&view=manuscript|rules&pb=`），刷新和分享都能回到同一处。
+
+## 10. 已知问题与可调整处
+
+- 目标库没有「视频链接」属性时，定稿单不会提示查重失效（预览卡片叁会提示）。
+- 没有在库里的样片，定稿单只能「写入」，不能单独跳过某一期；要跳过只能先把它移出样片。
+- 矩阵默认显示最新三个版本加上任何一期采用的版本，其余收在「更早」里。
+- 规则短名由编译时的模型给出；旧规程只有重新编译后才有短名。
+- 估时来自本频道最近的运行，没有历史时用预设耗时；新频道或换机器后会偏差较大。
+- 发布素材包按最后一次跑到 PACKAGE 的运行重建，不跟随「采用」：钉住时，之后跑完但没被采用的运行会覆盖素材包，而 Notion 页里的素材包路径指向它。
+
+## 11. 修改后怎么验证
+
+见 [quality.md](quality.md)。频道页相关改动至少：后端 `pytest`、前端 `npm run build`，然后在 1600 / 1280 / 390 三种宽度和深色模式下看一遍调试中、已定稿两种频道；涉及定稿或交付的改动，用测试副本或开发机验证，不要在正式库上试。

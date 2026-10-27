@@ -47,13 +47,15 @@ def classify(stderr: str) -> str:
         return "BOT_CHALLENGE"
     if "members-only" in t or "join this channel" in t or "private video" in t or "sign in to confirm your age" in t:
         return "AUTH_REQUIRED"
+    if "live event will begin" in t or "premieres in" in t:  # a scheduled live or premiere: nothing to fetch yet
+        return "LIVE_UPCOMING"
     if "http error 429" in t or "too many requests" in t:
         return "RATE_LIMITED"
     if "requested format is not available" in t or "no video formats" in t:
         return "FORMAT_UNAVAILABLE"
     if "video unavailable" in t or "has been removed" in t:
         return "SOURCE_UNAVAILABLE"
-    if "timed out" in t or "connection" in t or "network" in t or "name resolution" in t:
+    if "timed out" in t or "connection" in t or "network" in t or "name resolution" in t or "unexpected_eof" in t:
         return "NETWORK"
     return "UNKNOWN"
 

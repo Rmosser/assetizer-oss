@@ -331,9 +331,7 @@ def article(ctx: RunContext) -> dict:
         full.append((f"<!-- KU:{uids[0]} -->\n" if uids else "") + md)
     text = "\n\n".join(full)
     ctx.path("article", "article.md").write_text(text)
-    ctx.save("article/outline.json", outline)
-    if outline.get("headline") and ctx.run.get("kind") != "EXPERIMENT":
-        db.exec("UPDATE sources SET headline=? WHERE id=?", outline["headline"].strip(), ctx.source["id"])
+    ctx.save("article/outline.json", outline)  # 题眼 stays with its run; sources.headline follows the adopted run
     hits = [w for w in FORBIDDEN if w in text]
     for w in hits:
         ctx.flag("RUN", None, "EDITORIAL_TERM", "INFO", f"文章出现禁用措辞「{w.rstrip('_')}」", evidence={"quote": w})

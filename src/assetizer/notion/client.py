@@ -48,6 +48,12 @@ class Notion:
             return r.json()
         raise NotionError(599, "retries exhausted")
 
+    def search(self, query: str = "", kind: str = "database", page_size: int = 20) -> list[dict]:
+        body: dict = {"page_size": page_size, "filter": {"property": "object", "value": kind}}
+        if query:
+            body["query"] = query
+        return self._req("POST", "/search", idempotent=True, json=body).get("results", [])
+
     # pages / blocks ---------------------------------------------------------
     def me(self) -> dict:
         return self._req("GET", "/users/me")

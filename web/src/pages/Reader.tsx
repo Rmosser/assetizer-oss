@@ -3,12 +3,13 @@ import { marked, type Token, type Tokens } from "marked";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { media, post, srcSet } from "../api";
 import { cleanUnitTitle, cnNo, deJargon, endStop, issueHeadline, originalTitle, quotedFragments, typeset, Words } from "../cjk";
+import { Fold } from "../components/Fold";
 import { Lightbox } from "../components/Lightbox";
 import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll, Empty } from "../components/States";
-import { useMedia, usePoll, useStored } from "../hooks";
+import { useLeaving, useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDay, cnNum, cnYear, DELIVERY, mins, parseDay, tc } from "../util";
+import { cnDay, cnNum, cnYear, DELIVERY, mins, parseDay, reduceMotion, tc } from "../util";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -33,7 +34,6 @@ const flagKind = (k: string) => FLAG_KIND[k] || FLAG_KIND[k.replace(/^AI_/, "")]
 const RESOLVED: Record<string, string> = { ACCEPTED: "无误", FIXED: "已改好", DISMISSED: "已忽略" };
 const isReview = (f: Flag) => f.severity !== "INFO";
 const isOpen = (f: Flag) => f.resolution === "OPEN" && isReview(f);
-const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /* ───────────────────────────── markdown ───────────────────────────── */
 const NAV_HEAD = /学习导航|优先学习清单|学习清单/;
@@ -291,30 +291,28 @@ function IssueIndex({ units, flags, current, onJump, mobile, full = false }: {
       <button className="yaomu-head" onClick={() => setOpen(!open)} aria-expanded={open} disabled={!mobile}>
         <h2>要目</h2>
         {mobile && <span className="yaomu-sum"><span className="num">{units.length}</span> 单元 · 必学 <span className="num">{must}</span>{pi > 0 && <> · 校注 <span className="num">{pi}</span></>}</span>}
-        {mobile && <i className="chev" aria-hidden />}
+        {mobile && <i className={`chev${open ? " up" : ""}`} aria-hidden />}
       </button>
-      {open && (
-        <>
-          <ol>
-            {rows.map(({ u, i }) => (
-              <li key={u.id}>
-                <a href={`#u-${u.id}`} className={`yaomu-row${u.id === current ? " cur" : ""}${u.learning_priority === 3 ? " must" : ""}`}
-                  onClick={(e) => { e.preventDefault(); onJump(u.id); }}>
-                  <span className="no">{cnNo(i + 1)}</span>
-                  <span className="t"><span className="tt"><Words>{u.title}</Words></span></span>
-                  <span className="tc num">{tc(u.start)}</span>
-                  {openBy[u.id] ? <span className="pi">校 <span className="num">{openBy[u.id]}</span></span> : <span className="pi none" />}
-                </a>
-              </li>
-            ))}
-          </ol>
-          {!full && must < units.length && (
-            <button className="yaomu-more" onClick={() => setAll(!all)}>
-              {all ? "只看必学" : `其余 ${units.length - must} 个单元`}<i className={`chev${all ? " up" : ""}`} aria-hidden />
-            </button>
-          )}
-        </>
-      )}
+      <Fold open={open}>
+        <ol>
+          {rows.map(({ u, i }) => (
+            <li key={u.id}>
+              <a href={`#u-${u.id}`} className={`yaomu-row${u.id === current ? " cur" : ""}${u.learning_priority === 3 ? " must" : ""}`}
+                onClick={(e) => { e.preventDefault(); onJump(u.id); }}>
+                <span className="no">{cnNo(i + 1)}</span>
+                <span className="t"><span className="tt"><Words>{u.title}</Words></span></span>
+                <span className="tc num">{tc(u.start)}</span>
+                {openBy[u.id] ? <span className="pi">校 <span className="num">{openBy[u.id]}</span></span> : <span className="pi none" />}
+              </a>
+            </li>
+          ))}
+        </ol>
+        {!full && must < units.length && (
+          <button className="yaomu-more" onClick={() => setAll(!all)}>
+            {all ? "只看必学" : `其余 ${units.length - must} 个单元`}<i className={`chev${all ? " up" : ""}`} aria-hidden />
+          </button>
+        )}
+      </Fold>
     </nav>
   );
 }
@@ -389,18 +387,20 @@ function Dock({ active, setActive, onBack, onTime }: { active: Active; setActive
   const vref = useRef<HTMLVideoElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [paused, setPaused] = useState(false);
+  const { shown, leaving } = useLeaving(active?.docked ? active : null);
   useEffect(() => {
     if (vref.current && active?.docked) { vref.current.currentTime = active.time; vref.current.play().catch(() => {}); }
   }, [active?.assetId, active?.docked, active?.seq]); // eslint-disable-line react-hooks/exhaustive-deps
-  if (!active?.docked) return null;
+  useEffect(() => { if (leaving) vref.current?.pause(); }, [leaving]);  // the clip goes on in the page, not twice
+  if (!shown) return null;
   return (
-    <div className={`dock${expanded ? " open" : ""}`} role="region" aria-label="小窗播放">
-      <video ref={vref} src={media(active.assetId)} playsInline controls={expanded}
+    <div className={`dock${expanded ? " open" : ""}${leaving ? " leaving" : ""}`} role="region" aria-label="小窗播放" inert={leaving}>
+      <video ref={vref} src={media(shown.assetId)} playsInline controls={expanded}
         onClick={() => setExpanded(!expanded)}
         onPlay={() => setPaused(false)} onPause={() => { setPaused(true); onTime(null); }}
-        onTimeUpdate={(e) => { active.time = (e.target as HTMLVideoElement).currentTime; onTime(active.clipStart + active.time); }} />
+        onTimeUpdate={(e) => { shown.time = (e.target as HTMLVideoElement).currentTime; onTime(shown.clipStart + shown.time); }} />
       <div className="bar">
-        <button className="dock-title" onClick={onBack}><Words>{active.title}</Words></button>
+        <button className="dock-title" onClick={onBack}><Words>{shown.title}</Words></button>
         <button className="dock-btn" onClick={() => { const v = vref.current; if (v) (v.paused ? v.play() : v.pause()); }} aria-label={paused ? "播放" : "暂停"}>
           {paused ? <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden><path d="M8 5.5v13l11-6.5-11-6.5Z" fill="currentColor" /></svg>
             : <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" /></svg>}
@@ -939,7 +939,7 @@ export default function Reader({ id }: { id: string }) {
       <Stale error={error} loadedAt={loadedAt} />
       <header className="reader-head">
         <div className={`head-in${!inline && mustPoster ? " has-fig" : ""}`}>
-        <a className="crumb" {...linkProps(runParam ? `/channels/${channel?.id || ""}/workbench` : "/")}><span aria-hidden>←</span> {runParam ? "调试台" : "目录"}</a>
+        <a className="crumb" {...linkProps(runParam ? `/channels/${channel?.id || ""}?sample=${encodeURIComponent(source.id)}&run=${encodeURIComponent(runParam)}` : "/")}><span aria-hidden>←</span> {runParam ? "频道" : "目录"}</a>
         {runParam && data.run && data.run.id !== source.current_run_id && (
           <p className="version-note">正在看试跑版本{playbook ? ` · 规程 v${playbook.version}` : ""}，不是这一期当前采用的版本。</p>
         )}
@@ -954,7 +954,7 @@ export default function Reader({ id }: { id: string }) {
         </div>
         <div className="reader-links">
           {source.url && <a href={source.url} target="_blank" rel="noreferrer">原视频 ↗</a>}
-          {playbook && <a {...linkProps(`/channels/${playbook.channel_id || "universal"}/playbook`)}>规程 v{playbook.version}{playbook.channel_id ? "" : "（通用）"}</a>}
+          {playbook && <a {...linkProps(playbook.channel_id ? `/channels/${playbook.channel_id}?view=rules&pb=${playbook.id}` : "/channels/universal")}>规程 v{playbook.version}{playbook.channel_id ? "" : "（通用）"}</a>}
           {(!channel || channel.mode !== "TRACKED") && source.youtube_channel_id && (
             <button className="btn sm zhu" onClick={() => setTracking(!tracking)}>加入长期关注</button>
           )}

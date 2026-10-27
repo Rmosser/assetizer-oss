@@ -77,6 +77,19 @@ def cmd_cookies(a) -> None:
     _print({"configured": C.configured(), "origin": C.origin(), "domains": C.domains(), **C.probe()})
 
 
+def cmd_bench(a) -> None:
+    from .bench import report, run
+    p = None
+    if a.provider == "tuzi":
+        from .providers.tuzi import TuziProvider
+        p = TuziProvider()
+    elif a.provider == "agy":
+        from .providers.agy import AgyProvider
+        p = AgyProvider()
+    r = run(only=a.only, provider=p)
+    _print({"report": r["report"], "verdicts": [f"{c}: {v}" for c, v in report.verdicts(r)]})
+
+
 def cmd_set(a) -> None:
     v = a.value
     try:
@@ -105,8 +118,8 @@ def cmd_doctor(a) -> None:
     out["telegram"] = bool(s.secret("telegram-bot-token")) and bool(s.secret("telegram-chat-id"))
     out["browser_profile"] = str(s.browser_profile) if s.browser_profile and s.browser_profile.exists() else "MISSING"
     if a.agy:
-        from .providers.agy import AgyProvider
-        out["agy"] = AgyProvider().health()
+        from . import providers
+        out["agy"] = providers.get().health()
     _print(out)
 
 
@@ -140,6 +153,9 @@ def main(argv: list[str] | None = None) -> None:
     x.set_defaults(fn=cmd_notion_target)
     sub.add_parser("cookies").set_defaults(fn=cmd_cookies)
     x = sub.add_parser("set"); x.add_argument("key"); x.add_argument("value"); x.set_defaults(fn=cmd_set)
+    x = sub.add_parser("bench", help="weekly benchmark of the limits behind our workarounds (docs/benchmarks.md)")
+    x.add_argument("--only", choices=["probes", "quality"]); x.add_argument("--provider", choices=["agy", "tuzi"])
+    x.set_defaults(fn=cmd_bench)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     x = sub.add_parser("doctor"); x.add_argument("--agy", action="store_true"); x.set_defaults(fn=cmd_doctor)
     sub.add_parser("telegram-setup", help="给 bot 发过消息后运行：记下 chat id 并发一条测试消息").set_defaults(fn=cmd_telegram_setup)

@@ -1,76 +1,59 @@
 # Assetizer · 资产刊
 
-把长期关注的投资 / 金融长视频，按频道学习目标自动拆成 Knowledge Units，并生成结构化文章、截图、实际视频片段、字幕、Notion 多媒体知识页与发布素材包。用户只在频道调试期参与（试跑样片、改 Prompt、定稿）；定稿后每期自动写入 Notion，日常只在 Notion 阅读。
+把长期关注的投资 / 金融长视频，按频道学习目标自动拆成 Knowledge Units，并生成结构化文章、截图、实际视频片段、字幕、Notion 多媒体知识页与发布素材包。用户只在频道调试期参与（试跑样片、改学习目标、定稿）；定稿后每期自动写入 Notion，日常只在 Notion 阅读。
 
-- 产品基线：Notion「PRD v0.2 · Post-Validation Baseline」与「Product Validation Closure」；人的介入点以修订「PRD v0.2 → v0.2.1」为准
-- 设计：[docs/design.md](docs/design.md)（v0.2，含独立评审采纳结果 §R）、[docs/design-review.md](docs/design-review.md)
-- 代码评审：[docs/code-review.md](docs/code-review.md)
+- 文档地图：[docs/index.md](docs/index.md)（架构、频道页设计、质量检查、运维与历史记录）
+- 产品基线：Notion「PRD v0.2 · Post-Validation Baseline」与「Product Validation Closure」；人的介入点以修订「PRD v0.2 → v0.2.1」为准，长期决定与理由见 [docs/design.md](docs/design.md)
 
 ## 日常使用
 
-```bash
-ssh -N -L 8770:127.0.0.1:8770 ovh-investment     # 建隧道（保持此终端）
-open http://localhost:8770                       # 打开「资产刊」
-```
+打开 https://assetizer.prodbox.heiyu.space （懒猫微服登录）。
 
-- **刊**：首页。粘贴 YouTube 链接（⌘K）即入队；正在生产的一期显示为「印刷线」；每一期主入口是 Notion，也可以点进对照视图。
-- **对照视图**（原阅读器）：左侧整期时间轴（知识单元区段、片段、截图、校注红点，悬停预览，点击跳转）；中间是文章，每个单元依次是视频 → 截图 → 正文 → 频道专属字段；右侧是校注（系统没把握的地方，仅供参考，不是待办）。`J / K` 切换单元，`n` 逐条看校注。调试频道时用它对照原视频。
-- **频道**：长期关注频道的学习目标（原始 Prompt）、编译后的 Playbook 与逐条溯源；频道分「调试中 / 已定稿」，调试中的频道在这里定稿（同时开启自动收录）。
+- **刊**：首页。粘贴 YouTube 链接（⌘K）即入队；正在生产的一期显示在「正在付印」里；每一期主入口是 Notion，也可以点进对照视图。
+- **对照视图**（原阅读器）：左侧整期时间轴（知识单元区段，必学单元加深、没有片段的画成空心；校注红点；悬停显示单元标题，点击跳转）；中间是文章，每个单元依次是视频 → 截图 → 正文 → 频道专属字段；右侧是校注（系统没把握的地方，仅供参考，不是待办）。`J / K` 切换单元，`n` 逐条看校注。调试频道时用它对照原视频。
+- **频道**：一个频道一页。上方是「样片 × 版本」矩阵；下方三栏依次是原片、五张设置卡（学习目标、Notion 标题、Notion 属性、页面结构、收录）和按当前设置实时生成的 Notion 页面预览，悬停任一字段，三栏里对应的位置一起亮起。「打开稿纸」看学习目标原文每句话落到了哪条规则。频道分「调试中 / 已定稿」，调试中的频道在这里定稿（同时开启自动收录）。手机上也能用。设计说明见 [docs/channel-page.md](docs/channel-page.md)。
 - **机房**：模型 / YouTube / Notion / 磁盘状态、生产记录（可重试）、日志。
 
 ## 需要人做的事（且只有这些）
 
 | 情况 | 你会看到 | 怎么做 |
 |---|---|---|
-| agy 登录失效 | 首页红色告警，队列自动暂停 | `ssh -t ovh-investment /home/debian/.local/bin/agy` 按提示完成 Google 登录；恢复后队列自动继续 |
-| YouTube 需要登录 | 首页红色告警，该期进入等待 | 推荐用 CookieCloud（服务器直接用你 Chrome 里的登录态）：「机房」→「YouTube 会话」→「配置 CookieCloud」（配好后叫「配置与测试」），按面板里的 4 步做：配对 Chrome 插件 → 填 Access 服务令牌 → 填 App Token → 测试。每一步都写了值从哪里来。最后用「视频测试」填一个会员视频：读得到就说明 YouTube 认这份登录态，等待登录的视频会立刻重试。密钥只写不读，手机上也能填。卡片显示「读不到 CookieCloud」时，问题在 CookieCloud 那头（比如只读入口的隧道断了，HTTP 530），不是你的登录。没配 CookieCloud 时，用远程 Chromium：服务器上运行 `~/video-jobs/start-browser.sh`，本机 `ssh -N -L 6080:127.0.0.1:6080 ovh-investment`，打开 http://localhost:6080/vnc.html 登录 YouTube。系统每 30 分钟自动重试 |
-| 新频道待定稿 | 首页「待你拍板」、导航「频道」角标 | 在「频道」页的**调试台**：选 2–3 期样片 → 用某个规程版本试跑 → 点「对照视图」看结果与校注 → 改学习目标重新编译 → 用新版本重跑、点「对比两个版本」→ 满意后「定稿并开启自动收录」。样片在定稿前不写 Notion；定稿时交付每期样片「采用中」的那一版 |
-| 想调整已定稿频道 | — | 调试台「回到调试期」：自动收录暂停、新的一期等重新定稿后才写 Notion，然后按上面的流程试跑和定稿 |
+| 模型（agy）登录失效 | 首页红色告警，队列自动暂停 | 进 worker 容器运行 agy 完成 Google 登录（命令见 [docs/operations.md](docs/operations.md)）；恢复后队列自动继续 |
+| YouTube 需要登录 | 首页红色告警，该期进入等待 | 用 CookieCloud（服务器直接用你 Chrome 里的登录态）：「机房」→「YouTube 会话」→「配置 CookieCloud」（配好后叫「配置与测试」），按面板里的 4 步做：配对 Chrome 插件 → 填 Access 服务令牌 → 填 App Token → 测试。每一步都写了值从哪里来。最后用「视频测试」填一个会员视频：读得到就说明 YouTube 认这份登录态，等待登录的视频会立刻重试。密钥只写不读，手机上也能填。卡片显示「读不到 CookieCloud」时，看下面的错误码与说明：入口或隧道的问题（HTTP 530 / 502）在 CookieCloud 那头；Token 失效、Access 被拒、读不到 YouTube cookie 这几类，回到面板对应的步骤处理。系统每 30 分钟自动重试 |
+| 新频道待定稿 | 首页「待你拍板」、导航「频道」角标 | 在「频道」页：加 2–3 期样片 → 在矩阵里用某个版本「试跑」→ 点一格，右边看它写进 Notion 的样子，左边对照原片；「对比 vN」看和上一版的差别 → 打开稿纸改学习目标，「保存并编译」出新版本再试跑 → 每期样片默认采用最新跑完的一版，想固定某一版就「钉住这一版」→ 页头「定稿 vN」：在定稿单里逐期决定写入、保留库里的页、换成新版本（只对资产刊写过的页）或等运行跑完，并开启自动收录。样片在定稿前不写 Notion |
+| 想调整已定稿频道 | — | 频道页头「回到调试期」：自动收录暂停、新的一期等重新定稿后才写 Notion，然后按上面的流程试跑和定稿 |
 
-## 配置生产 Notion
+## Notion
 
 每个长期关注的频道写进你自己的数据库（「知识领袖长期追踪库」），挂在该频道的上级主页下，按你已有的页面格式：
 
 - 交易员汤姆 → 上级「交易员汤姆」，标题 `交易员汤姆-YYYYMMDD-题眼`，正文「读图学习导航」（截图放在推荐截图位置下，每个案例嵌入视频片段）
 - 王海滨 → 上级「持续学习王海滨的财经闲谈」，标题为视频原标题，正文「章节 + 📎原话参考」
 
-**属性映射在「频道」页 → Notion 交付里调整**：属性随 Notion 实时读取；在 Notion 新加的属性会出现在这里等你选择来源；改属性名自动跟随；删掉属性、改类型、选项不存在时，该频道交付暂停并在首页告警，改好后自动继续。正文格式随频道固定（代码模板），只能在这里切换。
+**Notion 设置都在「频道」页的卡片里调整**：「贰 Notion 标题」拼装标题（视频原标题、频道名、发布日期、本期题眼与分隔符）；「叁 Notion 属性」逐项选值的来源；「肆 页面结构」切换正文模板、页面大标题和图标。改动会立刻反映在右边的预览里，点底部「保存」才生效（已定稿的频道从下一期起生效）。属性随 Notion 实时读取；在 Notion 新加的属性会出现在这里等你选择来源；改属性名自动跟随；删掉属性、改类型、选项不存在时，该频道显示「交付暂停」并自动展开出问题的属性，改好后自动继续。
 
-当前两个频道指向**测试副本**「🧪 知识领袖长期追踪库（测试副本）」。切换到正式库：
+两个频道目前都写入正式库。换库不需要命令行：在卡片「叁」里点「换库」选目标数据库，映射按属性名迁移，固定关联（比如上级项目）要重选一次。Integration 需要先被加到目标数据库（或它的上级页面）的 Connections 里，否则列表里看不到它。验收交付用「🧪 知识领袖长期追踪库（测试副本）」，注意事项见 [docs/operations.md](docs/operations.md)。没有指定目标的来源写入 `notion_parent_page_id` 下的「投资内容资产 · Assetizer」数据库。
 
-```bash
-ssh ovh-investment
-printf '%s' 'ntn_xxx' > ~/assetizer/data/secrets/notion-token && chmod 600 ~/assetizer/data/secrets/notion-token   # 如需换 token
-set -a; . ~/assetizer/env; set +a; cd ~/assetizer/app
-A=~/assetizer/venv/bin/assetizer
-$A notion-target trader-tom  0000000200008000a000000000000002 --parent 0000000500008000a000000000000005
-$A notion-target wang-haibin 0000000200008000a000000000000002 --parent 0000000300008000a000000000000003
-```
+Notion token 放在服务器的 `secrets/notion-token`，放置命令见 [docs/operations.md](docs/operations.md)。命令行的 `notion-target <频道 id> <数据库> [--parent <页面>]`（频道 id 如 `trader-tom`、`wang-haibin`）仍可用于脚本化配置。
 
-`notion-target` 按预设把属性名对到属性 id；`--clear` 让频道回到 Assetizer 自己的数据库。Integration 需要被分享到目标数据库（数据库右上角 ··· → Connections）。没有指定目标的来源仍写入 `notion_parent_page_id` 下的「投资内容资产 · Assetizer」数据库。
+## 通知
+
+配好 Telegram 后（`secrets/telegram-bot-token`，给机器人发一条消息后运行 `telegram-setup` 找到 chat id），会收到：生产失败、告警的出现与解除（登录、额度、读视频、磁盘、Notion、内存）、worker 崩溃或内存超限后重启、调试台的试跑全部跑完，以及每日摘要。
 
 ## 部署
 
-```bash
-./deploy/deploy.sh          # 本机构建前端 → rsync 到 ovh-investment:~/assetizer/app → pip install → 重启服务
-```
-
-SSH：服务器只收钥匙登录，端口 24729（本机 `~/.ssh/config` 的 `ovh-investment` 已配好，本文命令都走这个别名）。设置在服务器 `/etc/ssh/sshd_config.d/00-hardening.conf`，由 `../work/OVH-SSH-hardening.command` 写入；SSH 进不去时用 OVH 控制台的 KVM，以 `debian` 的密码登录。
-
-服务（systemd --user，已开启 linger）：`assetizer-web`（127.0.0.1:8770）、`assetizer-worker`（串行生产）。
-数据：`~/assetizer/data/`（`assetizer.db`、`media/`、`runs/`、`packages/`、`secrets/`）。
+生产运行在懒猫微服 prodbox（LPK，web 与 worker 两个服务），开发机是 devbox：
 
 ```bash
-set -a; . ~/assetizer/env; set +a
-assetizer status            # 队列与告警
-assetizer doctor --agy      # 依赖与登录探测
-assetizer submit <url>      # 命令行入队
-journalctl --user -u assetizer-worker -f
+sh scripts/lzc/release.sh                                                 # 打包 .pkgout/cloud.lazycat.app.assetizer-v<版本>.lpk
+lzc-cli lpk install .pkgout/cloud.lazycat.app.assetizer-v<版本>.lpk --apk n
 ```
+
+升级前备份、安装后验收、回滚、容器里的命令行（`python -m assetizer.cli status|doctor|submit|set …`）见 [docs/operations.md](docs/operations.md)。`deploy/` 是迁移到懒猫之前在 OVH 上的部署方式，OVH 退役后删除。
 
 ## 设计要点
 
-- **串行**：同一时间只有一期在生产（50 分钟分段时 agy 峰值约 7.6 GiB）。全片 ASR 在纯文本阶段后台并行。
+- **并行**：同时生产几期由设置 `worker_slots` 决定（默认 1，上限 8）。每期峰值内存约 4–5 GB（whisper 在子进程里，约 2.5 GB）；全片 ASR 在纯文本阶段后台进行。
 - **时间合同**：模型只报告它在画面里看到的时间码，全局时间由代码换算（实测关键帧偏移）。
 - **结构化输出**：大输出阶段把 Schema 写进 Prompt（Run-014 验证路径）并本地校验；小输出阶段用 `--json-schema`。内容为空或不合规 → 重新生成一次；只有无法解析时才做「纯格式」修复，修复不得编造。
 - **校注**：系统对边界、条件、归属没把握时生成 Flag；一次纯文本预审调用对照 ASR 检查片段首尾与陈述（CAVA 类问题）。调试期在对照视图里逐条看；稳定期不是待办，写进 Notion 每期页面末尾的折叠「校注」区块。没有逐期审阅（design §R2）。

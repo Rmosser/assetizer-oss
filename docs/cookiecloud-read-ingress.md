@@ -1,5 +1,7 @@
 # 需求：为 Assetizer 开放 CookieCloud 只读接口（Cloudflare Tunnel + Access 服务令牌）
 
+> **状态：接口约定仍有效**。Assetizer 只经 CookieCloud 的公网只读入口读取：`GET /api/v3/cookies?format=netscape&domains=youtube.com`，并用 `GET /api/v3/token/introspect` 核对 Token 的权限与域名范围（`src/assetizer/cookies.py`）。每次请求同时带两类独立凭据：CookieCloud App Token（Bearer；按本文约定只授 `cookies:read`、域名限 `youtube.com`，以 introspect 结果为准）和 Cloudflare Access 服务令牌。只读入口只放行读取与健康检查，不能用来创建 Token、配对或上传。文中的 OVH 路径、来源 IP 与验收命令是当时的环境；懒猫上的凭据用「机房」面板配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)），部署环境见 [operations.md](operations.md)。接口细节以 CookieCloud 仓库的 `docs/read-ingress.md` 与 `docs/DEVELOPER.md` 为准。
+
 - 提出方：Assetizer（投资内容自动资产化）· 2026-10-13
 - 执行方：CookieCloud 项目（`../CookieCloud`）的 agent
 - 方案：用户已选定方案 A——Cloudflare Tunnel 只开放读取接口，Cloudflare Access 服务令牌 + CookieCloud App Token 两道鉴权
