@@ -263,7 +263,17 @@ def browser_args() -> list[str]:
 def ytdlp_args() -> Iterator[list[str]]:
     """yt-dlp arguments carrying the login: fresh CookieCloud cookies in a 0600 file (removed afterwards),
     falling back to the server Chromium profile when CookieCloud is not configured or fails."""
+    with ytdlp_login() as (args, _):
+        yield args
+
+
+@contextlib.contextmanager
+def ytdlp_login() -> Iterator[tuple[list[str], dict]]:
+    """ytdlp_args() and which login they carry: {"source": "cookiecloud" | "browser" | None, "signed_in": whether the
+    CookieCloud cookies carry a YouTube sign-in (None for the server Chromium: not looked at), "code": the CookieCloud
+    failure the server Chromium stands in for}."""
     path, args = None, None
+    how: dict = {"source": None, "signed_in": None, "code": None}
     if configured():
         try:
             text = fetch()
@@ -275,9 +285,12 @@ def ytdlp_args() -> Iterator[list[str]]:
                 f.write(text)
             os.chmod(path, 0o600)
             args = ["--cookies", path]
-            _record(True, "cookiecloud", count=len(_cookie_lines(text)))
+            lines = _cookie_lines(text)
+            how.update(source="cookiecloud", signed_in=_signed_in(lines))
+            _record(True, "cookiecloud", count=len(lines))
             db.resolve_alert("cookiecloud")
         except CookieError as e:
+            how["code"] = e.code
             _record(False, "cookiecloud", e.code, detail=e.detail)
             db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态，已改用服务器 Chromium",
                            f"{fix(e.code)}（错误码 {e.code}{f'，{e.detail}' if e.code == 'unreachable' and e.detail else ''}）")
@@ -291,10 +304,11 @@ def ytdlp_args() -> Iterator[list[str]]:
             args = None
     if args is None:
         args = browser_args()
+        how.update(source="browser" if args else None, signed_in=None)
         if not configured():
             _record(bool(args), "browser")
     try:
-        yield args
+        yield args, how
     finally:
         if path:
             with contextlib.suppress(OSError):

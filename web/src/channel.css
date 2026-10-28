@@ -206,7 +206,7 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 /* state strips */
 .ch-ib { display: flex; align-items: stretch; border: 1px solid var(--rule); border-radius: 14px; background: var(--chp-card); overflow: hidden; }
 .ch-ib.empty { padding: 16px; font-size: 13px; color: var(--ink-3); }
-.ch-ib-l { padding: 12px 16px; display: flex; flex-direction: column; justify-content: center; gap: 3px; border-right: 1px solid var(--rule); min-width: 0; flex: 1; text-align: left; }
+.ch-ib-l { padding: 12px 16px; display: flex; flex-direction: column; justify-content: center; gap: 3px; border-right: 1px solid var(--rule); border-radius: 13px 0 0 13px; min-width: 0; flex: 1; text-align: left; }
 .ch-ib-t { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .ch-ib-t b { font: 600 14px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ch-ib-m { font-size: 12px; color: var(--ink-3); display: flex; gap: 10px; flex-wrap: wrap; }
@@ -791,6 +791,10 @@ button.ch-cardh { width: 100%; text-align: left; margin: 0; }
 .ch-bst p { margin: 0; font-size: 12.5px; color: var(--ink-2); }
 .ch-bst p.z { color: var(--zhu-ink); }
 .ch-bacts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.ch-blink { display: flex; gap: 8px; margin-top: 10px; }
+.ch-blink input { flex: 1; min-width: 0; height: 30px; border: 1px solid var(--rule-2); border-radius: 8px; padding: 0 10px;
+  font: 13px var(--sans); color: var(--ink); background: var(--nt-bg); }
+.ch-bst p.z a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 /* 试一期: the newest video not here yet */
 .ch-bt { display: grid; justify-items: start; gap: 4px; }
 .ch-bt > h3 { margin-bottom: 6px; }

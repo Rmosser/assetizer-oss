@@ -1,4 +1,4 @@
-"""Automatic intake for TRACKED channels via the public YouTube RSS feed (no cookies).
+"""Automatic intake for TRACKED channels.
 
 Off by default per channel (`auto_ingest`); when switched on, only videos published
 after that moment are queued — never a backlog — and shorts/live replays shorter
@@ -6,9 +6,14 @@ than the channel's minimum duration are skipped after RESOLVE. Older videos come
 only when picked on the channel's 看板 (补录), through their own line: one at a time,
 while nothing else waits and the quota has room (design §R6-5).
 
-The RSS endpoint is not reliable (2026-10: 404/500 for every channel), so a failed
-feed falls back to yt-dlp's flat listing of the channel's videos and streams tabs.
-Its dates are approximate (day precision, ``approx``): those are compared by day.
+The channel is read through yt-dlp's flat listing of its videos and streams tabs (and
+its shorts tab while the minimum lets shorts through), with the YouTube login: members-
+only videos are listed there, and each scan records whether that login could fetch
+them. The public RSS feed leaves members-only videos out (and in 2026-10 answered
+404/500 for every channel), so it is read only when the listing cannot be; a scan
+that fell back to it says so. The listing's dates are approximate (day precision,
+``approx``): those are compared by day. Shorts carry no date at all: a short is new
+when an earlier scan did not list it.
 """
 from __future__ import annotations
 
@@ -24,38 +29,87 @@ from . import config, db
 from .util import now
 
 NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+TABS = ("videos", "streams")
+SHORTS_MAX = 180   # seconds: the longest a short runs; a minimum below it lets shorts in, so their tab is read too
+SHORTS_KEPT = 200  # shorts a channel's scans remember having listed
+# what keeps the channel's members-only videos from coming in, as a scan records it (none of these: nothing)
+MEMBERS = {
+    "rss": "只读到公开视频，会员视频会漏收",
+    "rejected": "YouTube 登录态失效，会员视频下不了",
+    "not_signed_in": "CookieCloud 里 YouTube 未登录，会员视频下不了",
+    "cookiecloud": "读不到 CookieCloud，会员视频可能下不了",
+    "none": "没有 YouTube 登录态，会员视频下不了",
+}
 
 
 def feed(channel_id: str, limit: int = 15) -> list[dict]:
+    """The channel's latest videos and live replays (the 看板's 试一期, the sample picker)."""
+    return look(channel_id, limit)[0]
+
+
+def look(channel_id: str, limit: int = 15, shorts: bool = False) -> tuple[list[dict], str | None, set[str]]:
+    """The channel's latest videos and live replays (and with `shorts` its shorts), what keeps its members-only videos
+    from coming in (a MEMBERS key, or None) and the tabs read. The listing with the login comes first; RSS only when
+    it fails."""
     try:
-        return rss(channel_id)
+        return _list(channel_id, limit, TABS + ("shorts",) if shorts else TABS)
     except Exception as e:  # noqa: BLE001
-        out = listing(channel_id, limit)
-        if not out:
-            raise RuntimeError(f"RSS 与频道列表都读不到：{e}") from e
-        return out
+        try:
+            return rss(channel_id), "rss", set()
+        except Exception:  # noqa: BLE001
+            raise RuntimeError(f"频道列表与 RSS 都读不到：{e}") from e
 
 
 def listing(channel_id: str, limit: int = 15) -> list[dict]:
-    """Latest uploads and live replays through yt-dlp (flat, no download)."""
-    from .cookies import ytdlp_args
+    """Latest uploads and live replays through yt-dlp (flat, no download); 补录 reads it as deep as its range needs."""
+    return _list(channel_id, limit, TABS)[0]
+
+
+def _list(channel_id: str, limit: int, tabs: tuple[str, ...]) -> tuple[list[dict], str | None, set[str]]:
+    """The tabs' latest `limit` videos each, newest first (shorts, undated, after them), what keeps members-only videos
+    from coming in, and the tabs read (one the channel does not have counts, empty). A tab that cannot be read is left
+    out; none listed is an error."""
+    from .cookies import ytdlp_login
     from .youtube import _base
     out: dict[str, dict] = {}
-    for tab in ("videos", "streams"):
-        with ytdlp_args() as auth:
+    said, read, listed = [], set(), False
+    with ytdlp_login() as (auth, how):  # one CookieCloud read for all the tabs
+        for tab in tabs:
             r = subprocess.run(_base(config.get()) + auth + ["--flat-playlist", "--playlist-end", str(limit),
                                                               "--extractor-args", "youtubetab:approximate_date", "-J",
                                                               f"https://www.youtube.com/channel/{channel_id}/{tab}"],
                                capture_output=True, text=True, timeout=180)
-        if r.returncode != 0 or not r.stdout.strip():
-            continue
-        for e in json.loads(r.stdout).get("entries") or []:
-            if not e.get("id") or e["id"] in out:
+            said.append(r.stderr or "")
+            if r.returncode != 0 or not r.stdout.strip():
+                if f"does not have a {tab} tab" in (r.stderr or ""):
+                    read.add(tab)  # no live replays, or no shorts: nothing there, rather than not read
                 continue
-            ts = e.get("timestamp")
-            out[e["id"]] = {"id": e["id"], "title": e.get("title"), "duration": e.get("duration"), "approx": True,
-                            "published": datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else ""}
-    return sorted(out.values(), key=lambda x: x["published"], reverse=True)[:limit]
+            read.add(tab)
+            listed = True
+            for e in json.loads(r.stdout).get("entries") or []:
+                if not e.get("id") or e["id"] in out:
+                    continue
+                ts = e.get("timestamp")
+                out[e["id"]] = {"id": e["id"], "title": e.get("title"), "duration": e.get("duration"), "approx": True,
+                                "published": datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else "", "tab": tab}
+    if not listed:
+        last = next((ln for s in reversed(said) for ln in reversed(s.strip().splitlines()) if ln.startswith("ERROR")), "")
+        raise RuntimeError(last[:300] or "yt-dlp 没有列出任何视频")
+    dated = sorted((v for v in out.values() if v["tab"] != "shorts"), key=lambda x: x["published"], reverse=True)
+    return (dated[:limit] + [v for v in out.values() if v["tab"] == "shorts"][:limit], _members(how, "".join(said)),
+            read)
+
+
+def _members(how: dict, said: str) -> str | None:
+    """What keeps members-only videos from coming in, by the login a listing used (cookies.ytdlp_login) and what
+    yt-dlp said. They are listed either way; without a member's login they cannot be fetched."""
+    if "cookies are no longer valid" in said.lower():  # yt-dlp: the cookies were rotated in the browser
+        return "rejected"
+    if how["source"] == "cookiecloud":
+        return None if how["signed_in"] else "not_signed_in"
+    if how["code"]:
+        return "cookiecloud"  # configured but unreadable: the server Chromium stands in, signed in or not
+    return None if how["source"] == "browser" else "none"
 
 
 def rss(channel_id: str) -> list[dict]:
@@ -123,19 +177,28 @@ def take(c: dict, en: dict, why: str, priority: int = 0, origin: str = "ingest",
 
 def scan(c: dict, cfg: dict) -> dict:
     """One look at the channel's feed: what came out after intake was switched on (`since`) is queued, unless it is
-    shorter than the channel's minimum or already here. The counts are kept with the channel (its last SCANS_KEPT)."""
-    out = {"at": now(), "found": 0, "queued": 0, "registered": 0, "have": 0, "short": 0, "error": None, "ids": []}
+    shorter than the channel's minimum or already here. The counts, and what keeps members-only videos from coming in
+    (`members`, a MEMBERS key), are kept with the channel (its last SCANS_KEPT)."""
+    out = {"at": now(), "found": 0, "queued": 0, "registered": 0, "have": 0, "short": 0, "error": None, "members": None,
+           "ids": []}
+    shorts = int(cfg.get("min_minutes") or 0) * 60 < SHORTS_MAX
     try:
-        entries = feed(c["youtube_channel_id"])
+        entries, out["members"], read = look(c["youtube_channel_id"], shorts=shorts)
     except Exception as e:  # noqa: BLE001
-        db.event("ingest", f"{c['name']} RSS 读取失败：{e}", level="warn")
+        db.event("ingest", f"{c['name']} 读不到频道的视频：{e}", level="warn")
         out["error"] = str(e)[:300]
-        entries = []
+        entries, read = [], set()
     since = cfg.get("since") or now()
+    listed = [en["id"] for en in entries if en.get("tab") == "shorts"]
+    seen = None if "shorts_seen" not in cfg else set(cfg["shorts_seen"])
     for en in entries:
         pub = en["published"] or ""
+        if en.get("tab") == "shorts":
+            # no date: a short is new when an earlier scan did not list it (the first scan only notes what is there)
+            if seen is None or en["id"] in seen:
+                continue
         # approximate (day-precision) dates compare by day, so a video from the day intake started is not lost
-        if not en["id"] or (pub[:10] < since[:10] if en.get("approx") else pub <= since):
+        elif not en["id"] or (pub[:10] < since[:10] if en.get("approx") else pub <= since):
             continue
         out["found"] += 1
         if en.get("duration") and en["duration"] < 60 * int(cfg.get("min_minutes") or 0):
@@ -153,8 +216,16 @@ def scan(c: dict, cfg: dict) -> dict:
             out["queued"] += 1
             out["ids"].append(en["id"])
     cur = db.setting(f"ingest:{c['id']}") or cfg  # read again: the switch may have moved while the feed was read
+    before = (cur.get("scans") or [{}])[0]
+    if out["members"] and out["members"] != before.get("members"):
+        db.event("ingest", f"{c['name']}：{MEMBERS[out['members']]}", level="warn")
     scans = [{k: v for k, v in out.items() if k != "ids"}] + (cur.get("scans") or [])
-    db.set_setting(f"ingest:{c['id']}", {**cur, "last_poll": out["at"], "scans": scans[:SCANS_KEPT]})
+    new = {**cur, "last_poll": out["at"], "scans": scans[:SCANS_KEPT]}
+    if not shorts:
+        new.pop("shorts_seen", None)  # shorts not read: when they are again, a first scan notes them anew
+    elif "shorts" in read:  # a tab that failed this time leaves what earlier scans listed as it was
+        new["shorts_seen"] = (listed + [i for i in cur.get("shorts_seen") or [] if i not in listed])[:SHORTS_KEPT]
+    db.set_setting(f"ingest:{c['id']}", new)
     return out
 
 

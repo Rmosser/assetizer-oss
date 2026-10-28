@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get, post } from "../../api";
 import { IssueTitle } from "../../cjk";
+import { linkProps } from "../../router";
 import { usePoll } from "../../hooks";
 import { Row } from "../../pages/Issues";
 import { parseDay, WAIT } from "../../util";
@@ -31,8 +32,14 @@ const when = (it: any) => (parseDay(it.published_at) || parseDay(it.ready_at) ||
 /** not here yet in any form: neither in the journal, the library, the 补录 line, nor a sample */
 const fresh = (c: Candidate) => !c.here && !c.library && !c.queued && !c.sample;
 /** what one scan found, the numbers that are not zero */
-const found = (s: Scan) => [`发现 ${s.found}`, s.queued && `新收 ${s.queued}`, s.have && `已有 ${s.have}`,
+const found = (s: Scan) => !s.found ? "无新视频" : [`发现 ${s.found}`, s.queued && `新收 ${s.queued}`, s.have && `已有 ${s.have}`,
   s.registered && `已登记 ${s.registered}`, s.short && `太短 ${s.short}`].filter(Boolean).join(" · ");
+/** what keeps the channel's members-only videos from coming in, as the last scan saw it (ingest.MEMBERS) */
+const MEMBERS: Record<string, string> = {
+  rss: "只读到公开视频，会员视频会漏收", rejected: "YouTube 登录态失效，会员视频下不了",
+  not_signed_in: "CookieCloud 里 YouTube 未登录，会员视频下不了", cookiecloud: "读不到 CookieCloud，会员视频可能下不了",
+  none: "没有 YouTube 登录态，会员视频下不了",
+};
 
 /** 试一期: the newest video not here yet, produced now (not at the next round, and older than intake reaches). */
 function Try({ ch, flash, onDone }: { ch: Channel; flash: (text: string) => void; onDone: () => void }) {
@@ -88,11 +95,13 @@ function Intake({ ch, mode, b, onSet, onScan }: {
   const broke = last?.error ? last : null;  // only while it lasts: a scan that worked since has cleared it
   const since = ing.since ? new Date(ing.since) : null;
   const on = can && !!ing.enabled;
-  const next = nextScan(ing);
+  const mem = last?.members;
   return (
     <section className="ch-bp" aria-label="收录">
       <h3>收录</h3>
-      <div className="ch-bsw"><Switch on={on} disabled={!can} label="自动收录新视频" onChange={(v) => send(v, min)} /><span>自动收录新视频</span></div>
+      <div className="ch-bsw" title={on && since && !Number.isNaN(+since) ? `自 ${since.getMonth() + 1} 月 ${since.getDate()} 日起` : undefined}>
+        <Switch on={on} disabled={!can} label="自动收录新视频" onChange={(v) => send(v, min)} /><span>自动收录新视频</span>
+      </div>
       <div className="ch-row2">
         <span>短于</span>
         <Stepper label="最短时长" value={min} onChange={(v) => { setMin(v); clearTimeout(t.current); t.current = window.setTimeout(() => send(want.current, v), 600); }} />
@@ -100,10 +109,10 @@ function Intake({ ch, mode, b, onSet, onScan }: {
       </div>
       {!can ? <p className="q">定稿后开启</p> : on ? (
         <div className="ch-bst">
-          <p>{last ? `上次 ${hm(last.at)} · ${found(last)}` : "等第一次扫描"}</p>
+          <p>{[last ? `${hm(last.at)} · ${found(last)}` : "等第一次扫描", nextScan(ing)].filter(Boolean).join(" · ")}</p>
           {got && got !== last && <p>最近新收 {md(got.at)}</p>}
           {broke && <p className="z">{md(broke.at)} 扫描出错：{broke.error}</p>}
-          {(next || since) && <p>{[next, since && !Number.isNaN(+since) && `自 ${since.getMonth() + 1} 月 ${since.getDate()} 日起`].filter(Boolean).join(" · ")}</p>}
+          {mem && <p className="z">{MEMBERS[mem] || mem}{mem !== "rss" && <> · <a {...linkProps("/engine")}>机房</a></>}</p>}
         </div>
       ) : null}
       {on && <button className="ch-btn sm" disabled={!!ing.scanning} onClick={onScan}>{ing.scanning ? "扫描中…" : "立即扫描"}</button>}
@@ -112,9 +121,25 @@ function Intake({ ch, mode, b, onSet, onScan }: {
   );
 }
 
-function Backfill({ ch, mode, b, onOpen, onCancel }: { ch: Channel; mode: Mode; b: BoardData; onOpen: () => void; onCancel: () => void }) {
+function Backfill({ ch, mode, b, onOpen, onCancel, onDone }: {
+  ch: Channel; mode: Mode; b: BoardData; onOpen: () => void; onCancel: () => void; onDone: (text: string) => void;
+}) {
   const bf = b.backfill;
   const can = mode === "locked" && ch.mode === "TRACKED" && !!ch.youtube_channel_id;
+  // 贴链接: a video the listing does not show (unlisted); null while the field is closed
+  const [link, setLink] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const add = async () => {
+    if (!link?.trim() || busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await post<{ queued: number }>(`/api/channels/${encodeURIComponent(ch.id)}/backfill/link`, { url: link.trim() });
+      setLink(null);
+      onDone(r.queued ? "补录排队 1 期" : "这一期已经在了");
+    } catch (e) { setErr((e as Error).message); }
+    setBusy(false);
+  };
   return (
     <section className="ch-bp" aria-label="补录">
       <h3>补录</h3>
@@ -129,8 +154,18 @@ function Backfill({ ch, mode, b, onOpen, onCancel }: { ch: Channel; mode: Mode; 
           )}
           <div className="ch-bacts">
             <button className="ch-btn sm solid" onClick={onOpen}>按日期挑选…</button>
+            {link === null && <button className="ch-btn sm" onClick={() => { setLink(""); setErr(null); }}>贴链接</button>}
             {bf.pending > 0 && <button className="ch-btn sm" onClick={onCancel}>取消排队</button>}
           </div>
+          {link !== null && (
+            <div className="ch-blink">
+              <input autoFocus value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://youtu.be/…" aria-label="视频链接"
+                inputMode="url" autoComplete="off" disabled={busy}
+                onKeyDown={(e) => { if (e.key === "Enter") add(); else if (e.key === "Escape") { setLink(null); setErr(null); } }} />
+              <button className="ch-btn sm solid" disabled={busy || !link.trim()} onClick={add}>{busy ? "读取中…" : "补录"}</button>
+            </div>
+          )}
+          {err && <p className="ch-err">{err}</p>}
         </>
       )}
     </section>
@@ -319,7 +354,7 @@ export function Board({ ch, mode, onSetIngest, flash }: {
       <aside className="ch-bside">
         <Try ch={ch} flash={flash} onDone={q.reload} />
         <Intake ch={ch} mode={mode} b={b} onSet={async (en, m) => { await onSetIngest(en, m); q.reload(); }} onScan={scan} />
-        <Backfill ch={ch} mode={mode} b={b} onOpen={() => setPicking(true)} onCancel={cancel} />
+        <Backfill ch={ch} mode={mode} b={b} onOpen={() => setPicking(true)} onCancel={cancel} onDone={(t) => { flash(t); q.reload(); }} />
       </aside>
       {picking && <Picker ch={ch} b={b} onClose={() => setPicking(false)} onDone={(t) => { setPicking(false); flash(t); q.reload(); }} />}
     </div>

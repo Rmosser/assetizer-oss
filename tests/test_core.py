@@ -565,17 +565,16 @@ def test_retune_pauses_intake(home):
 
 
 
-def test_intake_falls_back_to_channel_listing_and_compares_approx_dates_by_day(home, monkeypatch):
+def test_intake_compares_the_listings_approx_dates_by_day(home, monkeypatch):
     from assetizer import db, ingest
     from assetizer.util import now
     t = now()
     db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, stage, created_at, updated_at) VALUES ('t','Tom','UCt','TRACKED','LOCKED',?,?)", t, t)
     db.set_setting("ingest:t", {"enabled": True, "since": "2026-10-09T15:00:00+00:00", "min_minutes": 10})
-    monkeypatch.setattr(ingest, "rss", lambda cid: (_ for _ in ()).throw(RuntimeError("404")))
-    monkeypatch.setattr(ingest, "listing", lambda cid, limit=15: [
+    monkeypatch.setattr(ingest, "_list", lambda cid, limit, tabs: ([
         {"id": "AAAAAAAAAAA", "title": "same day", "published": "2026-10-09T00:00:00+00:00", "duration": 3600, "approx": True},
         {"id": "BBBBBBBBBBB", "title": "short", "published": "2026-10-10T00:00:00+00:00", "duration": 120, "approx": True},
-        {"id": "CCCCCCCCCCC", "title": "older", "published": "2026-10-08T00:00:00+00:00", "duration": 3600, "approx": True}])
+        {"id": "CCCCCCCCCCC", "title": "older", "published": "2026-10-08T00:00:00+00:00", "duration": 3600, "approx": True}], None, {"videos"}))
     import assetizer.delivery as d
     monkeypatch.setattr(d, "registered_in_target", lambda src: None)
     assert ingest.poll()["queued"] == ["AAAAAAAAAAA"]
@@ -680,6 +679,8 @@ def test_ytdlp_args_uses_a_private_temp_file_and_removes_it(home, monkeypatch):
     assert not os.path.exists(path)
     st = db.setting("youtube_cookies_state")
     assert st["ok"] is True and st["source"] == "cookiecloud" and st["count"] == 2
+    with cookies.ytdlp_login() as (args, how):  # SID and PREF only: no sign-in YouTube would see
+        assert args[0] == "--cookies" and how == {"source": "cookiecloud", "signed_in": False, "code": None}
 
 
 def test_ytdlp_args_falls_back_to_the_server_browser_with_an_alert(home, monkeypatch):
@@ -688,8 +689,9 @@ def test_ytdlp_args_falls_back_to_the_server_browser_with_an_alert(home, monkeyp
     from assetizer import config, cookies, db
     config.override(dataclasses.replace(config.get(), browser_profile=Path("/srv/profile")))
     _cc(home, monkeypatch, _Resp(401, "", "application/json", {"code": "token_revoked"}))
-    with cookies.ytdlp_args() as args:
+    with cookies.ytdlp_login() as (args, how):
         assert args == ["--cookies-from-browser", "chromium:/srv/profile"]
+        assert how == {"source": "browser", "signed_in": None, "code": "token_revoked"}
     assert db.setting("youtube_cookies_state")["code"] == "token_revoked"
     assert db.one("SELECT body FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")["body"].endswith("（错误码 token_revoked）")
     # not configured at all: the browser profile, quietly
@@ -3127,7 +3129,7 @@ def _board_fixture(home, monkeypatch, stage="LOCKED"):
                {"id": "BBBBBBBBBBB", "title": "short", "published": "2026-10-21T00:00:00+00:00", "duration": 120, "approx": True},
                {"id": "CCCCCCCCCCC", "title": "new", "published": "2026-10-22T00:00:00+00:00", "duration": 2400, "approx": True},
                {"id": "DDDDDDDDDDD", "title": "before intake", "published": "2026-10-01T00:00:00+00:00", "duration": 2400, "approx": True}]
-    monkeypatch.setattr(ingest, "feed", lambda cid: entries)
+    monkeypatch.setattr(ingest, "look", lambda cid, limit=15, shorts=False: (entries, None, {"videos", "streams"}))
     monkeypatch.setattr(ingest, "listing", lambda cid, limit=15: entries)
     import assetizer.delivery as d
     monkeypatch.setattr(d, "registered_in_target", lambda src: None)
@@ -3188,6 +3190,125 @@ def test_a_scan_racing_another_and_one_channel_failing_do_not_stop_intake(home, 
     assert db.one("SELECT 1 FROM events WHERE kind='ingest' AND message LIKE 'Tom 扫描出错%'")
     from datetime import datetime  # the next round is the worker's, not the last 立即扫描's
     assert (datetime.fromisoformat(ingest.next_round()) - datetime.fromisoformat(db.setting("ingest_round"))).seconds == ingest.EVERY
+
+
+def _tabs(monkeypatch, tabs: dict, how: dict | None = None, stderr: str = ""):
+    """yt-dlp's flat listing faked by tab ({tab: entries}; a tab left out fails), and the login it was given."""
+    import contextlib
+    import subprocess
+    from assetizer import cookies, ingest
+    asked = {"tabs": [], "logins": 0}
+
+    @contextlib.contextmanager
+    def login():
+        asked["logins"] += 1
+        yield ["--cookies", "x"], how or {"source": "cookiecloud", "signed_in": True, "code": None}
+
+    def run(cmd, **kw):
+        tab = cmd[-1].rsplit("/", 1)[1]
+        asked["tabs"].append(tab)
+        if tab not in tabs:
+            return subprocess.CompletedProcess(cmd, 1, "", f"ERROR: [youtube:tab] This channel does not have a {tab} tab\n")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"entries": tabs[tab]}), stderr)
+    monkeypatch.setattr(cookies, "ytdlp_login", login)
+    monkeypatch.setattr(ingest.subprocess, "run", run)
+    return asked
+
+
+def test_the_listing_reads_every_tab_with_one_login_and_says_what_keeps_members_videos_out(home, monkeypatch):
+    from assetizer import ingest
+    day = 1792800000
+    tabs = {"videos": [{"id": "v" * 11, "title": "v", "duration": 1800, "timestamp": day}],
+            "streams": [{"id": "m" * 11, "title": "会员", "duration": 3600, "timestamp": day + 86400, "availability": "subscriber_only"}],
+            "shorts": [{"id": "s" * 11, "title": "s"}]}
+    asked = _tabs(monkeypatch, tabs)
+    entries, members, read = ingest.look("UCt", shorts=True)
+    assert [e["id"] for e in entries] == ["m" * 11, "v" * 11, "s" * 11] and members is None and read == {"videos", "streams", "shorts"}
+    assert asked == {"tabs": ["videos", "streams", "shorts"], "logins": 1} and entries[2]["published"] == ""
+    assert ingest.listing("UCt") and asked["tabs"][-2:] == ["videos", "streams"]  # 补录 and 试一期: no shorts
+    for how, said, verdict in (({"source": "cookiecloud", "signed_in": False, "code": None}, "", "not_signed_in"),
+                               ({"source": "cookiecloud", "signed_in": True, "code": None},
+                                "WARNING: The provided YouTube account cookies are no longer valid.", "rejected"),
+                               ({"source": "browser", "signed_in": None, "code": "token_revoked"}, "", "cookiecloud"),
+                               ({"source": "browser", "signed_in": None, "code": None}, "", None),
+                               ({"source": None, "signed_in": None, "code": None}, "", "none")):
+        _tabs(monkeypatch, tabs, how, said)
+        assert ingest.look("UCt")[1] == verdict
+    _tabs(monkeypatch, {"videos": tabs["videos"]})  # no live replays: that tab is left out, as read and empty
+    assert [e["id"] for e in ingest.look("UCt")[0]] == ["v" * 11] and ingest.look("UCt")[2] == {"videos", "streams"}
+    _tabs(monkeypatch, {})  # no tab read: RSS, which leaves members-only videos out
+    monkeypatch.setattr(ingest, "rss", lambda cid: [{"id": "r" * 11, "title": "r", "published": "2026-10-28T00:00:00+00:00"}])
+    assert ingest.look("UCt") == ([{"id": "r" * 11, "title": "r", "published": "2026-10-28T00:00:00+00:00"}], "rss", set())
+    with pytest.raises(RuntimeError, match="does not have a streams tab"):
+        ingest.listing("UCt")  # 补录 has no RSS to fall back on: yt-dlp's own words
+
+    def down(cid):
+        raise RuntimeError("HTTP 404")
+    monkeypatch.setattr(ingest, "rss", down)
+    with pytest.raises(RuntimeError, match="频道列表与 RSS 都读不到"):
+        ingest.look("UCt")
+
+
+def test_shorts_are_read_below_three_minutes_and_new_when_not_listed_before(home, monkeypatch):
+    from assetizer import db, ingest
+    entries = _board_fixture(home, monkeypatch)
+    s1, s2 = "s1" + "x" * 9, "s2" + "x" * 9
+    short = lambda vid: {"id": vid, "title": vid, "published": "", "duration": None, "approx": True, "tab": "shorts"}  # noqa: E731
+    listed, asked, read = [short(s1)], [], {"videos", "streams", "shorts"}
+
+    def look(cid, limit=15, shorts=False):
+        asked.append(shorts)
+        return entries + (listed if shorts else []), None, read if shorts else {"videos", "streams"}
+    monkeypatch.setattr(ingest, "look", look)
+    ch = lambda: db.one("SELECT * FROM channels WHERE id='t'")  # noqa: E731
+    ingest.scan(ch(), db.setting("ingest:t"))
+    assert asked == [False] and "shorts_seen" not in db.setting("ingest:t")  # 10 minutes: shorts are not read
+    db.set_setting("ingest:t", {**db.setting("ingest:t"), "min_minutes": 0})
+    out = ingest.scan(ch(), db.setting("ingest:t"))  # the first scan that reads them only notes what is there
+    assert asked[-1] is True and out["ids"] == ["BBBBBBBBBBB"] and db.setting("ingest:t")["shorts_seen"] == [s1]
+    listed.insert(0, short(s2))
+    out = ingest.scan(ch(), db.setting("ingest:t"))
+    assert out["ids"] == [s2] and db.setting("ingest:t")["shorts_seen"] == [s2, s1]
+    read.discard("shorts")  # the shorts tab failed this time: what was listed before stays
+    listed[:] = []
+    ingest.scan(ch(), db.setting("ingest:t"))
+    assert db.setting("ingest:t")["shorts_seen"] == [s2, s1]
+    db.set_setting("ingest:t", {**db.setting("ingest:t"), "min_minutes": 5})  # shorts out again: noted anew next time
+    ingest.scan(ch(), db.setting("ingest:t"))
+    assert "shorts_seen" not in db.setting("ingest:t")
+
+
+def test_a_scan_keeps_what_keeps_members_videos_out_and_tells_once(home, monkeypatch):
+    from assetizer import db, ingest
+    entries = _board_fixture(home, monkeypatch)
+    verdict = ["rejected"]
+    monkeypatch.setattr(ingest, "look", lambda cid, limit=15, shorts=False: (entries, verdict[0], {"videos", "streams"}))
+    ch = lambda: db.one("SELECT * FROM channels WHERE id='t'")  # noqa: E731
+    for _ in range(2):
+        ingest.scan(ch(), db.setting("ingest:t"))
+    assert db.setting("ingest:t")["scans"][0]["members"] == "rejected"
+    assert db.one("SELECT COUNT(*) n FROM events WHERE message LIKE '%登录态失效%'")["n"] == 1  # not every half hour
+    verdict[0] = None
+    ingest.scan(ch(), db.setting("ingest:t"))
+    assert db.setting("ingest:t")["scans"][0]["members"] is None
+
+
+def test_backfill_by_link_takes_only_this_channels_video(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import db, youtube
+    from assetizer.web import app as web
+    _board_fixture(home, monkeypatch)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    info = {"channel_id": "UCt", "channel": "Tom", "title": "不公开的一期", "duration": 2400}
+    monkeypatch.setattr(youtube, "metadata", lambda url: info)
+    r = c.post("/api/channels/t/backfill/link", headers=h, json={"url": "https://youtu.be/UUUUUUUUUUU?si=x"})
+    assert r.json() == {"queued": 1, "have": 0}
+    assert db.one("SELECT title, duration FROM backfill_queue WHERE source_id='UUUUUUUUUUU'") == {"title": "不公开的一期", "duration": 2400}
+    assert c.post("/api/channels/t/backfill/link", headers=h, json={"url": "https://youtu.be/UUUUUUUUUUU"}).json()["have"] == 1
+    info.update(channel_id="UCo", channel="Other")
+    r = c.post("/api/channels/t/backfill/link", headers=h, json={"url": "https://www.youtube.com/watch?v=OOOOOOOOOOO"})
+    assert r.status_code == 409 and "Other" in r.json()["detail"]
+    assert c.post("/api/channels/t/backfill/link", headers=h, json={"url": "https://example.com/x"}).status_code == 422
 
 
 def test_the_channel_list_says_test_copy_and_an_empty_listing_is_an_error(home, monkeypatch):

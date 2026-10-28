@@ -1015,6 +1015,31 @@ def channel_backfill(cid: str, body: Backfill):
     return out
 
 
+class Link(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/channels/{cid}/backfill/link")
+def channel_backfill_link(cid: str, body: Link):
+    """补录 one video by its link: one the channel's listing does not show (unlisted). It must be this channel's."""
+    from .. import ingest
+    from ..youtube import metadata, video_id
+    c = _tracked(cid, locked=True)
+    vid = video_id(body.url.strip())
+    if not vid:
+        raise HTTPException(422, "不是 YouTube 视频链接")
+    try:
+        info = metadata(f"https://www.youtube.com/watch?v={vid}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"读不到这个视频：{e}"[:300])
+    if info.get("channel_id") != c["youtube_channel_id"]:
+        raise HTTPException(409, f"这是「{info.get('channel') or '别的频道'}」的视频")
+    out = ingest.enqueue_backfill(cid, [{"id": vid, "title": info.get("title") or "", "duration": info.get("duration")}])
+    if out["queued"]:
+        db.event("ingest", f"补录排队：{c['name']} · {info.get('title') or vid}")
+    return out
+
+
 @app.post("/api/channels/{cid}/backfill/cancel")
 def channel_backfill_cancel(cid: str):
     from .. import ingest
@@ -1124,7 +1149,7 @@ def _listing(ch: dict, depth: int) -> dict:
     def run() -> None:
         try:
             entries = listing(ch["youtube_channel_id"], depth)
-            if not entries:  # yt-dlp failed on both tabs (it reports no error)
+            if not entries:  # the tabs were read but listed nothing
                 raise RuntimeError("yt-dlp 没有列出任何视频")
             v = {"at": time.monotonic(), "entries": entries, "library": _library(cid, entries)}
         except Exception as e:  # noqa: BLE001

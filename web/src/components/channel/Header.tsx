@@ -82,7 +82,8 @@ export function Header({ ch, list, alerts, testCopy, onLock, onRetune, lockVersi
   };
   const ing = ch.ingest || {};
   const lamp = ch.blocked > 0 ? { text: `${ch.blocked} 期等待交付`, zhu: true }
-    : ing.enabled ? { text: `自动收录中${nextScan(ing) ? ` · ${nextScan(ing)}` : ""}`, zhu: false }
+    : ing.enabled && ing.scans?.[0]?.members ? { text: "会员视频收不全", zhu: true }
+    : ing.enabled ?{ text: `自动收录中${nextScan(ing) ? ` · ${nextScan(ing)}` : ""}`, zhu: false }
     : { text: "自动收录已暂停", zhu: false };
   return (
     <header className="ch-head">

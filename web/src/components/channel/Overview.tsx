@@ -24,6 +24,7 @@ function intake(c: Channel, m: Mode): [string, boolean] {
   if (!ing.enabled) return ["自动收录已暂停", false];
   const err = ing.scans?.[0]?.error;
   if (err) return ["上次扫描出错", true];
+  if (ing.scans?.[0]?.members) return ["会员视频收不全", true];
   return [`自动收录${nextScan(ing) ? ` · ${nextScan(ing)}` : ""}`, false];
 }
 

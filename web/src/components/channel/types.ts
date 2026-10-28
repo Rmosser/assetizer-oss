@@ -7,7 +7,10 @@ export type Playbook = {
   created_at: string; activated_at: string | null; rules: Rule[]; facets: Facet[]; audit: any; article_style?: string | null;
 };
 export type Prompt = { id: number; version: number; note: string | null; created_at: string; text: string; origin?: string | null };
-export type Scan = { at: string; found: number; queued: number; registered: number; have: number; short: number; error: string | null };
+export type Scan = {
+  at: string; found: number; queued: number; registered: number; have: number; short: number; error: string | null;
+  members?: string | null;  // what keeps members-only videos from coming in (ingest.MEMBERS)
+};
 export type Ingest = {
   enabled?: boolean; min_minutes?: number; since?: string; last_poll?: string; every_minutes?: number; scans?: Scan[]; scanning?: boolean;
   next_at?: string | null;  // the worker's next round over the channels
