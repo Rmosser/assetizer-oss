@@ -3584,3 +3584,145 @@ def test_a_cancel_while_backfill_asks_the_library_leaves_the_one_already_taken(h
     monkeypatch.setattr(ingest, "take", taken)
     assert ingest.dispatch_backfill() is None  # skipped once, not tried again on every tick
     assert db.one("SELECT status FROM backfill_queue WHERE source_id='HHHHHHHHHHH'")["status"] == "SKIPPED"
+
+
+# ---------------------------------------------------------------- 机房的盒子设置 (knobs.py)
+def test_knobs_are_checked_whole_then_written_and_read_clamped(cc_api, home):
+    from assetizer import db, knobs
+    assert knobs.get("worker_slots") == 1 and knobs.get("download_slots") == 2 and knobs.get("digest_hour") == 9
+    r = cc_api.post("/api/knobs", json={"worker_slots": 3, "download_slots": 9})
+    assert r.status_code == 400 and r.json()["field"] == "download_slots"
+    assert db.setting("worker_slots") is None  # nothing written when one value is wrong
+    r = cc_api.post("/api/knobs", json={"worker_slots": 3, "backfill_min_weekly": 0.5, "llm_provider": "agy",
+                                        "stage_providers": {"knowledge": "magpie", "article": "agy"}})
+    assert r.status_code == 200, r.text
+    assert r.json()["worker_slots"] == 3 and r.json()["backfill_min_weekly"] == 0.5
+    assert db.setting("stage_providers") == {"knowledge": "magpie"}  # a stage sent to the default needs no entry
+    assert "同时印 1 → 3" in db.one("SELECT message FROM events WHERE kind='config' ORDER BY id DESC")["message"]
+    assert cc_api.post("/api/knobs", json={"worker_slots": None}).json()["worker_slots"] == 1
+    assert cc_api.post("/api/knobs", json={"nope": 1}).status_code == 400
+    assert cc_api.post("/api/knobs", json={"digest_hour": 7.5}).status_code == 400
+    db.set_setting("download_slots", 40)  # what `set` may have stored
+    db.set_setting("playback_max_gb", "lots")
+    assert knobs.get("download_slots") == 4 and knobs.get("playback_max_gb") == 5.0
+    assert cc_api.get("/api/engine").json()["knobs"]["download_slots"] == 4
+
+
+def test_download_gate_follows_its_limit_while_running(home):
+    import threading
+    import time
+    from assetizer import db
+    from assetizer.pipeline.acquire import _Gate
+    from assetizer import knobs
+    db.set_setting("download_slots", 1)
+    gate = _Gate(lambda: knobs.get("download_slots"))
+    entered = threading.Event()
+    gate.__enter__()
+
+    def second():
+        with gate:
+            entered.set()
+
+    t = threading.Thread(target=second)
+    t.start()
+    time.sleep(0.2)
+    assert not entered.is_set()  # one slot, taken
+    db.set_setting("download_slots", 2)
+    with gate.cv:
+        gate.cv.notify_all()  # in production the waiter looks again within 30 s
+    assert entered.wait(2)
+    gate.__exit__(None, None, None)
+    t.join(2)
+    assert gate.n == 0
+
+
+@pytest.fixture
+def gpu_box():
+    """A stand-in for scripts/gpu_asr/server.py: /healthz, and /transcribe that checks the token before the body."""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def _reply(self, code, body):
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            self._reply(200, {"ok": True, "model": "large-v3-turbo", "loaded": False})
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            ok = self.headers.get("Authorization") == "Bearer right-token"
+            self._reply(400 if ok else 401, {"error": "empty" if ok else "bad token"})
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def test_gpu_asr_is_set_write_only_and_tested_without_audio(cc_api, home, gpu_box, monkeypatch):
+    from assetizer import db
+    monkeypatch.delenv("ASSETIZER_ASR_TOKEN", raising=False)
+    assert cc_api.post("/api/asr", json={"url": "not a url"}).status_code == 400
+    r = cc_api.post("/api/asr", json={"url": gpu_box + "/", "token": "wrong-token"})
+    assert r.status_code == 200 and "wrong-token" not in r.text
+    assert r.json()["url"] == gpu_box and r.json()["token"] is True
+    assert (home / "secrets" / "asr-token").stat().st_mode & 0o777 == 0o600
+    r = cc_api.post("/api/asr/test", json={})
+    assert r.status_code == 200, r.text
+    t = r.json()["test"]
+    assert not t["ok"] and t["code"] == "BAD_TOKEN"
+    cc_api.post("/api/asr", json={"token": "right-token"})
+    assert db.setting("asr_state") is None  # a new token: the last test no longer says anything
+    monkeypatch.setattr(web_app(), "_throttle_at", {})
+    t = cc_api.post("/api/asr/test", json={}).json()["test"]
+    assert t["ok"] and t["model"] == "large-v3-turbo"
+    r = cc_api.post("/api/asr", json={"clear": ["url", "token"]}).json()
+    assert r["url"] is None and r["token"] is False and not (home / "secrets" / "asr-token").exists()
+
+
+def web_app():
+    from assetizer.web import app as web
+    return web
+
+
+def test_telegram_token_is_write_only_and_a_new_bot_forgets_the_chat(cc_api, home, monkeypatch):
+    from assetizer import db
+    for n in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        monkeypatch.delenv("ASSETIZER_" + n, raising=False)
+    r = cc_api.post("/api/telegram", json={"token": "nonsense-value"})
+    assert r.status_code == 400 and "nonsense-value" not in r.text
+    (home / "secrets").mkdir(exist_ok=True)
+    (home / "secrets" / "telegram-chat-id").write_text("42")
+    db.set_setting("telegram_chat", {"chat": "old"})
+    token = "123456:" + "A" * 35
+    r = cc_api.post("/api/telegram", json={"token": token})
+    assert r.status_code == 200 and token not in r.text
+    assert r.json() == {"token": True, "chat": False, "linked": None, "digest_hour": 9}
+    assert (home / "secrets" / "telegram-bot-token").read_text() == token
+    assert cc_api.post("/api/telegram", json={"clear": ["token"]}).json()["token"] is False
+
+
+def test_notion_default_page_moves_the_assetizer_database(cc_api, home, monkeypatch):
+    from assetizer import db
+    from assetizer.web import app as web
+
+    class FakeNotion:
+        def _req(self, method, path, **kw):
+            assert (method, path) == ("GET", "/pages/01234567-89ab-cdef-0123-456789abcdef")
+            return {"properties": {"Name": {"type": "title", "title": [{"plain_text": "收件箱"}]}}}
+
+    monkeypatch.setattr(web, "_notion", lambda: FakeNotion())
+    db.set_setting("notion_database_id", "old-db")
+    r = cc_api.post("/api/notion/default", json={"parent": "https://www.notion.so/x-0123456789abcdef0123456789abcdef"})
+    assert r.status_code == 200 and r.json()["title"] == "收件箱"
+    assert db.setting("notion_parent_page_id") == "01234567-89ab-cdef-0123-456789abcdef"
+    assert db.setting("notion_database_id") is None  # made again under the new page at the next delivery
+    assert cc_api.post("/api/notion/default", json={"parent": "no link"}).status_code == 400

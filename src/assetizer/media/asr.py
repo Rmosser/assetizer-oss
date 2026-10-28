@@ -25,6 +25,7 @@ import signal
 import subprocess
 import sys
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -114,6 +115,32 @@ class RemoteWhisper:
                                 words=[SimpleNamespace(**w) for w in s["words"]]) for s in body["segments"]]
         return segs, SimpleNamespace(language=body.get("language"))
 
+
+
+def probe(url: str, token: str | None) -> dict:
+    """The 机房 test of the GPU box (scripts/gpu_asr/server.py): does it answer, and does it take our token? No audio
+    is sent: an empty body is refused after the token check, 401 for a wrong token and 400 otherwise."""
+    from ..util import now
+
+    url = url.rstrip("/")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # on the LAN, not through Clash
+    out: dict = {"ok": False, "at": now(), "url": url}
+    try:
+        with opener.open(url + "/healthz", timeout=5) as r:
+            health = json.load(r)
+        req = urllib.request.Request(url + "/transcribe", data=b"", method="POST")
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        try:
+            opener.open(req, timeout=5).close()
+            code = 200
+        except urllib.error.HTTPError as e:
+            code = e.code
+    except (OSError, ValueError) as e:  # the error text is left out: it would repeat the address, nothing more
+        return {**out, "code": "UNREACHABLE", "detail": type(e).__name__}
+    if code == 401:
+        return {**out, "code": "BAD_TOKEN", "model": health.get("model")}
+    return {**out, "ok": True, "code": "OK", "model": health.get("model"), "loaded": bool(health.get("loaded"))}
 
 def _command(wav: Path, out: Path, offset: float, language: str | None, initial_prompt: str | None) -> list[str]:
     cmd = [sys.executable, "-m", CHILD, str(wav), str(out), "--offset", repr(offset)]

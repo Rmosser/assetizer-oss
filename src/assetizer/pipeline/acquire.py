@@ -6,15 +6,34 @@ import shutil
 import threading
 from pathlib import Path
 
-from .. import config, db, youtube
+from .. import config, db, knobs, youtube
 from ..media import ffmpeg
 from ..util import fmt_tc, now, read_json, sha256_file, write_json
 from .context import RunContext, Waiting
 
+class _Gate:
+    """At most `limit()` holders at once. The limit is read on every wait, so a change made in the 机房 applies to
+    the next download (a download under way is never cut off when it is lowered)."""
+
+    def __init__(self, limit):
+        self.limit, self.n, self.cv = limit, 0, threading.Condition()
+
+    def __enter__(self):
+        with self.cv:
+            while self.n >= self.limit():
+                self.cv.wait(timeout=30)  # the other process (web) may have raised the limit: look again
+            self.n += 1
+
+    def __exit__(self, *exc):
+        with self.cv:
+            self.n -= 1
+            self.cv.notify_all()
+
+
 # Parallel runs share one egress: 7 downloads at once through it got their TLS connections cut mid-stream
 # ("UNEXPECTED_EOF_WHILE_READING", 5 of 7 failed, prodbox 2026-10-25), so downloads queue here while the rest
-# of each run goes on in parallel.
-DOWNLOADS = threading.BoundedSemaphore(2)
+# of each run goes on in parallel: setting `download_slots` (1–4, default 2).
+DOWNLOADS = _Gate(lambda: knobs.get("download_slots"))
 
 
 def resolve(ctx: RunContext) -> dict:

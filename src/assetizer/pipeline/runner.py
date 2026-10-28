@@ -15,7 +15,7 @@ import time
 import traceback
 from pathlib import Path
 
-from .. import config, db, notify, youtube
+from .. import config, db, knobs, notify, youtube
 from ..llm import ContractError
 from .. import providers
 from ..providers.agy import ProviderError
@@ -486,10 +486,7 @@ def worker_slots() -> int:
     """How many runs the worker produces at once: setting `worker_slots` (1–16, default 1). A run is mostly waiting
     on agy (8 at once on prodbox peaked at 9.1 GB; 16 agy calls at once ran clean once the container proxy
     allowed enough connections, 2026-10-26) and whisper takes turns, so it is set per box to fit that box."""
-    try:
-        return max(1, min(16, int(db.setting("worker_slots") or 1)))
-    except (TypeError, ValueError):
-        return 1
+    return knobs.get("worker_slots")
 
 
 class Worker:
@@ -702,7 +699,7 @@ def retention() -> dict:
         # delivered issues are done with their media; tuning samples (never delivered) keep it for re-runs
         delivered = r["delivery"] == "DELIVERED" and r["delivered_at"]
         ref = r["delivered_at"] if delivered else r["updated_at"]
-        days = 2 if delivered else s.source_retention_days
+        days = knobs.get("delivered_retention_days" if delivered else "retention_days")
         try:
             age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(ref)).days
         except (TypeError, ValueError):

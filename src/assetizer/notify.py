@@ -20,7 +20,6 @@ from . import config, db
 
 API = "https://api.telegram.org/bot{token}/{method}"
 TZ = ZoneInfo("Asia/Shanghai")
-DIGEST_HOUR = 9  # local time of the daily digest
 LIMIT = 4000     # Telegram rejects messages over 4096 characters
 
 
@@ -145,7 +144,8 @@ def digest() -> str:
 
 def digest_due() -> bool:
     t = dt.datetime.now(TZ)
-    return t.hour >= DIGEST_HOUR and db.setting("digest_date") != t.date().isoformat()
+    from . import knobs
+    return t.hour >= knobs.get("digest_hour") and db.setting("digest_date") != t.date().isoformat()
 
 
 def send_digest() -> None:

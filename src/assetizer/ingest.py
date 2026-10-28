@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from . import config, db
+from . import config, db, knobs
 from .util import now
 
 NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
@@ -230,8 +230,6 @@ def scan(c: dict, cfg: dict) -> dict:
 
 
 # ---------------------------------------------------------------- 补录: a locked channel's older videos
-BACKFILL_MIN_WEEKLY = 0.3  # the production model's weekly quota left that 补录 never dips into (it is for new videos)
-BACKFILL_MIN_5H = 0.2      # and of its 5-hour window
 
 
 def enqueue_backfill(channel_id: str, videos: list[dict]) -> dict:
@@ -270,7 +268,10 @@ def backfill_held() -> str | None:
     if not (fresh and g):
         return None
     left = {b["window"]: b["remaining"] for b in g["buckets"] if not b["disabled"] and b["remaining"] is not None}
-    return "weekly" if left.get("weekly", 1) < BACKFILL_MIN_WEEKLY else "5h" if left.get("5h", 1) < BACKFILL_MIN_5H else None
+    # the share of each window 补录 never dips into: it is for new videos (settings backfill_min_weekly / _5h)
+    if left.get("weekly", 1) < knobs.get("backfill_min_weekly"):
+        return "weekly"
+    return "5h" if left.get("5h", 1) < knobs.get("backfill_min_5h") else None
 
 
 def dispatch_backfill() -> str | None:

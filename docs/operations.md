@@ -55,7 +55,7 @@
 lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <命令>
 ```
 
-常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（例如 `set worker_slots 2`；`set playback_max_gb 5` 是原片低清版的总量上限）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`。
+常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（机房卡片里能改的设置也可以这样写，键和范围见 `knobs.py`，例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`。
 
 队列由 worker 自动暂停和恢复（例如模型登录失效、读不了视频），不要手动设置 `queue_paused`；需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」，它们还会把等待中的运行重新排队、解除对应告警。agy 的登录告警例外：按钮不解除它，只在 agy 回答 `/usage` 时解除（恢复时会在后台问一次）；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
 
@@ -105,7 +105,7 @@ whisper 转写可以交给局域网里的 Windows 显卡机（RTX 4070 Ti，`192
 - **显卡机**：跑在 WSL Debian 13（`debian-gpu`，镜像网络模式，直接用 192.168.1.50）里，不在 Windows 原生环境里跑。同一段 59 分钟音频，WSL 用 39 秒，Windows 原生用 50 秒。`scripts/gpu_asr/server.py` 放在 `~/voice-lab/asr`，环境是 `~/voice-lab/envs/asr`（faster-whisper、nvidia-cublas-cu12、nvidia-cudnn-cu12 9），模型在 `~/voice-lab/models/hf`，令牌在 `~/voice-lab/asr/token`，监听 8790 端口。服务用 systemd 管理（`scripts/gpu_asr/assetizer-asr.service` → `/etc/systemd/system/`），日志用 `journalctl -u assetizer-asr` 查看。模型空闲 10 分钟后自动卸载，释放显存。
 - **常驻**：WSL 开了 systemd，`.wslconfig`（`%USERPROFILE%`）设了 `instanceIdleTimeout=-1` 和 `vmIdleTimeout=-1`，没有会话连着也不会关机；Windows 登录时，计划任务「WSL debian-gpu autostart」会启动发行版，服务随之起来。Windows 重启后如果没有人登录，WSL 不会启动，转写会退回 CPU。
 - **端口坑**：镜像网络下，WSL 和 Windows 共用端口。Windows 上 8790 只要还有残留连接（包括 TIME_WAIT），服务就绑定不上；systemd 会每 30 秒重试一次，大约 2 分钟后残留连接清掉就能起来。
-- **worker**：设置 `asr_url`（`set asr_url http://192.168.1.50:8790`），令牌放在 `secrets/asr-token`。切窗口、时间偏移和繁简转换仍在 worker 里做，每个约 15 分钟的窗口发一次请求。
+- **worker**：在机房的「GPU 转写」卡片里填地址（`http://192.168.1.50:8790`）和令牌，点「测试」：连得上、令牌对就通过，不发音频。设置是 `asr_url`，令牌存在 `secrets/asr-token`。状态灯「转写」显示上一期实际用的是 GPU 还是退回了 CPU。切窗口、时间偏移和繁简转换仍在 worker 里做，每个约 15 分钟的窗口发一次请求。
 - **回退**：显卡机关机、连不上或中途出错时，这一期改用本地 CPU 转写。`TRANSCRIBE` 阶段详情里的 `device` 记录实际用的是哪一个，回退时会附带 `remote_failed`。
 
 ## OVH（迁移前的部署）

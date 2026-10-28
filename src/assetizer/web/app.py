@@ -20,7 +20,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import config, db, playback
+from .. import config, db, knobs, playback
 from ..util import now
 
 app = FastAPI(title="Assetizer", docs_url="/api/docs")
@@ -454,7 +454,8 @@ def engine():
         "providers": _providers(), "slots": worker_slots(), "drain_seconds": _drain(),
         "counts": {k: counts[k] or 0 for k in ("running", "queued", "waiting")},
         "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
-                   "parent": db.setting("notion_parent_page_id")},
+                   "parent": db.setting("notion_parent_page_id"), "title": db.setting("notion_database_title", "课代表")},
+        "knobs": knobs.view(), "asr": _asr_view(), "telegram": _telegram_view(),
         "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
                     "profile_ok": bool(s.browser_profile and s.browser_profile.exists()), **_cookie_status()},
         "paused": db.setting("queue_paused"),
@@ -1709,6 +1710,167 @@ def resume():
     else:
         db.resolve_alert("AGY_AUTH_REQUIRED")
     return {"ok": True, "was": paused}
+
+
+# ------------------------------------------------------------------ 机房的盒子设置 (knobs.py, design §R6-7)
+@app.post("/api/knobs")
+async def knobs_save(request: Request):
+    """Partial update {key: value | null (default)}; the answer is every setting in effect."""
+    try:
+        body = json.loads(await request.body() or b"null")
+    except ValueError:
+        return JSONResponse({"detail": "请求体必须是 JSON 对象"}, status_code=400)
+    try:
+        return knobs.save(body)
+    except knobs.KnobError as e:
+        return JSONResponse({"detail": e.message, "field": e.key}, status_code=400)
+
+
+async def _secret_body(request: Request, fields: set[str]) -> dict | JSONResponse:
+    """A small JSON object of these fields plus `clear`; parsed by hand so a rejected value is never echoed."""
+    raw = await request.body()
+    if len(raw) > 4096:
+        return JSONResponse({"detail": "请求体太大"}, status_code=413)
+    try:
+        body = json.loads(raw or b"null")
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or set(body) - fields - {"clear"} or not all(
+            isinstance(body.get(f), (str, type(None))) for f in fields) or not isinstance(body.get("clear", []), list):
+        return JSONResponse({"detail": f"可用的字段是 {'、'.join(sorted(fields))}、clear"}, status_code=400)
+    return body
+
+
+def _put_secret(name: str, value: str | None) -> JSONResponse | None:
+    """Write (or with None remove) secrets/<name>; a 409 when an environment variable provides it instead."""
+    from ..cookies import _remove_secret, _write_secret
+    if os.environ.get(env := config.secret_env(name)):
+        return JSONResponse({"detail": f"由服务器环境变量 {env} 提供，这里改不了"}, status_code=409)
+    if value:
+        _write_secret(name, value)
+    else:
+        _remove_secret(name)
+    return None
+
+
+def _asr_view() -> dict:
+    """The GPU box: its address, whether a token is set (never the token), the last test, and which device the last
+    transcription actually used (a GPU box that is off falls back to the CPU without stopping the run)."""
+    s = config.get()
+    last = db.one("""SELECT detail, finished_at FROM stages WHERE name='TRANSCRIBE' AND status IN ('DONE','WARN')
+                     AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1""")
+    d = db.unj(last["detail"], {}) if last else {}
+    used = None
+    if d.get("device"):
+        used = {"device": "gpu" if str(d["device"]).startswith("remote") else "cpu",
+                "fell_back": bool(d.get("remote_failed")), "at": last["finished_at"]}
+    return {"url": knobs.get("asr_url"), "token": bool(s.secret("asr-token")), "test": db.setting("asr_state"), "last": used}
+
+
+@app.post("/api/asr")
+async def asr_save(request: Request):
+    """Set or clear the GPU box's address and token: {url?, token?, clear?: ["url", "token"]}. Write-only."""
+    body = await _secret_body(request, {"url", "token"})
+    if isinstance(body, JSONResponse):
+        return body
+    clear = set(body.get("clear") or [])
+    url, token = (body.get("url") or "").strip(), (body.get("token") or "").strip()
+    if not (url or token or clear):
+        return JSONResponse({"detail": "没有要修改的内容"}, status_code=400)
+    try:
+        if url or "url" in clear:
+            knobs.save({"asr_url": url or None})
+    except knobs.KnobError as e:
+        return JSONResponse({"detail": e.message, "field": "url"}, status_code=400)
+    if token or "token" in clear:
+        if busy := _put_secret("asr-token", token or None):
+            return busy
+    db.set_setting("asr_state", None)  # the last test was of the old address or token
+    if token or "token" in clear:
+        db.event("config", "GPU 转写令牌：" + ("已更新" if token else "已清除"))
+    return _asr_view()
+
+
+@app.post("/api/asr/test")
+def asr_test():
+    from ..media.asr import probe
+    url = knobs.get("asr_url")
+    if not url:
+        return JSONResponse({"detail": "还没有填 GPU 转写地址"}, status_code=400)
+    if busy := _throttled("asr", 5.0):
+        return busy
+    out = probe(url, config.get().secret("asr-token"))
+    db.set_setting("asr_state", out)
+    db.event("config", "测试 GPU 转写：通过" if out["ok"] else f"测试 GPU 转写没通过（{out['code']}）",
+             level="info" if out["ok"] else "warn")
+    return _asr_view()
+
+
+def _telegram_view() -> dict:
+    s = config.get()
+    return {"token": bool(s.secret("telegram-bot-token")), "chat": bool(s.secret("telegram-chat-id")),
+            "linked": db.setting("telegram_chat"), "digest_hour": knobs.get("digest_hour")}
+
+
+@app.post("/api/telegram")
+async def telegram_save(request: Request):
+    """Set or clear the bot token: {token?, clear?: ["token"]}. Write-only. A new bot needs its chat found again."""
+    body = await _secret_body(request, {"token"})
+    if isinstance(body, JSONResponse):
+        return body
+    token = (body.get("token") or "").strip()
+    if not token and "token" not in (body.get("clear") or []):
+        return JSONResponse({"detail": "没有要修改的内容"}, status_code=400)
+    if token and not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{30,}", token):
+        return JSONResponse({"detail": "bot token 的样子是「数字:一串字母数字」，在 @BotFather 里复制", "field": "token"}, status_code=400)
+    for name, v in (("telegram-bot-token", token or None), ("telegram-chat-id", None)):
+        if busy := _put_secret(name, v):
+            return busy
+    db.set_setting("telegram_chat", None)
+    db.event("config", "Telegram bot token：" + ("已更新" if token else "已清除"))
+    return _telegram_view()
+
+
+@app.post("/api/telegram/setup")
+def telegram_setup():
+    """Find the chat that last messaged the bot, keep it, send a test message (notify.setup)."""
+    from .. import notify
+    if busy := _throttled("telegram", 5.0):
+        return busy
+    try:
+        r = notify.setup()
+    except notify.SetupError as e:
+        return JSONResponse({"detail": str(e).replace("，再运行一次", "，再点一次")}, status_code=400)
+    db.set_setting("telegram_chat", {"bot": r["bot"], "chat": r["chat"], "test_sent": r["test_sent"], "at": now()})
+    db.event("config", f"Telegram 通知接到「{r['chat']}」" + ("" if r["test_sent"] else "，但测试消息没发出去"),
+             level="info" if r["test_sent"] else "warn")
+    return _telegram_view()
+
+
+class NotionDefault(BaseModel):
+    parent: str
+
+
+@app.post("/api/notion/default")
+def notion_default(body: NotionDefault):
+    """Where a video with no channel target goes: the 课代表 database under this page (delivery.ensure_database).
+    A new page means a new database there at the next delivery; pages already written stay where they are."""
+    from ..notion import mapping as M
+    try:
+        pid = M.norm_id(body.parent)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    n = _notion()
+    try:
+        page = n._req("GET", f"/pages/{pid}")
+    except Exception as e:  # noqa: BLE001 — NotionError, or the integration cannot see the page
+        raise HTTPException(400, f"读不到这个页面：先把 integration 加进它的 Connections（{type(e).__name__}）")
+    if db.setting("notion_parent_page_id") != pid:
+        db.set_setting("notion_parent_page_id", pid)
+        db.set_setting("notion_database_id", None)
+        db.set_setting("notion_schema", None)
+    db.event("notion", f"没有目标库的视频改写到「{_page_title(page) or pid}」下的课代表数据库")
+    return {"parent": pid, "title": _page_title(page)}
 
 
 # ------------------------------------------------------------------ SPA

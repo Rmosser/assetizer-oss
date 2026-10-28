@@ -1350,3 +1350,24 @@ button.chip:hover { border-color: var(--ink); color: var(--ink); }
 a.chip:hover { text-decoration: underline; }
 .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); cursor: pointer; }
 .chk input { margin: 0; }
+
+/* 机房 · the box's settings (components/Knobs.tsx) */
+.kn-line { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s3); margin-top: var(--s3); font: 13px var(--sans); color: var(--ink-2); }
+.kn-line > span:first-child { flex: 1 1 auto; min-width: 0; }
+.kn-step { display: inline-flex; align-items: center; border: 1px solid var(--rule-2); border-radius: 999px; }
+.kn-step button { width: 30px; height: 28px; font: 15px var(--sans); color: var(--ink-2); border-radius: 999px; }
+.kn-step button:not([disabled]):hover { color: var(--ink); background: var(--paper-2); }
+.kn-step button[disabled] { opacity: 0.3; }
+.kn-step b { min-width: 4.2em; text-align: center; font: 500 13px var(--sans); color: var(--ink); }
+.kn-form { display: grid; gap: var(--s2); margin-top: var(--s3); }
+.kn-form input { min-width: 0; height: 36px; padding: 0 12px; border: 1px solid var(--rule-2); border-radius: 6px; background: var(--paper); color: var(--ink); font: 13.5px var(--mono); outline: none; }
+.kn-form input:focus { border-color: var(--ink); }
+.kn-form input:disabled { background: var(--paper-2); color: var(--ink-3); }
+.kn-acts { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+.inst .sub.zhu { color: var(--zhu-ink); }
+.kn-route { margin-top: var(--s4); }
+.kn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); column-gap: var(--s6); }
+@media (pointer: coarse) {
+  .kn-step button { width: 44px; height: 40px; }
+  .kn-form input { height: 48px; font-size: 16px; }
+}

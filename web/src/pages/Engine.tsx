@@ -6,6 +6,7 @@ import { Cmd } from "../components/Cmd";
 import { CookieCloudSheet } from "../components/CookieCloud";
 import { about, big, Columns, HBars, hrs, Kpi, Meter, pct, Spark } from "../components/Figures";
 import { Fold } from "../components/Fold";
+import { AsrCard, asrLamp, DiskKnobs, NotionDefault, ParallelKnobs, Routing, TelegramCard, useKnobs } from "../components/Knobs";
 import { Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
@@ -188,8 +189,11 @@ function ChatGptCard({ q }: { q: any }) {
 
 /** One line of lamps; the details unfold. Folded only while every lamp is fine: something not set up or not working
  *  shows its details (and what sets it up) without a click. */
-function Lamps({ data, choice, setOpen, onCc }: { data: any; choice: boolean | null; setOpen: (v: boolean) => void; onCc: () => void }) {
+function Lamps({ data, choice, setOpen, onCc, reload }: { data: any; choice: boolean | null; setOpen: (v: boolean) => void; onCc: () => void; reload: () => void }) {
   const phone = useMedia("(max-width: 900px)");
+  const { save, err } = useKnobs(reload);
+  const kn = data.knobs;
+  const tg = data.telegram;
   const d = data.disk;
   const used = d.total - d.free;
   const pc = (x: number) => `${Math.max(0.4, (x / d.total) * 100)}%`;
@@ -204,9 +208,12 @@ function Lamps({ data, choice, setOpen, onCc }: { data: any; choice: boolean | n
   const nLamp = data.notion.token && (data.notion.database || data.notion.parent) ? "ok" : "idle";
   const nBig = data.notion.token ? (data.notion.database ? "已连接" : "待指定位置") : "未配置";
   const dLamp = d.free / d.total < 0.15 ? "bad" : "ok";
-  const items: [string, string, string][] = [["YouTube", ytLamp, ytBig], ["Notion", nLamp, nBig], ["磁盘", dLamp, `${bytes(d.free)} 可用`],
-    ["并行", "ok", `${data.slots} 槽`]];
-  const open = choice ?? items.some(([, lamp]) => lamp !== "ok");
+  const [aLamp, aBig] = asrLamp(data.asr);
+  const tLamp = tg.token && tg.chat ? "ok" : "idle";
+  // the last two are optional: not set up, they do not unfold the cards on their own (a failing test does)
+  const items: [string, string, string, boolean?][] = [["YouTube", ytLamp, ytBig], ["Notion", nLamp, nBig], ["磁盘", dLamp, `${bytes(d.free)} 可用`],
+    ["并行", "ok", `${data.slots} 槽`], ["转写", aLamp, aBig, true], ["通知", tLamp, tLamp === "ok" ? "已接通" : tg.token ? "待接通" : "未接", true]];
+  const open = choice ?? items.some(([, lamp, , optional]) => (optional ? lamp === "bad" : lamp !== "ok"));
   return (
     <section className="sys" aria-label="系统">
       <button className="sys-row" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -234,7 +241,8 @@ function Lamps({ data, choice, setOpen, onCc }: { data: any; choice: boolean | n
           </div>
           <div className="inst">
             <span className="label">Notion 交付</span>
-            <div className="sub">{data.notion.token ? (data.notion.database ? "写入课代表数据库；各频道的目标库在频道页设置" : "频道没有目标库时写入的位置未指定") : "没有放 Notion token"}</div>
+            <div className="sub">{data.notion.token ? (data.notion.database ? "写入课代表数据库；各频道的目标库在频道页设置" : data.notion.parent ? "第一次交付时在指定页面下建课代表数据库" : "频道没有目标库时写入的位置未指定") : "没有放 Notion token"}</div>
+            <NotionDefault n={data.notion} reload={reload} />
           </div>
           <div className="inst">
             <span className="label">磁盘</span>
@@ -249,8 +257,13 @@ function Lamps({ data, choice, setOpen, onCc }: { data: any; choice: boolean | n
               <span className="work">工作区 {bytes(d.runs)}</span>
               <span className="pk">素材包 {bytes(d.packages)}</span>
             </div>
+            <DiskKnobs kn={kn} save={save} />
           </div>
+          <ParallelKnobs kn={kn} save={save} />
+          <AsrCard a={data.asr} reload={reload} />
+          <TelegramCard tg={tg} save={save} reload={reload} />
         </div>
+        {err && <p className="err-line" role="alert">{err}</p>}
       </Fold>
     </section>
   );
@@ -343,6 +356,7 @@ export default function Engine() {
   const [reading, setReading] = useState(false);
   const [readErr, setReadErr] = useState<string | null>(null);
   const closeCc = useCallback(() => setCcOpen(false), []);
+  const { save: knobSave, err: knobErr } = useKnobs(reload);
   useRestoreScroll(!!data);
   useEffect(() => {
     const on = () => { reload(); stats.reload(); };
@@ -420,10 +434,11 @@ export default function Engine() {
           )}
           {inUse.includes("magpie") && <ChatGptCard q={q.magpie} />}
         </div>
-        {readErr && <p className="err-line" role="alert">{readErr}</p>}
+        <Routing kn={data.knobs} steps={MAIN_STEPS} label={STEP} save={knobSave} />
+        {(readErr || knobErr) && <p className="err-line" role="alert">{readErr || knobErr}</p>}
       </section>
 
-      <Lamps data={data} choice={sysOpen} setOpen={setSysOpen} onCc={() => setCcOpen(true)} />
+      <Lamps data={data} choice={sysOpen} setOpen={setSysOpen} onCc={() => setCcOpen(true)} reload={reload} />
 
       {stats.data ? <Stats s={stats.data} /> : null}
 

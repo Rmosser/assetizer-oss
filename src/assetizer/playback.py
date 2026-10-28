@@ -3,8 +3,9 @@
 
 只在调试期需要，所以滚动释放：
 - 样片所在频道定稿（样片随定稿写入 Notion）或样片被移出，就删；滚动生产的期数从不生成。
-- 样片 KEEP_DAYS 天没有动静（加入、试跑、播放）就删。
+- 样片 `playback_keep_days` 天（默认 KEEP_DAYS）没有动静（加入、试跑、播放）就删。
 - 总量超过设置 `playback_max_gb`（默认 MAX_GB）时，从最久没有动静的开始删。
+两个设置在机房的磁盘卡里改（knobs.py）。
 
 低清版从缓存的原片转码（不再向 YouTube 下载），原片已被清理的样片不生成。worker 每分钟调一次 tick()，
 一次只转一期，低优先级运行，失败只记事件、不影响生产。"""
@@ -18,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config, db
+from . import config, db, knobs
 from .media import ffmpeg
 
 KEEP_DAYS = 14
@@ -54,10 +55,7 @@ def touch(p: Path) -> None:
 
 
 def max_bytes() -> float:
-    try:
-        return float(db.setting("playback_max_gb") or MAX_GB) * 1e9
-    except (TypeError, ValueError):
-        return MAX_GB * 1e9
+    return knobs.get("playback_max_gb") * 1e9
 
 
 def _ts(iso: str | None) -> float:
@@ -92,7 +90,7 @@ def _copies(want: dict[str, dict]) -> list[tuple[float, Path]]:
 
 
 def sweep() -> dict:
-    """Drop copies no longer wanted, idle past KEEP_DAYS, then the least recently active ones over the cap."""
+    """Drop copies no longer wanted, idle past `playback_keep_days`, then the least recently active ones over the cap."""
     d = folder()
     if not d.exists():
         return {"removed": 0}
@@ -101,7 +99,7 @@ def sweep() -> dict:
     if not _busy.locked():  # no encode running: a leftover part file is from a killed worker
         for p in d.glob(".*.part.mp4"):
             p.unlink(missing_ok=True)
-    cutoff = time.time() - KEEP_DAYS * 86400
+    cutoff = time.time() - knobs.get("playback_keep_days") * 86400
     keep = []
     for a, p in _copies(want):
         if p.stem not in want or a < cutoff:

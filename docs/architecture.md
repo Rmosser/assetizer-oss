@@ -30,7 +30,7 @@ CLEANUP                                                     非阻塞
 
 - 每个阶段写检查点；worker 重启（升级、崩溃）后从断点继续，进行中的模型调用会重来。
 - 运行状态：`QUEUED → RUNNING → COMPLETE | COMPLETE_PARTIAL | FAILED | CANCELLED`（例如自动收录的视频短于最短时长），或 `WAITING`（等登录、等网络、等直播结束、等磁盘等，原因在 `wait_reason`；YouTube 登录、磁盘、直播、网络这几类每 30 分钟重新排队一次，模型登录恢复后整体继续）。
-- 同时生产几期由设置 `worker_slots` 决定（1–16，默认 1；`python -m assetizer.cli set worker_slots 2`）。
+- 同时生产几期由设置 `worker_slots` 决定（1–16，默认 1），同时下载几个由 `download_slots` 决定（1–4，默认 2）；都在机房的「并行」卡片里改。盒子级设置的读法与范围集中在 `knobs.py`：存在 `settings` 表里、用到时才读，所以改了不用重启；超出范围的值按最近的边界读。
 - 模型调用经 `providers/agy.py`（agy CLI）；结构化输出合同在 `contracts/` 与 `llm.py`。
 
 ## 频道生命周期
