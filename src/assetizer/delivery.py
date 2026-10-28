@@ -200,10 +200,13 @@ class MappingProblem(RuntimeError):
     pass
 
 
-def check_target(n: Notion, source: dict, cfg: dict) -> dict:
-    """Live schema of the target database; raises MappingProblem (and alerts) if the mapping no longer fits."""
+def check_target(n: Notion, source: dict, cfg: dict) -> tuple[dict, dict]:
+    """Live schema of the target database and the mapping synced with it (renamed properties and options followed,
+    and stored); raises MappingProblem (and alerts) if the mapping no longer fits."""
     ch = db.one("SELECT id, name FROM channels WHERE id=?", source["channel_id"])
     schema = M.schema_of(n._req("GET", f"/databases/{cfg['database_id']}"))
+    cfg = M.sync(cfg, schema)
+    M.refresh(ch["id"], cfg["database_id"], schema)
 
     def page_ok(pid: str) -> bool:
         try:
@@ -219,7 +222,7 @@ def check_target(n: Notion, source: dict, cfg: dict) -> dict:
                        {"label": "去频道页调整", "href": "/channels"})
         raise MappingProblem("；".join(probs.values()))
     db.resolve_alert(akey)
-    return schema
+    return schema, cfg
 
 
 def registered(n: Notion, cfg: dict, schema: dict, video_id: str, exclude: tuple = ()) -> dict | None:
@@ -324,7 +327,7 @@ def deliver(source_id: str) -> dict:
     try:
         target = target_for(source)
         if target:
-            schema = check_target(n, source, target)
+            schema, target = check_target(n, source, target)
             database = target["database_id"]
             ch = db.one("SELECT * FROM channels WHERE id=?", source["channel_id"])
             make_props = lambda: M.properties(target, schema, M.context(  # noqa: E731

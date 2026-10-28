@@ -262,6 +262,23 @@ LIB = {"properties": {
 }}
 
 
+def _option_ids(lib: dict, prefix: str = "id-") -> dict:
+    """``lib`` as Notion returns it: every option carries an id."""
+    out = json.loads(json.dumps(lib))
+    for p in out["properties"].values():
+        for o in p.get(p["type"], {}).get("options", []):
+            o["id"] = prefix + o["name"]
+    return out
+
+
+def _rename_option(lib: dict, prop: str, old: str, new: str) -> dict:
+    out = json.loads(json.dumps(lib))
+    for o in out["properties"][prop]["select"]["options"]:
+        if o["name"] == old:
+            o["name"] = new
+    return out
+
+
 def test_preset_maps_by_name_and_follows_renames():
     from assetizer.notion import mapping as M
     schema = M.schema_of(LIB)
@@ -288,6 +305,41 @@ def test_mapping_problems_pause_instead_of_writing_wrong():
     bad_tpl = {**cfg, "properties": {**cfg["properties"], "title": {**cfg["properties"]["title"], "value": "{nope}"}}}
     assert "nope" in M.problems(bad_tpl, schema)["title"]
     assert "标题属性必须配置" in M.problems({"properties": {}}, schema)["title"]
+
+
+def test_renamed_options_are_followed_by_option_id():
+    from assetizer.notion import mapping as M
+    lib = _option_ids(LIB)
+    cfg = M.preset("trader-tom", "lib", M.schema_of(lib), "0000000500008000a000000000000005")
+    assert cfg["properties"]["own"]["option_ids"] == {"@交易员汤姆": "id-@交易员汤姆"}
+    assert cfg["properties"]["acc"]["option_ids"]["会员视频"] == "id-会员视频"
+    # renamed in Notion: the property, its fixed option and one cell of the 会员/公开 table
+    renamed = _rename_option(_rename_option(lib, "内容所属", "@交易员汤姆", "Tom"), "会员/公开", "会员视频", "会员")
+    renamed["properties"]["作者"] = renamed["properties"].pop("内容所属")
+    schema = M.schema_of(renamed)
+    assert set(M.problems(cfg, schema)) == {"own", "acc"}  # by name alone both would look gone
+    s = M.sync(cfg, schema)
+    assert s["properties"]["own"] == {"name": "作者", "type": "select", "source": "fixed", "value": "Tom",
+                                      "option_ids": {"Tom": "id-@交易员汤姆"}}
+    assert M.problems(s, schema) == {} and M.sync(s, schema) == s
+    assert M.payload("select", M.value(s["properties"]["own"], {})) == {"select": {"name": "Tom"}}
+    assert M.value(s["properties"]["acc"], {"access": "member_video"}) == "会员"
+    # an option deleted in Notion is a problem again; its id is kept in case it comes back
+    deleted = json.loads(json.dumps(renamed))
+    deleted["properties"]["作者"]["select"]["options"] = [o for o in deleted["properties"]["作者"]["select"]["options"] if o["name"] != "Tom"]
+    d = M.sync(s, M.schema_of(deleted))
+    assert d["properties"]["own"]["option_ids"] == {"Tom": "id-@交易员汤姆"}
+    assert "没有选项「Tom」" in M.problems(d, M.schema_of(deleted))["own"]
+    # a config saved before option ids is pinned by name
+    legacy = M.preset("trader-tom", "lib", M.schema_of(LIB), "0000000500008000a000000000000005")
+    assert "option_ids" not in legacy["properties"]["own"]
+    assert M.sync(legacy, M.schema_of(lib))["properties"]["own"]["option_ids"] == {"@交易员汤姆": "id-@交易员汤姆"}
+    # multi-select: each option followed, a name picked in the card pinned, ids of options no longer picked let go
+    multi = {"properties": {"tag": {"name": "标签", "type": "multi_select", "source": "fixed", "value": ["A", "C"],
+                                    "option_ids": {"A": "1", "B": "2"}}}}
+    tag = {"tag": {"name": "标签", "type": "multi_select", "options": ["A2", "B", "C"], "option_ids": {"1": "A2", "2": "B", "3": "C"}}}
+    assert M.sync(multi, tag)["properties"]["tag"] == {"name": "标签", "type": "multi_select", "source": "fixed",
+                                                       "value": ["A2", "C"], "option_ids": {"A2": "1", "C": "3"}}
 
 
 def test_properties_payload_for_tom():
@@ -402,6 +454,25 @@ def test_broken_mapping_blocks_delivery_with_alert(home, monkeypatch):
     assert all(m == "GET" for m, _ in calls)  # nothing was written
     # paused sources are not retried every loop
     assert delivery.deliver_pending() is False and len(calls) == 1
+
+
+def test_delivery_follows_a_renamed_option_and_stores_it(home):
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    _preview_fixture(home)
+    lib = _option_ids(LIB)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(lib), "0000000500008000a000000000000005"))
+    renamed = _rename_option(lib, "内容所属", "@交易员汤姆", "Tom")
+    source = db.one("SELECT * FROM sources WHERE id='s1'")
+    schema, cfg = delivery.check_target(FakeNotion(renamed), source, M.get("trader-tom"))
+    assert M.payload("select", M.value(cfg["properties"]["own"], {})) == {"select": {"name": "Tom"}}
+    assert M.get("trader-tom")["properties"]["own"]["value"] == "Tom"  # stored, so the channel page shows it too
+    assert not db.one("SELECT 1 FROM alerts WHERE key='notion-mapping:trader-tom' AND resolved_at IS NULL")
+    # a config moved to another database meanwhile is left as it is
+    M.save("trader-tom", {**M.get("trader-tom"), "database_id": "other"})
+    before = M.get("trader-tom")
+    M.refresh("trader-tom", "lib", M.schema_of(_rename_option(renamed, "内容所属", "Tom", "汤姆")))
+    assert M.get("trader-tom") == before
 
 
 def test_video_already_in_library_is_registered_not_written(home, monkeypatch):
@@ -1925,6 +1996,42 @@ def _preview_fixture(home):
     return aid
 
 
+def test_channel_page_shows_a_renamed_option_by_its_new_name(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import preview as PV
+    from assetizer.notion import mapping as M
+    from assetizer.web import app as web
+    _preview_fixture(home)
+    lib = _option_ids(LIB)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(lib), "0000000500008000a000000000000005"))
+    monkeypatch.setattr(web, "_notion", lambda: FakeNotion(_rename_option(lib, "内容所属", "@交易员汤姆", "Tom")))
+    PV.forget()
+    r = TestClient(web.app).get("/api/channels/trader-tom/notion", headers={"host": "127.0.0.1"}).json()
+    row = next(x for x in r["rows"] if x["id"] == "own")
+    assert row["mapping"]["value"] == "Tom" and row["problem"] is None and r["problems"] == 0
+    assert M.get("trader-tom")["properties"]["own"]["value"] == "Tom"
+
+
+def test_notion_preview_reads_notion_again_when_there_are_no_card_edits(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import preview as PV
+    from assetizer.web import app as web
+    _preview_fixture(home)
+    n = FakeNotion()
+    monkeypatch.setattr(web, "_notion", lambda: n)
+    PV.forget()
+    c, h, url = TestClient(web.app), {"host": "127.0.0.1"}, "/api/channels/trader-tom/notion/preview"
+    edits = {"run_id": "r1", "config": {"template": "reading-guide"}}
+    assert c.post(url, json=edits, headers=h).json()["problems"] == {}
+    n.schema = _rename_option(LIB, "内容所属", "@交易员汤姆", "Tom")  # no option id to follow: the option is gone
+    assert c.post(url, json=edits, headers=h).json()["problems"] == {}  # card edits go by the cached copy
+    assert "own" in c.post(url, json={"run_id": "r1"}, headers=h).json()["problems"]  # opening the page reads Notion
+    assert "own" in c.post(url, json=edits, headers=h).json()["problems"]  # ...and refreshes that copy
+    n.schema = LIB
+    c.get("/api/channels/trader-tom/notion", headers=h)  # so does reading the settings
+    assert c.post(url, json=edits, headers=h).json()["problems"] == {}
+
+
 def test_notion_preview_renders_unsaved_edits_from_one_run_and_never_writes(home, monkeypatch):
     from fastapi.testclient import TestClient
     from assetizer import preview as PV
@@ -2260,7 +2367,35 @@ def test_retarget_carries_mappings_by_name_and_asks_to_repick_relations(home, mo
     assert set(cfg["properties"]) == {"title2", "own2", "acc2", "date2", "up2", "sum2", "vl2"}
     assert "value" not in cfg["properties"]["up2"] and r["repick"] == ["Re-上级 项目"] and r["test_copy"] is False
     assert db.one("SELECT delivery FROM sources WHERE id='s1'")["delivery"] == "NOT_STARTED"
+    assert r["dropped"] == []
     assert now()  # keeps the import used
+
+
+def test_retarget_goes_by_current_names_and_names_what_it_drops(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import preview as PV
+    from assetizer.notion import mapping as M
+    from assetizer.web import app as web
+    _preview_fixture(home)
+    old = _option_ids(LIB)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(old), "0000000500008000a000000000000005"))
+    # renamed in the old database after the mapping was saved; the new one already has the new name, no AI 摘要
+    old["properties"]["作者"] = old["properties"].pop("内容所属")
+    new = _option_ids({"properties": {name: {**p, "id": p["id"] + "2"} for name, p in old["properties"].items() if name != "AI 摘要"}}, "new-")
+
+    class Two(FakeNotion):
+        def _req(self, method, path, idempotent=None, **kw):
+            if method == "GET" and path == "/databases/11111111-2222-3333-4444-555555555555":
+                return {"id": "11111111-2222-3333-4444-555555555555", "url": "u", "title": [{"plain_text": "测试副本"}], **new}
+            return super()._req(method, path, idempotent, **kw)
+    monkeypatch.setattr(web, "_notion", lambda: Two(old))
+    PV.forget()
+    r = TestClient(web.app).post("/api/channels/trader-tom/notion/target", headers={"host": "127.0.0.1"},
+                                 json={"database": "11111111-2222-3333-4444-555555555555", "is_test_copy": True}).json()
+    props = M.get("trader-tom")["properties"]
+    assert props["own2"] == {"name": "作者", "type": "select", "source": "fixed", "value": "@交易员汤姆",
+                             "option_ids": {"@交易员汤姆": "new-@交易员汤姆"}}  # pinned again in the new database
+    assert "sum2" not in props and r["dropped"] == ["AI 摘要"] and r["repick"] == ["Re-上级 项目"]
 
 
 def test_channels_report_paused_deliveries_and_recent_issues(home):

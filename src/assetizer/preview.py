@@ -38,8 +38,9 @@ def forget(prefix: str = "") -> None:
             del _cache[k]
 
 
-def database(n, database_id: str) -> dict:
-    return cached(f"db:{database_id}", lambda: n._req("GET", f"/databases/{database_id}"))
+def database(n, database_id: str, fresh: bool = False) -> dict:
+    """The database schema; ``fresh`` reads it now and refreshes the cached copy card edits are previewed against."""
+    return cached(f"db:{database_id}", lambda: n._req("GET", f"/databases/{database_id}"), ttl=0 if fresh else TTL)
 
 
 def page(n, page_id: str) -> dict | None:
@@ -72,7 +73,7 @@ def draft_config(saved: dict, draft: dict | None) -> dict:
                 continue  # 不填
             if m["source"] not in M.SOURCES:
                 raise ValueError(f"unknown source {m['source']}")
-            props[pid] = {k: m[k] for k in ("name", "type", "source", "value") if k in m}
+            props[pid] = {k: m[k] for k in ("name", "type", "source", "value", "option_ids") if k in m}
         out["properties"] = props
     if "template" in draft:
         if draft["template"] not in M.TEMPLATES:
@@ -217,6 +218,7 @@ def properties(n, cfg: dict, schema: dict, ctx: dict, probs: dict) -> list[dict]
 
 def build(n, dbo: dict, cfg: dict, channel: dict, source: dict, run_id: str) -> dict:
     schema = M.schema_of(dbo)
+    cfg = M.sync(cfg, schema)
     ctx = M.context(source, run_id, channel)
 
     def page_ok(pid: str) -> bool:

@@ -445,7 +445,10 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
       )}
       {target && (
         <TargetPicker cid={ch.id} current={nv?.database.id || null} onClose={() => setTarget(false)}
-          onDone={(v) => { setTarget(false); notionQ.setData(v); setDraft(null); reloadList(); flash(v.repick?.length ? `已换库 · 需要重选：${v.repick.join("、")}` : "已换库"); }} />
+          onDone={(v) => {
+            setTarget(false); notionQ.setData(v); setDraft(null); reloadList();
+            flash(["已换库", v.dropped?.length && `新库里没有：${v.dropped.join("、")}`, v.repick?.length && `需要重选：${v.repick.join("、")}`].filter(Boolean).join(" · "));
+          }} />
       )}
       {toastOut.shown && <Toast text={toastOut.shown.text} seal={toastOut.shown.seal} leaving={toastOut.leaving} />}
     </div>

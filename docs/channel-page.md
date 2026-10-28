@@ -82,11 +82,12 @@
 ## 4. Notion 预览
 
 - **与交付同源**：预览由 `preview.build()` 生成，正文复用交付用的同一套构建计划（`templates.PLANS[模板]` 或 `delivery._default_plan`，再加 `delivery._tail`），所以预览和真实写入一致。每个块带 `origin`（unit / intro / outro / frame / tail）、`unit_ids`、`asset_id`，供点亮和跳转使用。
-- **只读、带缓存**：库结构和关联页标题缓存 60 秒（`preview.cached`），预览请求不写 Notion。换库时清掉缓存；在 Notion 里改了库结构，最多 60 秒后反映到预览。
+- **只读、带缓存**：库结构和关联页标题缓存 60 秒（`preview.cached`），预览请求不写 Notion。换库时清掉缓存；打开频道页、保存后这类不带改动的请求会重新读 Notion 并刷新缓存，所以在 Notion 里改了库结构，刷新页面就能看到。
 - **未保存的改动也算**：卡片贰、叁、肆的编辑形成 draft，前端防抖 300 ms 后连同 draft 请求 `POST /api/channels/{cid}/notion/preview`（`preview.draft_config` 合并到已保存配置上）。有改动时底部浮出保存条，关闭或刷新页面时提醒；保存条在时，提示条浮在它上方，不压住「放弃 / 保存」。
-- **问题项**：属性类型变了、选项不存在、属性被删时，预览返回 `problems`；卡片叁在该行标朱红，交付暂停时自动展开它。报错文案在行内去掉已显示的属性名（`brief()`）。
+- **改名跟随**：映射按属性 id 存，写入的选项按选项 id 记在 `option_ids`（`mapping.sync`）；读到库结构时（打开频道页、交付前）按 id 换成 Notion 里的当前名字并存回。旧配置没有选项 id 的，第一次读到时按名字补上。
+- **问题项**：属性类型变了、选项被删、属性被删时，预览返回 `problems`；卡片叁在该行标朱红，交付暂停时自动展开它。报错文案在行内去掉已显示的属性名（`brief()`）。选不到的旧选项划掉显示，多选里点一下就能去掉。
 - **视频可播**：视频块点了才播交付要上传的那个片段文件（`/media/{asset_id}`），YouTube 内嵌块点了才加载内嵌播放器；同一页同时只播一个视频。
-- **换库**：卡片叁「换库」用 `GET /api/notion/databases` 列出 integration 能访问的数据库，`POST /api/channels/{cid}/notion/target` 切换。映射按属性名迁移，固定关联要重选，同时记下是否测试副本。列表里看不到某个库，说明它没有被加到这个 integration 的 Connections 里。
+- **换库**：卡片叁「换库」用 `GET /api/notion/databases` 列出 integration 能访问的数据库，`POST /api/channels/{cid}/notion/target` 切换。映射按属性在原库里的当前名字迁移，选项按名字在新库里重新记 id；新库里没有的属性和要重选的固定关联在换库后提示出来，同时记下是否测试副本。列表里看不到某个库，说明它没有被加到这个 integration 的 Connections 里。
 
 ## 5. 点亮与连线
 

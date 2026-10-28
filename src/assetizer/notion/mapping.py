@@ -4,13 +4,15 @@ A channel's config lives in the setting ``notion:{channel_id}``::
 
     {"database_id": "...", "template": "reading-guide", "heading": "{channel} - {date} …",
      "icon": "parent" | "none" | "<emoji>",
-     "properties": {"<property id>": {"name": "内容所属", "type": "select", "source": "fixed", "value": "@交易员汤姆"}}}
+     "properties": {"<property id>": {"name": "内容所属", "type": "select", "source": "fixed", "value": "@交易员汤姆",
+                                      "option_ids": {"@交易员汤姆": "<option id>"}}}}
 
-Mappings are keyed by the Notion property *id*, so renaming a property in Notion is
-followed automatically. A deleted property, a changed type, a select option that no
-longer exists or a related page that is gone is a *problem*: delivery for the channel
-pauses with an alert instead of writing the wrong thing. Properties without a mapping
-are simply left alone.
+Mappings are keyed by the Notion property *id* and the options they write are pinned by
+option id (``sync``), so renaming a property or an option in Notion is followed
+automatically. A deleted property, a changed type, a select option that no longer
+exists or a related page that is gone is a *problem*: delivery for the channel pauses
+with an alert instead of writing the wrong thing. Properties without a mapping are
+simply left alone.
 """
 from __future__ import annotations
 
@@ -52,6 +54,7 @@ ACCESS_DEFAULT = {"public_live": "公开直播", "member_live": "会员直播", 
 ACCESS_LABELS = {"public_live": "公开直播", "member_live": "会员直播", "public_video": "公开视频", "member_video": "会员视频"}
 NOT_WRITABLE = {"created_time", "last_edited_time", "created_by", "last_edited_by", "formula", "rollup",
                 "unique_id", "verification", "button", "people", "files", "email", "phone_number"}
+OPTION_TYPES = ("select", "multi_select", "status")
 
 # Initial mappings for the channels the user already keeps in 知识领袖长期追踪库, by property name
 # ("A|B": the first of these names the database has).
@@ -119,26 +122,41 @@ def preset(channel_id: str, database_id: str, schema: dict, parent: str | None) 
         if source == "access":
             m["value"] = dict(ACCESS_DEFAULT)
         props[pid] = m
-    return {"database_id": database_id, "template": p["template"], "heading": p["heading"], "icon": p["icon"],
-            "properties": props}
+    return sync({"database_id": database_id, "template": p["template"], "heading": p["heading"], "icon": p["icon"],
+                 "properties": props}, schema)
 
 
-def remap(cfg: dict, schema: dict) -> tuple[dict, list[str]]:
-    """Carry a channel's mappings over to another database by property name. A fixed relation points at pages of
-    the old database's world, so its value is dropped and the property named for the user to pick again."""
+def remap(cfg: dict, schema: dict) -> tuple[dict, list[str], list[str]]:
+    """Carry a channel's mappings over to another database by property name (``cfg`` synced with its own database
+    first, so a property renamed there goes by its current name). A fixed relation points at pages of the old
+    database's world, so its value is dropped and the property named for the user to pick again; option ids are the
+    old database's too, so options are pinned again by name. Returns the config, the relations to pick again and the
+    mapped properties the new database has no property of that name for."""
     by_name = {sp["name"]: (pid, sp) for pid, sp in schema.items()}
-    props, repick = {}, []
+    props, repick, dropped = {}, [], []
     for m in (cfg.get("properties") or {}).values():
         hit = by_name.get(m.get("name"))
         if not hit:
+            dropped.append(m.get("name"))
             continue
         pid, sp = hit
-        nm = {**m, "type": sp["type"]}
+        nm = {k: v for k, v in m.items() if k != "option_ids"} | {"type": sp["type"]}
         if sp["type"] == "relation" and m.get("source") == "fixed" and m.get("value"):
             nm.pop("value")
             repick.append(sp["name"])
         props[pid] = nm
-    return {**cfg, "properties": props}, repick
+    return sync({**cfg, "properties": props}, schema), repick, dropped
+
+
+def refresh(channel_id: str, database_id: str, schema: dict, **extra) -> None:
+    """Store the channel's config in step with ``schema`` read from ``database_id`` (plus ``extra``, e.g. the database
+    title). Re-reads the config first and leaves it if the channel has moved to another database meanwhile."""
+    cur = get(channel_id)
+    if not cur or cur.get("database_id") != database_id:
+        return
+    new = sync({**cur, **extra}, schema)
+    if new != cur:
+        save(channel_id, new)
 
 
 # --------------------------------------------------------------------------- schema
@@ -148,13 +166,58 @@ def schema_of(database: dict) -> dict:
     for name, p in database["properties"].items():
         t = p["type"]
         e = {"name": name, "type": t}
-        if t in ("select", "multi_select", "status"):
+        if t in OPTION_TYPES:
             e["options"] = [o["name"] for o in p[t].get("options", [])]
             e["colors"] = {o["name"]: o.get("color", "default") for o in p[t].get("options", [])}
+            e["option_ids"] = {o["id"]: o["name"] for o in p[t].get("options", []) if o.get("id")}
         if t == "relation":
             e["relation_db"] = p["relation"].get("database_id")
         out[p["id"]] = e
     return out
+
+
+def _map_options(m: dict, t: str, f) -> object:
+    """The mapping's value with ``f`` applied to each option name it writes (a fixed option or the 会员/公开 table)."""
+    v = m.get("value")
+    if t not in OPTION_TYPES:
+        return v
+    if m.get("source") == "fixed":
+        return list(dict.fromkeys(f(x) for x in v or [])) if t == "multi_select" else f(v) if v else v
+    if m.get("source") == "access":
+        return {k: f(x) if x else x for k, x in (v or {}).items()}
+    return v
+
+
+def sync(cfg: dict, schema: dict) -> dict:
+    """Follow what was renamed in Notion. Each mapping takes its property's current name, and each option it writes
+    goes by the option id pinned in ``option_ids`` (name → id; pinned by name the first time it is seen), so a renamed
+    option keeps being written. An option whose id is gone stays as it was for problems() to name."""
+    props = {}
+    for pid, m in (cfg.get("properties") or {}).items():
+        sp = schema.get(pid)
+        if not sp:
+            props[pid] = m
+            continue
+        nm = {**m, "name": sp["name"]}
+        if sp["type"] == m.get("type") and sp["type"] in OPTION_TYPES:
+            live = sp.get("option_ids") or {}
+            by_name = {name: oid for oid, name in live.items()}
+            pinned, seen = m.get("option_ids") or {}, {}
+
+            def follow(x: str) -> str:
+                oid = pinned.get(x) if pinned.get(x) in live else by_name.get(x)
+                if oid:
+                    seen[live[oid]] = oid
+                    return live[oid]
+                if x in pinned:
+                    seen[x] = pinned[x]  # deleted in Notion for now; keep the id in case it comes back
+                return x
+            nm["value"] = _map_options(m, sp["type"], follow)
+            nm.pop("option_ids", None)
+            if seen:
+                nm["option_ids"] = seen
+        props[pid] = nm
+    return {**cfg, "properties": props}
 
 
 def problems(cfg: dict, schema: dict, page_ok=lambda pid: True) -> dict[str, str]:

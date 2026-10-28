@@ -1343,7 +1343,7 @@ def _database(n, database_id: str, cached: bool = False) -> dict:
     from .. import preview as PV
     from ..notion.client import NotionError
     try:
-        return PV.database(n, database_id) if cached else n._req("GET", f"/databases/{database_id}")
+        return PV.database(n, database_id, fresh=not cached)
     except NotionError as e:
         from ..delivery import TOKEN_FIX, token_invalid
         if token_invalid(e):
@@ -1360,8 +1360,8 @@ def _notion_view(cid: str, cfg: dict) -> dict:
     dbo = _database(n, cfg["database_id"])
     schema = M.schema_of(dbo)
     title = "".join(t.get("plain_text", "") for t in dbo.get("title", []))
-    if title and cfg.get("database_title") != title:
-        M.save(cid, {**(M.get(cid) or cfg), "database_title": title})
+    cfg = M.sync(cfg, schema)
+    M.refresh(cid, cfg["database_id"], schema, **({"database_title": title} if title else {}))
     ch = db.one("SELECT * FROM channels WHERE id=?", cid)
     s = db.one("SELECT * FROM sources WHERE channel_id=? AND current_run_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1", cid)
     ctx = M.context(s, s["current_run_id"], ch) if s else None
@@ -1460,7 +1460,9 @@ def channel_notion_preview(cid: str, body: PreviewBody):
             return {"configured": True, "empty": True}
         run_id = source["current_run_id"]
     n = _notion()
-    return {"configured": True, **PV.build(n, _database(n, cfg["database_id"], cached=True), cfg, ch, source, run_id)}
+    # without card edits (opening the page, after saving) read Notion now; edits are previewed against that copy
+    dbo = _database(n, cfg["database_id"], cached=body.config is not None)
+    return {"configured": True, **PV.build(n, dbo, cfg, ch, source, run_id)}
 
 
 @app.get("/api/playbooks/{pid}/annotations")
@@ -1506,8 +1508,9 @@ class TargetBody(BaseModel):
 
 @app.post("/api/channels/{cid}/notion/target")
 def channel_notion_target(cid: str, body: TargetBody):
-    """Point a channel at another database (what `assetizer notion-target` does): mappings follow by property name,
-    a fixed relation is left for the user to pick again."""
+    """Point a channel at another database (what `assetizer notion-target` does): mappings follow by property name
+    (as the old database names them now), a fixed relation is left for the user to pick again, and mappings the new
+    database has no property for are named."""
     from .. import preview as PV
     from ..notion import mapping as M
     if not db.one("SELECT id FROM channels WHERE id=?", cid):
@@ -1521,9 +1524,14 @@ def channel_notion_target(cid: str, body: TargetBody):
     schema = M.schema_of(dbo)
     old = M.get(cid) or {}
     if old.get("properties"):
-        cfg, repick = M.remap(old, schema)
+        if old.get("database_id"):
+            try:
+                old = M.sync(old, M.schema_of(_database(n, old["database_id"])))
+            except HTTPException:
+                pass  # the old database is gone or shut out: carry over by the names last seen
+        cfg, repick, dropped = M.remap(old, schema)
     else:
-        cfg, repick = M.preset(cid, dbid, schema, body.parent_page_id), []
+        cfg, repick, dropped = M.preset(cid, dbid, schema, body.parent_page_id), [], []
     title = "".join(t.get("plain_text", "") for t in dbo.get("title", []))
     cfg.update(database_id=dbid, database_title=title, is_test_copy=body.is_test_copy)
     M.save(cid, cfg)
@@ -1531,7 +1539,7 @@ def channel_notion_target(cid: str, body: TargetBody):
     db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL
                WHERE channel_id=? AND delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%'""", cid)
     db.event("notion", f"「{cid}」的 Notion 目标换成「{title}」")
-    return {"configured": True, "repick": repick, **_notion_view(cid, cfg)}
+    return {"configured": True, "repick": repick, "dropped": dropped, **_notion_view(cid, cfg)}
 
 
 @app.get("/api/notion/pages")

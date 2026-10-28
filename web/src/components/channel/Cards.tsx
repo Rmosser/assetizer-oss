@@ -281,12 +281,17 @@ function Editor({ r, m, set, view, titles, addTitles, ctx }: {
           <button key={o} className={`optb${m.value === o ? " on" : ""}`} onClick={() => set({ ...m, value: o })}><Opt name={o} color={r.colors[o]} /></button>
         ))}{m.value && !(r.options || []).includes(m.value) && <span className="optb on"><Opt name={m.value} color="gone" /></span>}</div>
       )}
-      {m?.source === "fixed" && r.type === "multi_select" && (
-        <div className="opts">{(r.options || []).map((o) => {
-          const cur: string[] = m.value || [];
-          return <button key={o} className={`optb${cur.includes(o) ? " on" : ""}`} onClick={() => set({ ...m, value: cur.includes(o) ? cur.filter((x) => x !== o) : [...cur, o] })}><Opt name={o} color={r.colors[o]} /></button>;
-        })}</div>
-      )}
+      {m?.source === "fixed" && r.type === "multi_select" && (() => {
+        const cur: string[] = m.value || [];
+        const toggle = (o: string) => set({ ...m, value: cur.includes(o) ? cur.filter((x) => x !== o) : [...cur, o] });
+        return (
+          <div className="opts">{(r.options || []).map((o) => (
+            <button key={o} className={`optb${cur.includes(o) ? " on" : ""}`} onClick={() => toggle(o)}><Opt name={o} color={r.colors[o]} /></button>
+          ))}{cur.filter((o) => !(r.options || []).includes(o)).map((o) => (
+            <button key={`gone:${o}`} className="optb on" onClick={() => toggle(o)}><Opt name={o} color="gone" /></button>
+          ))}</div>
+        );
+      })()}
       {m?.source === "fixed" && r.type === "relation" && (
         <PagePicker db={r.relation_db} value={m.value || []} titles={titles} onChange={(v, t) => { addTitles(t); set({ ...m, value: v }); }} />
       )}

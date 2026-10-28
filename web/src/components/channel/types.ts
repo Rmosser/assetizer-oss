@@ -86,7 +86,7 @@ export type NotionView = {
   configured: boolean; database: { id: string; url: string; title: string }; config: { template: string; heading: string; icon: string };
   rows: NotionRow[]; problems: number; warnings: Record<string, string>; page_titles: Record<string, string | null>;
   templates: Record<string, string>; source_labels: Record<string, string>; template_vars: Record<string, string>; access_labels: Record<string, string>;
-  repick?: string[];
+  repick?: string[]; dropped?: string[];
 };
 export type Draft = { properties: Record<string, Mapping>; template: string; heading: string; icon: string };
 
