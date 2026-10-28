@@ -7,13 +7,36 @@ export type Playbook = {
   created_at: string; activated_at: string | null; rules: Rule[]; facets: Facet[]; audit: any; article_style?: string | null;
 };
 export type Prompt = { id: number; version: number; note: string | null; created_at: string; text: string; origin?: string | null };
-export type Ingest = { enabled?: boolean; min_minutes?: number; since?: string; last_poll?: string; every_minutes?: number };
+export type Scan = { at: string; found: number; queued: number; registered: number; have: number; short: number; error: string | null };
+export type Ingest = {
+  enabled?: boolean; min_minutes?: number; since?: string; last_poll?: string; every_minutes?: number; scans?: Scan[]; scanning?: boolean;
+  next_at?: string | null;  // the worker's next round over the channels
+};
+/** what a channel has produced (web/app.py _channel_stats) */
+export type ChannelStats = {
+  issues: number; month: number; last_month: number; units: number; clips: number; seconds: number; notes: number; tokens: number;
+  delivered: number; registered: number; failed: number; waiting: number; running: number; queued: number;
+  weeks: number[]; week_start: string;
+  last: { id: string; title: string | null; headline: string | null; published_at: string | null; delivery: string; finished_at: string | null } | null;
+};
 export type Channel = {
   id: string; name: string; stage: "TUNING" | "LOCKED"; mode: "TRACKED" | "DISCOVERY"; youtube_channel_id: string | null; why: string | null;
   playbooks: Playbook[]; prompts: Prompt[]; sources: number; last_source: string | null; ingest: Ingest;
-  notion: { configured: boolean; database_title?: string | null; template?: string | null };
+  notion: { configured: boolean; database_title?: string | null; template?: string | null; test_copy?: boolean };
   samples: number; samples_busy: number; compile: { state: "done" | "running" | "failed"; error?: string; since?: string } | null;
-  pending_playbook: number | null; blocked: number; held: number;
+  pending_playbook: number | null; blocked: number; held: number; stats: ChannelStats;
+};
+export type Board = {
+  stats: ChannelStats; issues: any[]; ingest: Ingest;
+  backfill: {
+    pending: number; seconds: number; running: { id: string; production: string; wait_reason: string | null; title: string | null } | null;
+    held: "weekly" | "5h" | null;  // the quota window that holds the waiting 补录 back
+  };
+  pace: number; runway: { per_issue: number; issues: number; remaining: number; reset_at: string | null } | null;
+};
+export type Candidate = {
+  id: string; title: string | null; published: string; duration?: number | null; approx?: boolean;
+  sample: boolean; produced: boolean; here: boolean; library: any; queued: boolean; short: boolean;
 };
 export type ChannelsResp = { channels: Channel[]; universal: Playbook | null; decisions: any[] };
 

@@ -21,6 +21,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import config, db
@@ -210,6 +211,8 @@ class MagpieProvider:
                    "thinking_tokens": (u.get("output_tokens_details") or {}).get("reasoning_tokens")},
         )
         write_text(call_dir / "response.txt", text)
+        if rate:  # the subscription's headroom as of this call, for the 机房 page
+            db.set_setting("magpie_quota", {"at": receipt["finished_utc"], **rate})
         if error:
             receipt.update(status="FAILED", error_class=error[0], error_excerpt=error[1][-1500:])
             write_json(receipt_path, receipt)
@@ -252,6 +255,34 @@ class MagpieProvider:
             return {**out, "error": e.kind}
         right = re.sub(r"\D", "", r.text) == code
         return {**out, "ok": right, "error": None if right else "WRONG_ANSWER"}
+
+
+def quota_view(q: dict | None) -> dict | None:
+    """The last `codex.rate_limits` (setting magpie_quota) as buckets shaped like agy's /usage. Codex reports a primary
+    and a secondary window, each with used_percent, window_minutes (300 = 5 hours, 10080 = a week) and resets_at (unix
+    seconds; older gateways: resets_in_seconds, counted from the call)."""
+    if not q:
+        return None
+    src = q["rate_limits"] if isinstance(q.get("rate_limits"), dict) else q
+    try:
+        at = datetime.fromisoformat(q["at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    buckets = []
+    for key in ("primary", "secondary"):
+        w = src.get(key)
+        if not isinstance(w, dict) or not isinstance(w.get("used_percent"), (int, float)):
+            continue
+        mins = w.get("window_minutes")
+        window = {300: "5h", 10080: "weekly"}.get(mins) or (f"{mins}m" if mins else "5h" if key == "primary" else "weekly")
+        reset = None
+        if isinstance(w.get("resets_at"), (int, float)):
+            reset = datetime.fromtimestamp(w["resets_at"], timezone.utc)
+        elif isinstance(w.get("resets_in_seconds"), (int, float)):
+            reset = at + timedelta(seconds=w["resets_in_seconds"])
+        buckets.append({"window": window, "remaining": max(0.0, min(1.0, 1 - w["used_percent"] / 100)),
+                        "reset_at": reset.isoformat(timespec="seconds") if reset else None, "disabled": False, "note": None})
+    return {"at": q["at"], "buckets": buckets} if buckets else None
 
 
 def _magpie_kind(code: int, detail: str) -> str:

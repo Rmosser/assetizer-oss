@@ -40,7 +40,8 @@ export const typeset = (s: string) => cjkPunct(s);
 const JOINT = new RegExp(`(?=[与及并](?=[${HAN}A-Za-z0-9]))|(?<=[的、：；，])|(?=[（「“《])|(?<=[）」”》])`, "gu");
 
 export function Words({ children }: { children: string }) {
-  const runs = typeset(children || "").split(JOINT).filter(Boolean);
+  // " · " between a title's parts: the dot stays with what is before it, so no line starts with it
+  const runs = typeset(children || "").replace(/ +· +/g, " · ").split(JOINT).filter(Boolean);
   return <span className="kw">{runs.map((r, i) => <Fragment key={i}>{i > 0 && <wbr />}{r}</Fragment>)}</span>;
 }
 

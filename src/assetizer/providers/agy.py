@@ -16,6 +16,7 @@ still be read the allowed way (pipeline.runner pauses production when not).
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import random
@@ -39,6 +40,7 @@ ARGV_LIMIT = 120_000
 # media self-test then pauses production, and its alert says which tool and parameters to add here.
 MEDIA_READ = {"view_file": "AbsolutePath", "read_file": "Path"}
 LIVE_PGIDS: set[int] = set()  # process groups of in-flight agy calls (killed on worker shutdown)
+USAGE_LOCK = threading.Lock()  # `agy -p /usage`: one at a time in a process
 # after an error step at a media read, how long agy gets to say why before it is stopped
 MEDIA_ERROR_GRACE = 30.0
 
@@ -75,6 +77,10 @@ _TRANSIENT_RE = re.compile(r"\b(429|500|502|503|504)\b|resource_exhausted|unavai
                            r"stream was interrupted", re.I)
 _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sign in again|invalid_grant|"
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
+# what a signed-out agy answers to `-p /usage` with stdin closed (1.2.16): "Error: authentication required. Run 'agy'
+# to log in" (its JSON adds "authentication failed or timed out", which a timeout says too: not enough on its own)
+_SIGNED_OUT = re.compile(r"authentication required|not (?:signed|logged) in|please (?:log|sign) ?in|sign in again|"
+                         r"invalid_grant|unauthenticated|re-?authenticate", re.I)
 
 
 _BENIGN_CMD = re.compile(r"\s*(ls(\s+-[a-zA-Z]+)*(\s+[./~\w-]+)*|pwd)\s*")
@@ -129,9 +135,9 @@ def gemini_schema(node: Any) -> Any:
     return out
 
 
-def _stop(pgid: int) -> None:
+def _stop(pgid: int, sig: int = signal.SIGTERM) -> None:
     try:
-        os.killpg(pgid, signal.SIGTERM)
+        os.killpg(pgid, sig)
     except ProcessLookupError:
         pass
 
@@ -435,6 +441,38 @@ class AgyProvider:
         except ProviderError as e:
             return {"ok": False, "error": e.kind, "checked_at": now()}
 
+    def usage(self) -> dict:
+        """Quota left on the signed-in account: `agy -p /usage` (alias /quota), which agy ≥ 1.1.11 answers by itself —
+        no turn, no quota spent (~10 s). stdin is an empty pipe on purpose: with a terminal or /dev/null there, a signed-out
+        agy starts its sign-in and waits 60 s for a pasted code; with a pipe it says so and exits."""
+        d = self.s.home / "health" / "agy-usage"
+        d.mkdir(parents=True, exist_ok=True)
+        out: dict[str, Any] = {"ok": False, "checked_at": now(), "version": self.version()}
+        # one at a time per process (the web container has 1–2 GB; agy here peaks near 200 MB)
+        with USAGE_LOCK:
+            try:
+                p = subprocess.Popen([self.s.agy_bin, "-p", "/usage", "--output-format", "json"], cwd=d, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                     env=dict(os.environ, GOGC="50", GOMEMLIMIT="384MiB"))
+            except OSError as e:
+                return {**out, "error": "PROVIDER_FAILURE", "detail": str(e)[:300]}
+            try:
+                stdout, stderr = p.communicate(input="", timeout=90)
+            except subprocess.TimeoutExpired:
+                _stop(p.pid, signal.SIGKILL)  # its whole group: agy and what it started
+                p.communicate()
+                return {**out, "error": "PROVIDER_TIMEOUT"}
+        try:
+            payload = json.loads(stdout.strip().splitlines()[-1]) if stdout.strip() else {}
+        except ValueError:
+            payload = {}
+        groups = parse_usage(payload) if payload.get("status") == "SUCCESS" else []
+        if not groups:
+            said = " ".join([str(payload.get("error") or ""), stderr[-1500:]])
+            kind = "AGY_AUTH_REQUIRED" if _SIGNED_OUT.search(said) else classify_error(said)
+            return {**out, "error": kind, "detail": said.strip()[-300:]}
+        return {**out, "ok": True, "groups": groups}
+
     def media_health(self) -> dict:
         """Can agy still read a video the way the watchdog allows, at the size proxies are made to? A 10-second clip with
         a random number in its middle, padded to just under VIEW_FILE_LIMIT: the answer must be that number, so the
@@ -461,6 +499,70 @@ class AgyProvider:
             return {**out, "error": e.kind, "tool": dev.get("tool"), "parameters": sorted(dev.get("parameters") or {})}
         right = re.sub(r"\D", "", r.text) == code
         return {**out, "ok": right, "tool": r.receipt.get("media_tool"), "error": None if right else "WRONG_ANSWER"}
+
+
+def parse_usage(payload: dict) -> list[dict]:
+    """The groups of `/usage` (models that share a 5-hour and a weekly limit), each bucket as
+    {window: "5h" | "weekly" | None, remaining: 0–1 | None, reset_at, disabled, note}. agy 1.2 sends them structured in
+    command.data; older answers only carry the tab-separated text (group, bucket, "42%" | "disabled", reset time)."""
+    def window(b: dict) -> str | None:
+        w = str(b.get("window") or "").lower()
+        name = str(b.get("name") or b.get("id") or "").lower()
+        if w in ("5h", "weekly"):
+            return w
+        return "5h" if "5h" in name or "five hour" in name else "weekly" if "week" in name else (w or None)
+
+    data = (payload.get("command") or {}).get("data") or {}
+    groups = []
+    for g in data.get("groups") or []:
+        buckets = []
+        for b in g.get("buckets") or []:
+            frac = b.get("remaining_fraction")
+            buckets.append({"window": window(b), "remaining": None if frac is None else max(0.0, min(1.0, float(frac))),
+                            "reset_at": b.get("reset_time") or None, "disabled": bool(b.get("disabled")),
+                            "note": b.get("description") or None})
+        if buckets:
+            groups.append({"name": g.get("name") or "", "models": g.get("description") or "", "buckets": buckets})
+    if groups:
+        return groups
+    by: dict[str, list[dict]] = {}
+    for line in str(payload.get("response") or "").splitlines():
+        cells = line.split("\t")
+        if len(cells) < 3:
+            continue
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*%\s*", cells[2])
+        b = {"window": window({"name": cells[1]}), "remaining": float(m[1]) / 100 if m else None,
+             "reset_at": (cells[3].strip() if len(cells) > 3 else "") or None, "disabled": cells[2].strip().lower() == "disabled",
+             "note": None}
+        by.setdefault(cells[0].strip(), []).append(b)
+    return [{"name": k, "models": "", "buckets": v} for k, v in by.items()]
+
+
+def quota_group(groups: list[dict], model: str) -> dict | None:
+    """The group production draws on: the one whose models include the configured model's family (Flash / Pro)."""
+    family = next((f for f in ("flash", "pro") if f in model.lower()), "")
+    gem = [g for g in groups if "gemini" in (g["name"] + g["models"]).lower()]
+    return next((g for g in gem if family and f"gemini {family}" in g["models"].lower()), None) or (gem[0] if gem else None)
+
+
+def record_usage(q: dict) -> dict:
+    """Keep the latest `/usage` answer (setting agy_quota) and, when it worked, a week of the production group's two
+    windows (agy_quota_log: [time, 5-hour left, weekly left]) for the trend on the 机房 page."""
+    from .. import config as _config, db
+    if q.get("ok"):
+        g = quota_group(q["groups"], _config.get().agy_model)
+        q = {**q, "production_group": g["name"] if g else None}
+        if g:
+            left = {b["window"]: (None if b["disabled"] else b["remaining"]) for b in g["buckets"]}
+            cut = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=8)).isoformat(timespec="seconds")
+            log = [x for x in (db.setting("agy_quota_log") or []) if x[0] >= cut]
+            db.set_setting("agy_quota_log", (log + [[q["checked_at"], left.get("5h"), left.get("weekly")]])[-1200:])
+        db.set_setting("agy_quota", q)
+    else:  # keep the last numbers that were read, say why this read failed
+        last = db.setting("agy_quota") or {}
+        db.set_setting("agy_quota", {**last, "ok": False, "error": q.get("error"), "detail": q.get("detail"),
+                                     "failed_at": q.get("checked_at")} if last.get("groups") else q)
+    return q
 
 
 def _canary_clip(path: Path, code: str, target_bytes: int) -> None:

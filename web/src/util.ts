@@ -85,6 +85,8 @@ export const WAIT: Record<string, string> = {
   DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "频道待定稿", LIVE_IN_PROGRESS: "直播未结束",
   AGY_MEDIA_READ: "agy 读不了视频", NETWORK: "网络中断，稍后重试",
 };
+/** the waits that stop production (vermilion); the others pass by themselves (a live still on air, the network) */
+export const STOPS = ["AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "YOUTUBE_AUTH", "DISK_LOW", "AGY_MEDIA_READ"];
 export const DELIVERY: Record<string, string> = {
   NOT_STARTED: "待交付", BLOCKED: "Notion 未配置", DELIVERING: "交付中", DELIVERED: "已入 Notion",
   STALE: "待更新", FAILED: "交付失败", REGISTERED: "库里已有",

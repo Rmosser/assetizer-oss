@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { post } from "../../api";
 import { navigate } from "../../router";
-import { hm, Icon } from "./bits";
+import { Icon, nextScan } from "./bits";
 import type { Channel, ChannelsResp } from "./types";
 
 export type Mode = "discovery" | "tuning" | "locked";
@@ -19,7 +19,7 @@ function status(c: Channel): { text: string; tone: "" | "ink" | "zhu" } {
 
 const ALERT_TEXT: Record<string, string> = { "notion-auth": "Notion 未连接", YOUTUBE_AUTH: "YouTube 需要登录", AGY_AUTH_REQUIRED: "模型需要登录", DISK_LOW: "磁盘空间不足" };
 
-function Avatar({ c, size = 38 }: { c: { name: string }; size?: number }) {
+export function Avatar({ c, size = 38 }: { c: { name: string }; size?: number }) {
   return <span className="ch-ava" style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden>{c.name.replace(/^[@＠]/, "").slice(0, 1)}</span>;
 }
 
@@ -43,6 +43,10 @@ export function Switcher({ list, current, children }: { list: ChannelsResp; curr
       </button>
       {open && (
         <div className="ch-swpop" role="menu">
+          <button role="menuitem" className="ch-swi q" onClick={() => { setOpen(false); navigate("/channels", { quiet: true }); }}>
+            <span className="nm">全部频道</span>
+          </button>
+          <div className="ch-swsep" />
           {list.channels.map((c) => {
             const s = status(c);
             return (
@@ -61,9 +65,9 @@ export function Switcher({ list, current, children }: { list: ChannelsResp; curr
   );
 }
 
-export function Header({ ch, list, alerts, testCopy, onLock, onRetune, lockVersion, reload }: {
+export function Header({ ch, list, alerts, testCopy, onLock, onRetune, lockVersion, reload, tabs }: {
   ch: Channel; list: ChannelsResp; alerts: string[]; testCopy: boolean; lockVersion: number | null;
-  onLock: () => void; onRetune: () => Promise<void>; reload: () => void;
+  onLock: () => void; onRetune: () => Promise<void>; reload: () => void; tabs?: React.ReactNode;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(ch.name);
@@ -78,7 +82,7 @@ export function Header({ ch, list, alerts, testCopy, onLock, onRetune, lockVersi
   };
   const ing = ch.ingest || {};
   const lamp = ch.blocked > 0 ? { text: `${ch.blocked} 期等待交付`, zhu: true }
-    : ing.enabled ? { text: `自动收录中${ing.last_poll ? ` · 下次 ${hm(ing.last_poll, ing.every_minutes || 30)}` : ""}`, zhu: false }
+    : ing.enabled ? { text: `自动收录中${nextScan(ing) ? ` · ${nextScan(ing)}` : ""}`, zhu: false }
     : { text: "自动收录已暂停", zhu: false };
   return (
     <header className="ch-head">
@@ -95,6 +99,7 @@ export function Header({ ch, list, alerts, testCopy, onLock, onRetune, lockVersi
       )}
       <span className={`ch-chip ${st.tone}`}>{st.text}</span>
       {!renaming && <button className="ch-icb ch-ren" aria-label="改频道名" onClick={() => setRenaming(true)}><Icon name="pen" size={14} /></button>}
+      {tabs}
       <div className="ch-acts">
         {(alerts.length > 0 || testCopy) && (
           <span className="ch-lamps">

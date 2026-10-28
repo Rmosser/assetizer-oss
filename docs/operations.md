@@ -57,7 +57,7 @@ lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <�
 
 常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（例如 `set worker_slots 2`；`set playback_max_gb 5` 是原片低清版的总量上限）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`。
 
-队列由 worker 自动暂停和恢复（例如模型登录失效、读不了视频），不要手动设置 `queue_paused`；需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」，它们还会把等待中的运行重新排队、解除对应告警。
+队列由 worker 自动暂停和恢复（例如模型登录失效、读不了视频），不要手动设置 `queue_paused`；需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」，它们还会把等待中的运行重新排队、解除对应告警。agy 的登录告警例外：按钮不解除它，只在 agy 回答 `/usage` 时解除（恢复时会在后台问一次）；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
 
 ## 凭据与登录
 
@@ -70,11 +70,14 @@ lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <�
   ```
 
   integration 必须被加到目标库（或其上级页面）的 Connections 里，频道页「换库」才看得到它。
-- **agy（模型）登录**：首页告警「模型登录已失效，生产已暂停」时，进 worker 容器运行 agy 完成 Google 登录；登录态和 agy 本身都在持久卷 `/lzcapp/var/assetizer/home` 里：
+- **agy（模型）登录**：首页或机房告警「模型登录已失效，生产已暂停」时，点告警上的「登录 agy」：web 在伪终端里启动 agy 的登录界面并选 Google OAuth，页面给出授权链接；在 Google 登录后，把授权页给出的授权码（或整段回调地址）贴回面板。登录态和 agy 本身都在持久卷 `/lzcapp/var/assetizer/home` 里，web 与 worker 共用；确认登录以 `agy -p /usage` 能回答为准，成功后告警解除、因登录暂停的队列继续。链接 10 分钟内有效，关掉面板不中止，重新打开会接上。网页登录不成时，进 worker 容器运行 agy：
 
   ```bash
   lzc-cli docker -- exec -it cloudlazycatappassetizer-worker-1 /lzcapp/var/assetizer/home/.local/bin/agy
   ```
+
+  网页只处理「没登录」的情况；agy 已登录时不会退出重登，换 Google 账号仍用上面的命令行（在 agy 里 `/logout` 再登录）。
+- **agy 额度**：`agy -p /usage --output-format json` 由 agy 自己回答，不开对话、不耗额度。worker 在 agy 在用时每 15 分钟读一次（设置 `agy_quota`、一周走势 `agy_quota_log`），机房的「刷新」立即读一次。ChatGPT（magpie）的额度取自最近一次调用回执里的 `codex.rate_limits`（设置 `magpie_quota`）。
 
 - **YouTube**：用 CookieCloud，在「机房」→「YouTube 会话」里按面板步骤配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)）。
 

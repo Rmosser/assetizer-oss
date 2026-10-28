@@ -33,6 +33,12 @@ export const hm = (iso?: string | null, addMinutes = 0) => {
   const d = new Date(new Date(iso).getTime() + addMinutes * 60000);
   return Number.isNaN(+d) ? "" : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
+/** when intake looks at the channels next: "下次 14:30", or how late the worker's round is (busy, or stopped) */
+export const nextScan = (ing: { next_at?: string | null }) => {
+  if (!ing.next_at) return "";
+  const late = (Date.now() - new Date(ing.next_at).getTime()) / 60000;
+  return late > 5 ? `扫描晚了 ${Math.round(late)} 分钟` : `下次 ${hm(ing.next_at)}`;
+};
 const CN = "零一二三四五六七八九十";
 export const cn = (n: number) => (n <= 10 ? CN[n] : n < 20 ? "十" + (n > 10 ? CN[n - 10] : "") : CN[Math.floor(n / 10)] + "十" + (n % 10 ? CN[n % 10] : ""));
 export const short = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);

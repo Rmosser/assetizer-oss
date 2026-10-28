@@ -14,6 +14,8 @@ import { Manuscript } from "../components/channel/Manuscript";
 import { done, Matrix, runFor, RunPending, type MatrixActions, type Want } from "../components/channel/Matrix";
 import { NotionPane, type PaneHead } from "../components/channel/NotionPane";
 import { SourcePane } from "../components/channel/SourcePane";
+import { Board } from "../components/channel/Board";
+import { Overview } from "../components/channel/Overview";
 import { DiscoveryBar, LockedBar } from "../components/channel/StateBars";
 import { Wires } from "../components/channel/Wires";
 import type {
@@ -82,16 +84,20 @@ function Universal({ list }: { list: ChannelsResp }) {
   );
 }
 
-/** 频道: one channel as a visible pipeline — the YouTube source, five setting cards, the Notion page they produce. */
+type Page = "board" | "studio";
+
+/** 频道: every channel (/channels), and one channel as its 看板 (/board, what a locked channel brings in) or as a visible
+ *  pipeline (/studio) — the YouTube source, five setting cards, the Notion page they produce. */
 export default function ChannelPage() {
   const path = usePath();
   const parts = path.split("/").filter(Boolean);
   const cidParam = parts[1] ? decodeURIComponent(parts[1]) : null;
+  const sub = parts[2] === "board" || parts[2] === "studio" ? parts[2] : null;
   const { data: list, error, loadedAt, reload } = usePoll<ChannelsResp>("/api/channels", 0);
   useEffect(() => {  // links to the old tabs land on the same content
-    if (!parts[2]) return;
-    const q = ({ prompt: "?view=manuscript", playbook: "?view=rules", settings: "?open=intake" } as Record<string, string>)[parts[2]] || "";
-    navigate(`/channels/${parts[1]}${q}`, { replace: true, quiet: true });
+    if (!parts[2] || sub) return;
+    const to = ({ prompt: "?view=manuscript", playbook: "?view=rules", settings: "/board" } as Record<string, string>)[parts[2]] || "";
+    navigate(`/channels/${parts[1]}${to}`, { replace: true, quiet: true });
   }, [path]); // eslint-disable-line react-hooks/exhaustive-deps
   const busy = list?.channels.some((c) => c.compile?.state === "running" || c.samples_busy > 0);
   useEffect(() => {
@@ -99,28 +105,35 @@ export default function ChannelPage() {
     const t = setInterval(() => { if (!document.hidden) reload(); }, 15000);
     return () => clearInterval(t);
   }, [busy, reload]);
-  const fallback = useMemo(() => {
-    if (!list) return null;
-    const l = list.channels;
-    return (l.find((c) => c.pending_playbook) || l.find((c) => c.mode === "TRACKED") || l[0])?.id || "universal";
-  }, [list]);
-  const sel = cidParam || fallback;
-  useEffect(() => { if (list && !cidParam && sel) navigate(`/channels/${encodeURIComponent(sel)}`, { replace: true, quiet: true }); }, [list, cidParam, sel]);
+  useEffect(() => {  // the overview's figures and lamps follow intake and production
+    if (cidParam) return;
+    const t = setInterval(() => { if (!document.hidden) reload(); }, 30000);
+    return () => clearInterval(t);
+  }, [cidParam, reload]);
   if (!list) return <main className="page chp-page">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
-  const ch = list.channels.find((c) => c.id === sel);
+  const ch = list.channels.find((c) => c.id === cidParam);
   return (
     <main className="page chp-page">
       <Stale error={error} loadedAt={loadedAt} />
-      {sel === "universal" ? <Universal list={list} />
+      {!cidParam ? <Overview list={list} />
+        : cidParam === "universal" ? <Universal list={list} />
         : !ch ? <p className="ch-err pad">找不到这个频道。</p>
-        : <ChannelView key={ch.id} ch={ch} list={list} reloadList={reload} />}
+        : <ChannelView key={ch.id} ch={ch} list={list} reloadList={reload} sub={sub} />}
     </main>
   );
 }
 
-function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp; reloadList: () => void }) {
+function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: ChannelsResp; reloadList: () => void; sub: Page | null }) {
   const mode = modeOf(ch);
   const qs = new URLSearchParams(location.search);
+  // a locked channel opens on its 看板; a link into the 调试台 (a sample, a run, the 稿纸) still lands there
+  const page: Page = mode !== "locked" ? "studio" : sub ?? (["view", "sample", "run", "pb"].some((k) => qs.has(k)) ? "studio" : "board");
+  const [studioSeen, setStudioSeen] = useState(page === "studio");
+  useEffect(() => { if (page === "studio") setStudioSeen(true); }, [page]);
+  useEffect(() => {  // the address names a locked channel's page, so tidying the 调试台's query never turns it into the 看板
+    const want = mode === "locked" ? `/${page}` : "";
+    if ((sub ? `/${sub}` : "") !== want) navigate(`/channels/${encodeURIComponent(ch.id)}${want}${location.search}`, { replace: true, quiet: true });
+  }, [mode, sub, page, ch.id]);
   const [view, setView] = useState<View>(["manuscript", "rules"].includes(qs.get("view") || "") ? (qs.get("view") as View) : "studio");
   const [sel, setSel] = useState<{ sample: string | null; run: string | null }>({ sample: qs.get("sample"), run: qs.get("run") });
   const [cmp, setCmp] = useState(false);
@@ -156,17 +169,18 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
     const t = setInterval(() => { if (!document.hidden) wbQ.reload(); }, 15000);
     return () => clearInterval(t);
   }, [wbBusy, wbQ.reload]); // eslint-disable-line react-hooks/exhaustive-deps
-  const recentQ = usePoll<{ issues: Issue[] }>(mode !== "tuning" ? `/api/channels/${ch.id}/recent?limit=4` : null, 0);
+  // the 调试台's reads wait until it is first shown: a locked channel opens on its 看板
+  const recentQ = usePoll<{ issues: Issue[] }>(mode !== "tuning" && studioSeen ? `/api/channels/${ch.id}/recent?limit=4` : null, 0);
   const issues = recentQ.data?.issues || [];
-  const notionQ = usePoll<NotionView>(`/api/channels/${ch.id}/notion`, 0);
+  const notionQ = usePoll<NotionView>(studioSeen ? `/api/channels/${ch.id}/notion` : null, 0);
   const nv = notionQ.data?.configured ? notionQ.data : null;
   useEffect(() => { if (nv?.page_titles) setTitles((t) => ({ ...nv.page_titles, ...t })); }, [nv]);
-  const overview = usePoll<any>("/api/overview", 30000);
-  const alerts: string[] = (overview.data?.alerts || []).map((a: any) => a.key).filter((k: string) => ["notion-auth", "YOUTUBE_AUTH", "AGY_AUTH_REQUIRED", "DISK_LOW"].includes(k));
+  const status = usePoll<any>("/api/status", 30000);
+  const alerts: string[] = (status.data?.alerts || []).map((a: any) => a.key).filter((k: string) => ["notion-auth", "YOUTUBE_AUTH", "AGY_AUTH_REQUIRED", "DISK_LOW"].includes(k));
 
   const draftPb = draftOf(ch) || null, activePb = activeOf(ch) || null;
   const goalPb = mode === "locked" ? activePb : draftPb || activePb;
-  const annQ = usePoll<Annotations>(goalPb ? `/api/playbooks/${goalPb.id}/annotations` : null, 0);
+  const annQ = usePoll<Annotations>(goalPb && studioSeen ? `/api/playbooks/${goalPb.id}/annotations` : null, 0);
   const newerDraft = mode === "locked" && draftPb && activePb && draftPb.version > activePb.version ? draftPb : null;
 
   // ------------------------------------------------------------------ the selected cell / issue
@@ -185,7 +199,8 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
   const detail = sampleId && runId ? detailQ.data : null;
   const detailLoading = !!detail && detail.run?.id !== runId;
 
-  useEffect(() => {  // where the page is, in its address (survives a reload, can be shared)
+  useEffect(() => {  // where the 调试台 is, in its address (survives a reload, can be shared)
+    if (page !== "studio") return;
     const p = new URLSearchParams();
     if (view !== "studio") p.set("view", view);
     if (view !== "studio" && msPb) p.set("pb", String(msPb));
@@ -193,7 +208,7 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
     if (runId && sel.run) p.set("run", runId);
     const q = p.toString();
     history.replaceState(history.state, "", `${location.pathname}${q ? `?${q}` : ""}`);
-  }, [view, msPb, sampleId, runId, sel.sample, sel.run]);
+  }, [page, view, msPb, sampleId, runId, sel.sample, sel.run]);
 
   useEffect(() => {  // the run a phone was waiting for finished: show it
     const s = want && samples.find((x) => x.id === want.sample);
@@ -351,7 +366,7 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
   const notionEmpty = pv.data && !pv.data.configured
     ? <div className="ch-noconf"><p>这个频道还没有 Notion 目标。</p><button className="ch-btn sm solid" onClick={() => setTarget(true)}>选一个数据库</button></div>
     : !runId ? <div className="ch-noconf"><p>{mode === "tuning" ? "选一格跑完的样片看它写进 Notion 的样子。" : "还没有可以预览的一期。"}</p></div> : null;
-  const testCopy = !!(notionQ.data as any)?.test_copy;
+  const testCopy = !!((notionQ.data as any)?.test_copy ?? ch.notion.test_copy);
   // wide: source | cards | Notion; narrower: cards | one preview with a switch; phones: the preview above the cards
   const switcher = compact ? <Seg small label="预览" value={tab} onChange={setTab} options={[{ value: "notion", label: "Notion 页面" }, { value: "source", label: "原片" }]} /> : null;
   const notionPane = (
@@ -364,13 +379,19 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
   );
   const turn = narrow && want && wb ? <RunPending wb={wb} want={want} act={act} switcher={switcher} /> : tab === "source" ? sourcePane : notionPane;
   const lockPb = draftPb || activePb;
-  const dock = useLeaving(dirty && view === "studio");
+  // unsaved Notion settings stay with the channel, and the bar that saves them, on the 看板 too
+  const dock = useLeaving(dirty && (page === "board" || view === "studio"));
   const toastOut = useLeaving(toast);
+  const tabs = mode === "locked" ? (
+    <Seg small label="频道页面" value={page} onChange={(p) => navigate(`/channels/${encodeURIComponent(ch.id)}/${p}`, { quiet: true })}
+      options={[{ value: "board", label: "看板" }, { value: "studio", label: "调试台" }]} />
+  ) : null;
 
   return (
     <div className="chp">
       <Header ch={ch} list={list} alerts={alerts} testCopy={testCopy} lockVersion={mode === "tuning" ? lockPb?.version ?? null : null}
-        onLock={() => setSheet(true)} onRetune={retune} reload={reloadList} />
+        onLock={() => setSheet(true)} onRetune={retune} reload={reloadList} tabs={tabs} />
+      {page === "board" ? <Board ch={ch} mode={mode} onSetIngest={setIngest} flash={flash} /> : <>
       {mode === "tuning" && (wb
         ? <Matrix wb={wb} ch={ch} sel={{ sample: sample?.id ?? null, run: run?.id ?? null }} cmp={cmpData ? prevRun?.id ?? null : null} act={act}
             want={narrow ? want : null} onWant={setWant} onPick={(s, r) => { setSel({ sample: s, run: r }); setCmp(false); setWant(null); }} />
@@ -395,7 +416,8 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
                 <section className="ch-card"><div className="ch-cardh"><span className="cn">贰</span><h3>Notion</h3></div>
                   <p className="q">还没有指定写入哪个 Notion 数据库。</p><button className="ch-btn sm solid" onClick={() => setTarget(true)}>选一个数据库</button></section>
               ) : notionQ.error ? <section className="ch-card"><p className="ch-err">{notionQ.error.message}</p></section> : null}
-              <IntakeCard ch={ch} mode={mode} onSet={setIngest} />
+              <IntakeCard ch={ch} mode={mode} onSet={setIngest}
+                onBoard={mode === "locked" ? () => navigate(`/channels/${encodeURIComponent(ch.id)}/board`, { quiet: true }) : undefined} />
             </div>
           </>
         ) : (
@@ -406,6 +428,7 @@ function ChannelView({ ch, list, reloadList }: { ch: Channel; list: ChannelsResp
         {view !== "studio" || !compact ? notionPane : !narrow ? turn : null}
         <Wires host={studio} />
       </div>
+      </>}
       {dock.shown && (
         <div className={`ch-dock${dock.leaving ? " leaving" : ""}`} role="region" aria-label="保存" inert={dock.leaving}>
           <span className="pulse" aria-hidden />

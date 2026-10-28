@@ -83,6 +83,13 @@ def save(channel_id: str, cfg: dict) -> None:
     db.set_setting(key(channel_id), cfg)
 
 
+def test_copy(cfg: dict, title: str | None = None) -> bool:
+    """An explicit flag once the target was picked in the app; older configs go by the 🧪 copy's name."""
+    if "is_test_copy" in cfg:
+        return bool(cfg["is_test_copy"])
+    return "测试副本" in ((cfg.get("database_title") or "") if title is None else title)
+
+
 def norm_id(s: str) -> str:
     """Accept a raw id or any notion.so / notion.com link; return the dashed UUID."""
     m = re.findall(r"[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", (s or "").lower())

@@ -95,7 +95,7 @@ def dispatch_next() -> str | None:
             continue
         if db.one(f"SELECT 1 FROM runs WHERE source_id=? AND production IN {ACTIVE_RUN}", e["source_id"]):
             continue  # this video is waiting on something of its own (e.g. a live not yet over): the next one goes first
-        r = submit(f"https://www.youtube.com/watch?v={e['source_id']}", playbook_id=e["playbook_id"])
+        r = submit(f"https://www.youtube.com/watch?v={e['source_id']}", playbook_id=e["playbook_id"], origin="trial")
         db.exec("UPDATE trial_queue SET status='DISPATCHED', run_id=?, dispatched_at=? WHERE id=?", r["run_id"], now(), e["id"])
         db.set_setting("trial_batch", (db.setting("trial_batch") or 0) + 1)  # the worker says when the batch is done
         return r["run_id"]
@@ -372,9 +372,7 @@ def lock_preview(channel_id: str, playbook_id: int) -> dict:
         "candidates": [{**c, "tested": tested(channel_id, c["id"])} for c in cands],
         "conflicts": (db.unj(pb["audit"], {}) or {}).get("policy_conflicts") or [],
         "samples": rows,
-        # an explicit flag once the target was picked in the app; older configs go by the 🧪 copy's name
-        "target": {"configured": bool(cfg.get("database_id")), "title": title,
-                   "test_copy": bool(cfg["is_test_copy"]) if "is_test_copy" in cfg else "测试副本" in title},
+        "target": {"configured": bool(cfg.get("database_id")), "title": title, "test_copy": M.test_copy(cfg)},
         "ingest": {"available": ch["mode"] == "TRACKED" and bool(ch["youtube_channel_id"]),
                    "enabled": bool(ing.get("enabled")), "min_minutes": ing.get("min_minutes", 10)},
     }
@@ -461,5 +459,6 @@ def retune(channel_id: str) -> dict:
     cfg = db.setting(f"ingest:{channel_id}") or {}
     if cfg.get("enabled"):
         set_enabled(channel_id, False)
+    db.exec("UPDATE backfill_queue SET status='CANCELLED' WHERE channel_id=? AND status='PENDING'", channel_id)  # 补录 waits for 定稿
     db.event("tuning", f"{ch['name']} 回到调试期，自动收录已暂停")
     return {"stage": "TUNING", "ingest_paused": bool(cfg.get("enabled"))}

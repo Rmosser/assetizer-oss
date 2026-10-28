@@ -22,6 +22,14 @@
 
 已定稿频道若有期数被 Notion 映射问题挡住（`/api/channels` 的 `blocked > 0`），页头改为朱红「交付暂停」，卡片叁自动展开出问题的属性。
 
+### 总览、看板与调试台（2026-10-28，design §R6-5）
+
+- `/channels` 是全部频道的总览（`components/channel/Overview.tsx`）：每个频道一行，阶段章、待定稿、收录灯，期数 / 本月 / 每期单元 / 每期校注 / 视频小时，近 16 周每周几期；等你拍板和交付暂停的频道排在前面。页头的频道菜单（`Switcher`）顶上是「全部频道」。
+- 已定稿频道打开看板（`/channels/{cid}/board`，`Board.tsx`）；页头的「看板 · 调试台」分段切换（只有已定稿频道有），调试台是 `/channels/{cid}/studio`。没有第三段的地址按阶段给默认页，并改写成带第三段的地址（之后调试台整理自己的查询参数也不会跳回看板）；带 `sample`、`run`、`view`、`pb` 参数的旧链接落在调试台。两页在同一个 `ChannelView` 里：切到看板不丢卡片里没保存的 Notion 设置，保存条在看板上也在。调试台的读取（最近几期、Notion 配置、批注、预览）等它第一次显示才开始；页头的「测试副本」标记来自频道列表，看板上也有。
+- 看板：上面是数字（期数与本月 / 上月、知识单元、视频小时与片段、每期校注、入 Notion），左边是近 16 周每周出刊（整数刻度；还没有成刊时只有一句话）与全部期次（不重复写频道名），右边吸顶三块——**试一期**（最新还没收的一期与「试这一期」，没有可试的就不出现）、**收录**（开关、最短时长、上次扫描发现了什么、worker 的下次轮次或迟了多久、最近一次扫描出错时的原因、「立即扫描」）和**补录**（排队与正在补的一期、额度不足时暂停的说明、「按日期挑选…」「取消排队」）。窄屏依次是数字、三块、每周出刊、期次。看板读不到时给出错与重试。
+- 「按日期挑选…」：本月 / 近 30 天 / 近 90 天 / 今年 / 全部，或两个日期（含起止日）。`/backfill/candidates?since=&until=` 按频道的发片频率估出要列多深（yt-dlp 平铺列表，最多 1000 期），在后台列，页面每 1.5 秒问一次直到列好；列表留 10 分钟，更深的列表也服务更浅的范围。日期是「约 3 周前」这样的近似值，所以每一期标着大致时间。列好后还没有的期默认勾上（太短的不勾），已在本刊、库里已有、排队中、样片不能勾；没列到开始日期（超过 1000 期）时注明只列了多少期。底部按勾选的期算视频小时、生产要多久（本频道每分钟视频的生产分钟数 × 时长）和约占周额度（看得出时才给）。出错时就地重试。
+- 卡片伍（收录）在已定稿频道上只显示状态和「去看板」；调试中的频道照旧显示开关（定稿后开启）。
+
 ## 3. 核心语义（改动前务必理解）
 
 ### 3.1 采用：跟随最新完成 / 钉住
@@ -133,7 +141,9 @@
 
 | 文件 | 内容 |
 |---|---|
-| `web/src/pages/Channel.tsx` | 页面装配：数据加载、选中的格、draft、对比、布局分支、动作、稿纸开合（`morph`） |
+| `web/src/pages/Channel.tsx` | 页面装配：总览 / 看板 / 调试台的路由、数据加载、选中的格、draft、对比、布局分支、动作、稿纸开合（`morph`） |
+| `components/channel/Overview.tsx` | 频道总览（`/channels`） |
+| `components/channel/Board.tsx` | 看板：数字、每周出刊、期次、试一期、收录与立即扫描、按日期补录 |
 | `components/channel/Header.tsx` | 页头、频道切换菜单（`Switcher`）、状态、定稿 / 回到调试期 |
 | `components/channel/Matrix.tsx` | 桌面矩阵（`Grid`）、手机条带（`Strip`）、`RunPending`、`runFor` / `done` |
 | `components/channel/SourcePane.tsx` | 原片复刻：播放器（低清版或 YouTube 内嵌）、单元轨道（含对比）、字段、单元列表与章节号 |
@@ -155,9 +165,9 @@
 
 ## 9. 页面用到的接口
 
-`/api/channels`（频道列表与状态）、`POST /api/channels/{cid}`（改名、学习原因）、`/api/overview`（告警灯）、`/api/channels/{cid}/workbench`、`/api/channels/{cid}/candidates`、`/api/channels/{cid}/samples/{sid}/remove`、`/api/channels/{cid}/trial-queue/clear`、`/api/runs/{rid}/retry`、`/api/channels/draft`、`/api/channels/track`、`/api/channels/{cid}/recent`、`/api/sources/{sid}?run=`、`/api/sources/{sid}/playback`、`/api/compare`、`/api/channels/{cid}/notion`（读 / 存）、`/api/channels/{cid}/notion/preview`、`/api/channels/{cid}/notion/target`、`/api/notion/databases`、`/api/notion/pages`、`/api/playbooks/{pid}/annotations`、`/api/playbooks/{pid}/recompile`、`/api/channels/{cid}/lock-preview`、`/api/channels/{cid}/lock`、`/api/channels/{cid}/retune`、`/api/channels/{cid}/trial`、`/api/channels/{cid}/samples`、`/api/channels/{cid}/ingest`、`/api/channels/{cid}/prompt`、`/api/sources/{sid}/adopt`。
+`/api/channels`（频道列表、状态与 `stats`）、`POST /api/channels/{cid}`（改名、学习原因）、`/api/status`（告警灯）、`/api/channels/{cid}/board`（看板）、`POST /api/channels/{cid}/scan`（立即扫描）、`POST /api/channels/{cid}/backfill`（补录排队；`now` 为「试这一期」）、`POST /api/channels/{cid}/backfill/cancel`、`/api/channels/{cid}/workbench`、`/api/channels/{cid}/candidates`（最新 15 期，样片挑选与试一期）、`/api/channels/{cid}/backfill/candidates`（按日期补录，列表在后台读）、`/api/channels/{cid}/samples/{sid}/remove`、`/api/channels/{cid}/trial-queue/clear`、`/api/runs/{rid}/retry`、`/api/channels/draft`、`/api/channels/track`、`/api/channels/{cid}/recent`、`/api/sources/{sid}?run=`、`/api/sources/{sid}/playback`、`/api/compare`、`/api/channels/{cid}/notion`（读 / 存）、`/api/channels/{cid}/notion/preview`、`/api/channels/{cid}/notion/target`、`/api/notion/databases`、`/api/notion/pages`、`/api/playbooks/{pid}/annotations`、`/api/playbooks/{pid}/recompile`、`/api/channels/{cid}/lock-preview`、`/api/channels/{cid}/lock`、`/api/channels/{cid}/retune`、`/api/channels/{cid}/trial`、`/api/channels/{cid}/samples`、`/api/channels/{cid}/ingest`、`/api/channels/{cid}/prompt`、`/api/sources/{sid}/adopt`。
 
-旧链接 `/channels/{cid}/<旧标签>` 会跳到新页面：`prompt` 跳稿纸，`playbook` 跳规则视图，其余回到主视图；页面位置写在地址里（`?sample=&run=&view=manuscript|rules&pb=`），刷新和分享都能回到同一处。
+旧链接 `/channels/{cid}/<旧标签>` 会跳到新页面：`prompt` 跳稿纸，`playbook` 跳规则视图，`settings` 跳看板，其余回到频道的默认页；调试台的位置写在地址里（`?sample=&run=&view=manuscript|rules&pb=`），刷新和分享都能回到同一处。
 
 ## 10. 已知问题与可调整处
 

@@ -50,11 +50,11 @@ ALWAYS_RERUN = {"PLAYBOOK"}
 PAUSE_KINDS = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"}
 MEDIA_CHECK_EVERY = 600      # seconds: while idle, look this often whether agy updated itself
 MEDIA_RECHECK_PAUSED = 3600  # seconds: while paused for AGY_MEDIA_READ, repeat the media self-test this often
+QUOTA_EVERY = 900            # seconds between two reads of agy's quota while it is in use (no turn, no quota spent)
 
 ALERT_TEXT = {
     "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
-                          "在本机终端执行 `lzc-cli docker -- exec -it cloudlazycatappassetizer-worker-1 "
-                          "/lzcapp/var/assetizer/home/.local/bin/agy`（默认盒子为 prodbox），按提示完成 Google 登录。恢复后队列自动继续。"),
+                          "在「机房」点「登录 agy」，用 Google 授权后贴回授权码；登录后队列自动继续。"),
     "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
     "YOUTUBE_AUTH": ("YouTube 需要登录或会员权限",
                      "确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次；还没配置 CookieCloud 时，"
@@ -64,7 +64,7 @@ ALERT_TEXT = {
 
 
 # ---------------------------------------------------------------- submission
-def submit(url: str, priority: int = 0, playbook_id: int | None = None) -> dict:
+def submit(url: str, priority: int = 0, playbook_id: int | None = None, origin: str = "manual") -> dict:
     vid = youtube.video_id(url)
     if not vid:
         raise ValueError("无法识别的 YouTube 链接")
@@ -77,8 +77,9 @@ def submit(url: str, priority: int = 0, playbook_id: int | None = None) -> dict:
     n = (db.one("SELECT COUNT(*) n FROM runs WHERE source_id=?", vid) or {"n": 0})["n"]
     rid = f"{vid}-r{n + 1}"
     prev = db.one("SELECT current_run_id FROM sources WHERE id=?", vid)
-    db.exec("INSERT INTO runs(id, source_id, kind, playbook_id, production, priority, revision_of, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            rid, vid, "PRODUCTION", playbook_id, "QUEUED", priority, prev and prev["current_run_id"], now())
+    db.exec("""INSERT INTO runs(id, source_id, kind, playbook_id, production, priority, origin, revision_of, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""", rid, vid, "PRODUCTION", playbook_id, "QUEUED", priority, origin,
+            prev and prev["current_run_id"], now())
     # a run asked for after 定稿 is meant to replace the issue, whatever was pinned while tuning
     db.exec("UPDATE sources SET adopt_pinned=0 WHERE id=? AND channel_id IN (SELECT id FROM channels WHERE stage='LOCKED')", vid)
     for i, name in enumerate(STAGE_NAMES):
@@ -227,7 +228,7 @@ def _execute(run_id: str) -> str:
         return "WAITING"
     except ProviderError as e:
         if e.kind in PAUSE_KINDS:
-            _wait(run_id, e.kind, str(e))
+            _wait(run_id, e.kind, str(e), provider=provider_of(e))
             pause_queue(e.kind)
             return "WAITING"
         if _hold_if_agy_cannot_read_media(run_id, e):
@@ -275,11 +276,53 @@ def _summary(run_id: str) -> dict:
             "model": m}
 
 
-def _wait(run_id: str, reason: str, message: str) -> None:
+KEYED = {"magpie": "ChatGPT（magpie）", "tuzi": "兔子 API"}  # providers signed in with a key file, not by logging in
+
+
+def provider_of(e: ProviderError) -> str:
+    """Which provider a pause comes from: its receipt says, else a missing key file names it (raised before a call)."""
+    p = (e.receipt or {}).get("provider")
+    return p or next((k for k in KEYED if f"{k}-api-key" in str(e)), "agy")
+
+
+def auth_alert(provider: str = "agy") -> None:
+    """The sign-in alert, worded for what fixes it: agy signs in from the 机房 page; magpie and 兔子 need their key file.
+    Its action says which provider it is about, so only agy's offers 登录 agy."""
+    if provider in KEYED:
+        title, body = "模型密钥失效，生产已暂停", (f"{KEYED[provider]} 的密钥缺失或失效：把有效的密钥放进 `secrets/{provider}-api-key`"
+                                               "（放法见 docs/operations.md），恢复后队列自动继续。")
+    else:
+        title, body = ALERT_TEXT["AGY_AUTH_REQUIRED"]
+    db.raise_alert("AGY_AUTH_REQUIRED", "critical", title, body, {"provider": provider})
+
+
+def auth_alert_provider() -> str | None:
+    """The provider the open sign-in alert is about (None: no such alert; one raised before 2026-10-28 names none: agy)."""
+    a = db.one("SELECT action FROM alerts WHERE key='AGY_AUTH_REQUIRED' AND resolved_at IS NULL")
+    return ((db.unj(a["action"], {}) or {}).get("provider") or "agy") if a else None
+
+
+def agy_answers() -> bool:
+    """agy answered (a quota read, the 机房 sign-in): what waited only for agy's sign-in goes on — the alert, a queue
+    paused for it, the runs it held. A pause that another provider's key caused is left alone. True if lifted."""
+    if auth_alert_provider() != "agy":
+        return False
+    db.resolve_alert("AGY_AUTH_REQUIRED")
+    paused = db.setting("queue_paused")
+    if paused and paused.get("reason") == "AGY_AUTH_REQUIRED":
+        db.set_setting("queue_paused", None)
+        db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL WHERE production='WAITING' AND wait_reason='AGY_AUTH_REQUIRED'")
+        db.event("worker", "agy 已登录，队列继续")
+    return True
+
+
+def _wait(run_id: str, reason: str, message: str, provider: str | None = None) -> None:
     db.exec("UPDATE runs SET production='WAITING', wait_reason=?, error=? WHERE id=?", reason, message[:1000], run_id)
     title, body = ALERT_TEXT.get(reason, (f"生产等待：{reason}", message))
-    if reason in ALERT_TEXT:
-        db.raise_alert(reason, "critical" if reason in ("AGY_AUTH_REQUIRED", "YOUTUBE_AUTH") else "warning", title, body)
+    if reason == "AGY_AUTH_REQUIRED":
+        auth_alert(provider or "agy")
+    elif reason in ALERT_TEXT:
+        db.raise_alert(reason, "critical" if reason == "YOUTUBE_AUTH" else "warning", title, body)
     db.event("run", f"等待：{reason}", run_id, "warn")
 
 
@@ -314,7 +357,10 @@ def media_alert(h: dict) -> None:
     if h.get("error") in PAUSE_KINDS:
         # the self-test never reached the media (2026-10-27: Antigravity's weekly quota ran out right after an
         # update check): pause for that reason, which the health probe lifts, not as if agy could not read video
-        db.raise_alert(h["error"], "critical" if h["error"] == "AGY_AUTH_REQUIRED" else "warning", *ALERT_TEXT[h["error"]])
+        if h["error"] == "AGY_AUTH_REQUIRED":
+            auth_alert(providers.get().name)
+        else:
+            db.raise_alert(h["error"], "warning", *ALERT_TEXT[h["error"]])
         pause_queue(h["error"])
         return
     if h.get("error") in ("PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT"):
@@ -451,9 +497,10 @@ class Worker:
         self.poll = poll
         self.stop = False
         self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
-                     "memory": 0.0, "digest": 0.0, "playback": 0.0}
+                     "memory": 0.0, "digest": 0.0, "playback": 0.0, "quota": 0.0}
         self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it
         self.finished: dict[str, str] = {}             # run id → final state, until reap() picks it up
+        self.signed_out = 0                            # quota reads in a row that found agy signed out
 
     def recover(self) -> None:
         n = kill_orphans()
@@ -521,7 +568,16 @@ class Worker:
             h = providers.get().health()
             db.set_setting("agy_health", h)
             if not h.get("ok") and h.get("error") == "AGY_AUTH_REQUIRED":
-                db.raise_alert("AGY_AUTH_REQUIRED", "critical", *ALERT_TEXT["AGY_AUTH_REQUIRED"])
+                auth_alert(providers.get().name)
+        if t - self.last["quota"] > QUOTA_EVERY and any(p.name == "agy" for p in providers.in_use()):
+            self.last["quota"] = t  # the 机房 page's quota bars and their week-long trend
+            from ..providers.agy import AgyProvider, record_usage
+            q = record_usage(AgyProvider().usage())
+            self.signed_out = self.signed_out + 1 if q.get("error") == "AGY_AUTH_REQUIRED" else 0
+            if self.signed_out >= 2:  # twice in a row: say so before a run fails on it
+                auth_alert("agy")
+            elif q.get("ok"):
+                agy_answers()
         if t - self.last["retry"] > 1800:
             self.last["retry"] = t
             db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' "
@@ -593,11 +649,15 @@ class Worker:
         if started:
             return True
         if len(self.active) < worker_slots():
+            from ..ingest import dispatch_backfill
             from ..tuning import dispatch_next
-            if dispatch_next():  # 调试台: the next queued trial run
+            if dispatch_next() or dispatch_backfill():  # 调试台's next trial, else the next 补录 video
                 return True
         batch = db.setting("trial_batch")
-        if batch and not self.active and not db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'"):
+        # the batch is done when no trial waits or runs — whatever else (补录, a new video) is still in production
+        if batch and not db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'") and not db.one(
+                """SELECT 1 FROM trial_queue t JOIN runs r ON r.id=t.run_id
+                   WHERE t.status='DISPATCHED' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')"""):
             db.set_setting("trial_batch", None)
             notify.trials_done(batch)
         return deliver_pending()

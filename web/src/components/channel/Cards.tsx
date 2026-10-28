@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { get } from "../../api";
 import { Fold } from "../Fold";
-import { hm, Icon, Seg, short, Stepper, Switch, TYPE_ICON, useNarrow } from "./bits";
+import { hm, Icon, nextScan, Seg, short, Stepper, Switch, TYPE_ICON, useNarrow } from "./bits";
 import type { Mode } from "./Header";
 import { keys } from "./lit";
 import { Opt } from "./NotionPane";
@@ -415,7 +415,9 @@ export function StructureCard({ view, cfg, update, ctx }: { view: NotionView; cf
 }
 
 // ------------------------------------------------------------------ 伍 收录
-export function IntakeCard({ ch, mode, onSet }: { ch: Channel; mode: Mode; onSet: (enabled: boolean, min: number) => Promise<void> }) {
+export function IntakeCard({ ch, mode, onSet, onBoard }: {
+  ch: Channel; mode: Mode; onSet: (enabled: boolean, min: number) => Promise<void>; onBoard?: () => void;
+}) {
   const ing = ch.ingest || {};
   const [min, setMin] = useState(ing.min_minutes ?? 10);
   const [err, setErr] = useState<string | null>(null);
@@ -424,6 +426,15 @@ export function IntakeCard({ ch, mode, onSet }: { ch: Channel; mode: Mode; onSet
   const can = mode === "locked" && ch.mode === "TRACKED" && !!ch.youtube_channel_id;
   const send = (en: boolean, m: number) => onSet(en, m).catch((e) => setErr((e as Error).message));
   const since = ing.since ? new Date(ing.since) : null;
+  if (onBoard) {  // a locked channel's intake is run from its 看板: here only where it stands
+    const state = ing.enabled ? `每 ${ing.every_minutes || 30} 分钟` : "已暂停";
+    return (
+      <Card n="伍" title="收录" right={state} sum={state}>
+        <p className="ch-row2 q">{ing.enabled ? "自动收录中" : "自动收录已暂停"} · 短于 {ing.min_minutes ?? 10} 分钟的不收</p>
+        <button className="ch-btn sm" onClick={onBoard}>去看板</button>
+      </Card>
+    );
+  }
   return (
     <Card n="伍" title="收录" right={mode === "locked" ? `每 ${ing.every_minutes || 30} 分钟` : "定稿后开启"}
       sum={mode !== "locked" ? "定稿后开启" : can && ing.enabled ? `每 ${ing.every_minutes || 30} 分钟` : "已暂停"}>
@@ -434,7 +445,7 @@ export function IntakeCard({ ch, mode, onSet }: { ch: Channel; mode: Mode; onSet
         <span>分钟的不收</span>
       </div>
       {can && ing.enabled && (
-        <p className="ch-row2 q">{ing.last_poll ? `上次 ${hm(ing.last_poll)} · 下次 ${hm(ing.last_poll, ing.every_minutes || 30)}` : "等第一次查看"}
+        <p className="ch-row2 q">{ing.last_poll ? `上次 ${hm(ing.last_poll)}${nextScan(ing) ? ` · ${nextScan(ing)}` : ""}` : "等第一次查看"}
           {since && !Number.isNaN(+since) ? ` · 自 ${since.getMonth() + 1} 月 ${since.getDate()} 日起` : ""}</p>
       )}
       {err && <p className="ch-err">{err}</p>}

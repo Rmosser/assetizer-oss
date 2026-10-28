@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS runs (
   error_class TEXT,
   error TEXT,
   priority INTEGER NOT NULL DEFAULT 0,
+  origin TEXT,                                         -- manual | ingest | backfill | trial (NULL: before 2026-10-28)
   attempts INTEGER NOT NULL DEFAULT 0,
   pgid INTEGER,
   pins TEXT,                                           -- JSON: playbook, policy, pipeline, model, agy version
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS runs (
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_queue ON runs(production, priority DESC, created_at);
+CREATE INDEX IF NOT EXISTS runs_source ON runs(source_id);
 CREATE TABLE IF NOT EXISTS stages (
   run_id TEXT NOT NULL REFERENCES runs(id),
   name TEXT NOT NULL,
@@ -134,6 +136,7 @@ CREATE TABLE IF NOT EXISTS model_calls (
   view_files INTEGER,
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS model_calls_run ON model_calls(run_id);
 CREATE TABLE IF NOT EXISTS speakers (
   source_id TEXT NOT NULL REFERENCES sources(id),
   run_id TEXT NOT NULL,
@@ -210,6 +213,7 @@ CREATE TABLE IF NOT EXISTS flags (
   created_at TEXT NOT NULL,
   resolved_at TEXT
 );
+CREATE INDEX IF NOT EXISTS flags_run ON flags(run_id);
 CREATE TABLE IF NOT EXISTS alerts (
   key TEXT PRIMARY KEY,
   severity TEXT NOT NULL,                              -- critical | warning | info
@@ -241,6 +245,17 @@ CREATE TABLE IF NOT EXISTS trial_queue (             -- 调试台: trial runs wa
   source_id TEXT NOT NULL,
   playbook_id INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'PENDING',              -- PENDING | DISPATCHED | CANCELLED
+  run_id TEXT,
+  created_at TEXT NOT NULL,
+  dispatched_at TEXT
+);
+CREATE TABLE IF NOT EXISTS backfill_queue (          -- 补录: older videos of a locked channel, produced one at a time when idle
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  title TEXT,
+  duration REAL,
+  status TEXT NOT NULL DEFAULT 'PENDING',              -- PENDING | DISPATCHED | SKIPPED | CANCELLED
   run_id TEXT,
   created_at TEXT NOT NULL,
   dispatched_at TEXT
@@ -314,6 +329,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         r = conn.execute("SELECT value FROM settings WHERE key='notion_database_id'").fetchone()
         if r and json.loads(r[0]):  # pages delivered so far live in the Assetizer database
             conn.execute("UPDATE sources SET notion_database_id=? WHERE notion_page_id IS NOT NULL", (json.loads(r[0]),))
+    if "origin" not in {r[1] for r in conn.execute("PRAGMA table_info(runs)")}:
+        conn.execute("ALTER TABLE runs ADD COLUMN origin TEXT")
     if "stage" not in {r[1] for r in conn.execute("PRAGMA table_info(channels)")}:
         conn.execute("ALTER TABLE channels ADD COLUMN stage TEXT NOT NULL DEFAULT 'TUNING'")
         # a channel whose playbook is already confirmed has been through tuning

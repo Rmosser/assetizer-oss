@@ -32,7 +32,9 @@ services:
       - NO_PROXY=localhost,127.0.0.1,::1,web,worker,.heiyu.space,.lazycat.cloud,172.18.0.1
       - no_proxy=localhost,127.0.0.1,::1,web,worker,.heiyu.space,.lazycat.cloud,172.18.0.1
     command: sh /lzcapp/pkg/content/scripts/lzc/start.sh web
-    mem_limit: 1g
+    # besides the API: compiles (agy calls), the 机房 page's agy sign-in (agy's own interface, ~200 MB) and quota reads,
+    # yt-dlp listings for 补录. Over the limit the kernel kills inside this container, and the gateway then holds the app.
+    mem_limit: 2g
     healthcheck:
       test:
         - CMD-SHELL

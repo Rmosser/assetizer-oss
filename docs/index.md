@@ -21,10 +21,11 @@
 | 频道调试：样片、试跑、采用、对比、定稿 | [channel-page.md](channel-page.md) §3 | `tuning.py`、`pipeline/runner.py`（跑完自动采用）、`web/app.py`（定稿单查库）、`delivery.py` |
 | 频道页的界面、点亮与连线、断点、样式坑 | [channel-page.md](channel-page.md) | `web/src/pages/Channel.tsx`、`web/src/components/channel/`、`web/src/channel.css` |
 | Notion 交付、映射、页面模板、查重、预览 | [architecture.md](architecture.md)「交付到 Notion」、[channel-page.md](channel-page.md) §4 | `delivery.py`、`notion/`、`templates.py`、`preview.py` |
-| 自动收录新视频 | [architecture.md](architecture.md)「频道生命周期」 | `ingest.py` |
+| 自动收录新视频、立即扫描、补录旧视频 | [architecture.md](architecture.md)「频道生命周期」、[design.md](design.md) §R6-5、[channel-page.md](channel-page.md) §2 | `ingest.py`、`web/app.py`（看板接口）、`web/src/components/channel/Board.tsx` |
+| agy 在网页里登录、额度（5 小时 / 每周） | [operations.md](operations.md)「凭据与登录」、[design.md](design.md) §R6-3、§R6-4 | `providers/agy_login.py`、`providers/agy.py`（`usage`、`record_usage`）、`providers/magpie.py`（`quota_view`）、`web/src/components/AgyLogin.tsx` |
 | YouTube 登录与 CookieCloud | [README.md](../README.md)、[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)、[cookiecloud-read-ingress.md](cookiecloud-read-ingress.md) | `cookies.py`、`youtube.py` |
 | 告警与 Telegram 通知 | [README.md](../README.md)「通知」 | `notify.py`、`pipeline/runner.py`（告警） |
-| 其他页面：刊、对照视图、机房 | [architecture.md](architecture.md)「前端」 | `web/src/pages/` |
+| 其他页面：刊、对照视图、机房，统计口径 | [architecture.md](architecture.md)「前端」、[design.md](design.md) §R6-1、§R6-2 | `web/src/pages/`、`web/src/components/Figures.tsx`、`web/app.py`（`/api/engine/stats`） |
 | 为什么这样设计（长期决定与理由） | [design.md](design.md) | — |
 | 内容原则：视频是唯一事实来源 | [`contracts/policy.md`](../src/assetizer/contracts/policy.md) | — |
 | 改完怎么检查 | [quality.md](quality.md) | `tests/test_core.py` |

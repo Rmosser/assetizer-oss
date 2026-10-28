@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { post } from "./api";
 import { useLeaving, usePoll } from "./hooks";
 import { linkProps, navigate, usePath } from "./router";
+import { AgyLoginSheet, useAgyLogin } from "./components/AgyLogin";
 import { Sheet, type SheetHandle } from "./components/Sheet";
 import Issues from "./pages/Issues";
 import Reader from "./pages/Reader";
@@ -138,16 +139,21 @@ function useChromeAutoHide() {
 
 export default function App() {
   const path = usePath();
-  const { data } = usePoll<any>("/api/overview", 15000);
+  const { data, reload } = usePoll<any>("/api/status", 15000);
   const [pasting, setPasting] = useState(false);
+  const [signingIn, closeSignIn] = useAgyLogin();
   useChromeAutoHide();
+  useEffect(() => {
+    addEventListener("az:refresh", reload);
+    return () => removeEventListener("az:refresh", reload);
+  }, [reload]);
   useEffect(() => {
     // "付印第一期" and friends: the sheet on phones, the masthead field on desktop
     const on = () => (matchMedia("(max-width: 900px)").matches ? setPasting(true) : dispatchEvent(new Event("az:focus-paste")));
     addEventListener("az:paste", on);
     return () => removeEventListener("az:paste", on);
   }, []);
-  const decisions = data?.decisions?.length ?? 0;
+  const decisions = data?.decisions ?? 0;
   const alerts = data?.alerts?.length ?? 0;
   const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : "issues";
 
@@ -192,6 +198,7 @@ export default function App() {
         </div>
       </header>
       {pasting && <PasteSheet onClose={() => setPasting(false)} />}
+      {signingIn && <AgyLoginSheet onClose={closeSignIn} />}
       {/* the 频道 tool keeps its state (and unsaved edits) while moving between its channels and tabs */}
       <div key={tab === "channels" ? "/channels" : path} id="main">{page}</div>
     </>

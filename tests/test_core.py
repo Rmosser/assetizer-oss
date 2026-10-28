@@ -1234,7 +1234,7 @@ def test_an_agy_update_that_breaks_media_reads_pauses_production_until_the_self_
     db.set_setting("agy_media_version", "1.4.5")
     w = runner.Worker()
     t = time.monotonic()
-    w.last.update(retry=t, retention=t, ingest=t, probe=t, health=t, playback=t)  # only the media check is due
+    w.last.update(retry=t, retention=t, ingest=t, probe=t, health=t, playback=t, quota=t)  # only the media check is due
     w.housekeeping()
     assert db.setting("queue_paused")["reason"] == "AGY_MEDIA_READ"
     body = db.one("SELECT body FROM alerts WHERE key='AGY_MEDIA_READ' AND resolved_at IS NULL")["body"]
@@ -2726,3 +2726,605 @@ def test_playback_streams_with_ranges_and_marks_activity(home, monkeypatch):
     assert playback.path("a").stat().st_mtime > old + 3600  # played: counts as activity
     assert c.get("/api/sources/c/playback", headers=h).status_code == 404
     assert c.get("/api/sources/..%2Fx/playback", headers=h).status_code == 404
+
+
+# ---------------------------------------------------------------- agy quota (/usage)
+# what agy 1.2.16 printed for `agy -p /usage --output-format json` on 2026-10-28 (the weekly Gemini limit was used up)
+USAGE_JSON = {
+    "conversation_id": "", "status": "SUCCESS",
+    "response": "Gemini Models\tWeekly Limit Remaining\t0%\t2026-10-30T23:34:21Z\nGemini Models\tFive Hour Limit Remaining\tdisabled\t\n"
+                "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-11-03T16:07:47Z\n"
+                "Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-10-27T21:07:47Z\n",
+    "command": {"name": "usage", "data": {"groups": [
+        {"name": "Gemini Models", "description": "Models within this group: Gemini Flash, Gemini Pro", "buckets": [
+            {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "description": "You have hit your weekly limit, it refreshes in 3 days, 7 hours.",
+             "window": "weekly", "remaining_fraction": 0, "reset_time": "2026-10-30T23:34:21Z"},
+            {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h", "disabled": True, "remaining_fraction": 1}]},
+        {"name": "Claude and GPT models", "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS", "buckets": [
+            {"id": "3p-weekly", "name": "Weekly Limit Remaining", "window": "weekly", "remaining_fraction": 1, "reset_time": "2026-11-03T16:07:47Z"},
+            {"id": "3p-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 0.42, "reset_time": "2026-10-27T21:07:47Z"}]},
+        {"name": "Gemini 4 Argon", "description": "For paid Pro plans, Argon quota is separate.", "buckets": [
+            {"id": "gemini-argon-wtu-weekly", "name": "Gemini 4 Argon Weekly Limit", "window": "weekly", "remaining_fraction": 1}]}]}},
+}
+
+FAKE_USAGE = """#!{python}
+import json, os, sys
+if "--version" in sys.argv:
+    print("1.4.8"); sys.exit(0)
+assert sys.argv[1:3] == ["-p", "/usage"], sys.argv
+assert sys.stdin.read() == ""  # an empty pipe: a signed-out agy must not wait for a pasted code
+mode = os.environ.get("FAKE_USAGE", "ok")
+if mode == "signed-out":
+    print("Error: authentication required. Run 'agy' to log in, then retry.", file=sys.stderr)
+    print(json.dumps({"status": "ERROR", "error": "authentication failed or timed out"})); sys.exit(1)
+if mode == "network":
+    print(json.dumps({"status": "ERROR", "error": "Post \\"https://cloudcode-pa.googleapis.com\\": dial tcp: i/o timeout"})); sys.exit(1)
+print(json.dumps(json.loads(os.environ["FAKE_USAGE_JSON"])))
+"""
+
+
+@pytest.fixture
+def fake_usage(home, monkeypatch):
+    import dataclasses
+    import sys
+    from assetizer import config
+    from assetizer.providers.agy import AgyProvider
+    exe = home / "agy-usage"
+    exe.write_text(FAKE_USAGE.replace("{python}", sys.executable))
+    exe.chmod(0o755)
+    config.override(dataclasses.replace(config.get(), agy_bin=str(exe), agy_model="gemini-3.8-flash-high"))
+    monkeypatch.setattr(AgyProvider, "_version", None)
+    monkeypatch.setenv("FAKE_USAGE_JSON", json.dumps(USAGE_JSON))
+
+    def use(mode="ok", payload=None):
+        monkeypatch.setenv("FAKE_USAGE", mode)
+        if payload is not None:
+            monkeypatch.setenv("FAKE_USAGE_JSON", json.dumps(payload))
+    return use
+
+
+def test_a_click_does_not_clear_agys_sign_in_but_agy_answering_does(fake_usage, monkeypatch):
+    import threading
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.web import app as web
+    monkeypatch.setattr(web, "_throttle_at", {})
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    open_ = lambda: db.one("SELECT 1 FROM alerts WHERE key='AGY_AUTH_REQUIRED' AND resolved_at IS NULL")  # noqa: E731
+    fake_usage("signed-out")
+    runner.auth_alert("agy")
+    db.set_setting("queue_paused", {"reason": "AGY_AUTH_REQUIRED"})
+    assert c.post("/api/queue/resume", headers=h, json={}).json()["ok"] and not db.setting("queue_paused")
+    for t in threading.enumerate():  # agy is asked in the background: still signed out
+        if t.name == "agy-usage":
+            t.join(30)
+    assert open_() and db.setting("agy_quota")["error"] == "AGY_AUTH_REQUIRED"
+    fake_usage("ok")  # signed in at the terminal; 刷新 reads the quota, and agy answering clears it
+    assert c.post("/api/agy/quota", headers=h, json={}).json()["ok"] and not open_()
+    runner.auth_alert("magpie")  # a key file: the click is all there is
+    c.post("/api/queue/resume", headers=h, json={})
+    assert not open_()
+
+
+def test_usage_reads_both_windows_of_every_group():
+    from assetizer.providers.agy import parse_usage, quota_group
+    groups = parse_usage(USAGE_JSON)
+    assert [g["name"] for g in groups] == ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"]
+    gem = groups[0]["buckets"]
+    assert gem[0] == {"window": "weekly", "remaining": 0.0, "reset_at": "2026-10-30T23:34:21Z", "disabled": False,
+                      "note": "You have hit your weekly limit, it refreshes in 3 days, 7 hours."}
+    assert gem[1]["window"] == "5h" and gem[1]["disabled"] and gem[1]["reset_at"] is None
+    assert groups[1]["buckets"][1]["remaining"] == 0.42
+    # production draws on the group holding the configured model's family, not on Argon or the third-party one
+    assert quota_group(groups, "gemini-3.8-flash-high")["name"] == "Gemini Models"
+    assert quota_group(groups[1:], "gemini-3.8-flash-high")["name"] == "Gemini 4 Argon"  # only Gemini group left
+    # an answer without the structured part: the tab-separated text says the same
+    text = parse_usage({"status": "SUCCESS", "response": USAGE_JSON["response"]})
+    assert [b["window"] for b in text[0]["buckets"]] == ["weekly", "5h"] and text[0]["buckets"][0]["remaining"] == 0.0
+    assert text[0]["buckets"][1]["disabled"] and text[0]["buckets"][1]["remaining"] is None
+    assert text[1]["buckets"][1] == {"window": "5h", "remaining": 1.0, "reset_at": "2026-10-27T21:07:47Z", "disabled": False, "note": None}
+    assert parse_usage({}) == [] and parse_usage({"command": {"data": {"groups": [{"name": "x", "buckets": []}]}}}) == []
+
+
+def test_usage_probe_records_a_week_of_the_production_group(fake_usage, home):
+    from assetizer import db
+    from assetizer.providers.agy import AgyProvider, record_usage
+    fake_usage("ok")
+    q = record_usage(AgyProvider().usage())
+    assert q["ok"] and q["production_group"] == "Gemini Models" and q["version"] == "1.4.8"
+    assert db.setting("agy_quota")["groups"][0]["buckets"][0]["remaining"] == 0.0
+    log = db.setting("agy_quota_log")
+    assert len(log) == 1 and log[0][1:] == [None, 0.0]  # [time, 5-hour (disabled → None), weekly]
+    # points older than eight days fall off
+    db.set_setting("agy_quota_log", [["2020-01-01T00:00:00+00:00", 1, 1]] + log)
+    record_usage(AgyProvider().usage())
+    assert [x[0][:4] for x in db.setting("agy_quota_log")] != ["2020"] and len(db.setting("agy_quota_log")) == 2
+
+
+def test_usage_probe_says_signed_out_and_keeps_the_last_numbers(fake_usage, home):
+    from assetizer import db
+    from assetizer.providers.agy import AgyProvider, record_usage
+    fake_usage("signed-out")
+    q = AgyProvider().usage()
+    assert not q["ok"] and q["error"] == "AGY_AUTH_REQUIRED"
+    fake_usage("ok")
+    record_usage(AgyProvider().usage())
+    fake_usage("network")
+    q = record_usage(AgyProvider().usage())
+    assert q["error"] == "PROVIDER_TRANSIENT"
+    kept = db.setting("agy_quota")
+    assert kept["groups"] and not kept["ok"] and kept["error"] == "PROVIDER_TRANSIENT" and kept["failed_at"]
+
+
+def test_magpie_rate_limits_read_as_quota_buckets():
+    from assetizer.providers.magpie import quota_view
+    q = quota_view({"at": "2026-10-28T02:00:00+00:00",
+                    "primary": {"used_percent": 30, "window_minutes": 300, "resets_in_seconds": 3600},
+                    "secondary": {"used_percent": 82.5, "window_minutes": 10080, "resets_at": 1793145600}})
+    assert [b["window"] for b in q["buckets"]] == ["5h", "weekly"]
+    assert q["buckets"][0]["remaining"] == 0.7 and q["buckets"][0]["reset_at"] == "2026-10-28T03:00:00+00:00"
+    assert q["buckets"][1]["remaining"] == pytest.approx(0.175) and q["buckets"][1]["reset_at"].startswith("2026-")
+    assert quota_view({"at": "2026-10-28T02:00:00+00:00", "rate_limits": {"primary": {"used_percent": 100}}})["buckets"][0]["remaining"] == 0
+    assert quota_view(None) is None and quota_view({"at": "x", "primary": {}}) is None
+
+
+# ---------------------------------------------------------------- signing agy in from the 机房 page
+# agy's sign-in screen, as agy 1.2.16 draws it: a menu, a link it also hands to the system browser, a field for the code
+FAKE_SIGNIN = """#!{python}
+import json, os, subprocess, sys, time
+marker = os.path.join(os.environ["HOME"], "signed-in")
+if sys.argv[1:3] == ["-p", "/usage"]:
+    sys.stdin.read()
+    if os.path.exists(marker):
+        print(json.dumps({"status": "SUCCESS", "command": {"data": {"groups": [{"name": "Gemini Models",
+              "description": "Models within this group: Gemini Flash", "buckets": [{"window": "weekly", "remaining_fraction": 0.5}]}]}}}))
+        sys.exit(0)
+    print("Error: authentication required. Run 'agy' to log in, then retry.", file=sys.stderr)
+    print(json.dumps({"status": "ERROR", "error": "authentication failed or timed out"}))
+    sys.exit(1)
+if "--version" in sys.argv:
+    print("1.4.8")
+    sys.exit(0)
+with open(os.path.join(os.environ["HOME"], "tui-pid"), "w") as f:
+    f.write(str(os.getpid()))
+print("Welcome to the Antigravity CLI. You are currently not signed in.")
+print("Select login method:")
+print(" > 1. Google OAuth")
+print("   2. Use a Google Cloud project", flush=True)
+sys.stdin.readline()
+url = "https://accounts.google.com/o/oauth2/auth?client_id=fake&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&state=st4te"
+if os.environ.get("FAKE_NO_BROWSER"):
+    print("  Your browser should open automatically. If not:")
+    print("  " + url[:60])
+    print("  " + url[60:], flush=True)
+else:
+    subprocess.run([os.environ["BROWSER"], url])
+print("", flush=True)
+print(" If you aren't automatically redirected, paste the authorization code below:", flush=True)
+code = sys.stdin.readline().strip()
+if code == "4/0Agood-code":
+    open(marker, "w").write("1")
+    print("Signed in.", flush=True)
+else:
+    print("Error: invalid_grant", flush=True)
+time.sleep(120)
+"""
+
+
+@pytest.fixture
+def signin(home, monkeypatch):
+    import dataclasses
+    import sys
+    from assetizer import config
+    from assetizer.providers import agy_login
+    from assetizer.providers.agy import AgyProvider
+    exe = home / "agy-signin"
+    exe.write_text(FAKE_SIGNIN.replace("{python}", sys.executable))
+    exe.chmod(0o755)
+    config.override(dataclasses.replace(config.get(), agy_bin=str(exe), agy_model="gemini-3.8-flash-high"))
+    monkeypatch.setattr(AgyProvider, "_version", None)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(agy_login, "SETTLE", 0.2)
+    monkeypatch.setattr(agy_login, "_session", None)
+    yield agy_login
+    agy_login.shutdown()
+
+
+def _until(agy_login, *states, seconds=20.0):
+    import time
+    end = time.time() + seconds
+    while time.time() < end:
+        v = agy_login.current()
+        if v["state"] in states:
+            return v
+        time.sleep(0.1)
+    raise AssertionError(f"still {agy_login.current()}")
+
+
+@pytest.mark.parametrize("browser", [True, False])
+def test_signing_in_from_the_page_resumes_what_waited_for_it(signin, home, monkeypatch, browser):
+    import os
+    from assetizer import db
+    from assetizer.util import now
+    if not browser:  # no browser stand-in got the link: it is read off the screen, glued back across the wrap
+        monkeypatch.setenv("FAKE_NO_BROWSER", "1")
+    db.raise_alert("AGY_AUTH_REQUIRED", "critical", "模型登录已失效，生产已暂停", "…")
+    db.set_setting("queue_paused", {"reason": "AGY_AUTH_REQUIRED", "since": now()})
+    _waiting_run()
+    db.exec("UPDATE runs SET wait_reason='AGY_AUTH_REQUIRED' WHERE id='v-r1'")
+    assert signin.start()["state"] == "checking"
+    v = _until(signin, "url", "failed")
+    assert v["state"] == "url" and v["url"].endswith("state=st4te") and v["expires_in"] > 500
+    assert signin.start()["state"] == "url"  # asking again rejoins the same session
+    # pasted as the whole callback address: the code is taken out of it
+    assert signin.submit("https://antigravity.google/oauth-callback?code=4/0Agood-code&state=st4te")["state"] == "verifying"
+    v = _until(signin, "done", "failed")
+    assert v["state"] == "done" and v["quota"]["production_group"] == "Gemini Models"
+    assert db.setting("queue_paused") is None and db.setting("agy_quota")["ok"]
+    assert db.one("SELECT resolved_at FROM alerts WHERE key='AGY_AUTH_REQUIRED'")["resolved_at"]
+    assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
+    pid = int((home / "tui-pid").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)  # the interface is gone
+    assert not (home / "run" / "agy-login").exists()
+
+
+def test_a_refused_code_ends_the_session_and_a_signed_in_agy_is_left_alone(signin, home):
+    from assetizer import db
+    signin.start()
+    _until(signin, "url")
+    with pytest.raises(ValueError):
+        signin.submit("not a code")
+    signin.submit("4/0Awrong-code")
+    v = _until(signin, "failed", "done")
+    assert v["state"] == "failed" and "授权码" in v["error"]
+    assert not (home / "signed-in").exists() and db.setting("queue_paused") is None
+    # already signed in: no interface is started, the quota comes back
+    (home / "signed-in").write_text("1")
+    (home / "tui-pid").unlink()
+    signin.start()
+    v = _until(signin, "already", "failed")
+    assert v["state"] == "already" and v["quota"]["ok"] and not (home / "tui-pid").exists()
+    with pytest.raises(ValueError):
+        signin.submit("4/0Agood-code")
+
+
+def test_cancelling_a_sign_in_kills_the_interface(signin, home):
+    import os
+    signin.start()
+    _until(signin, "url")
+    pid = int((home / "tui-pid").read_text())
+    assert signin.cancel()["state"] == "cancelled"
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_the_code_is_taken_from_what_was_pasted():
+    from assetizer.providers.agy_login import code_of
+    assert code_of("  4/0AVGzR1C-abc_DEF  ") == "4/0AVGzR1C-abc_DEF"
+    assert code_of("https://antigravity.google/oauth-callback?state=x&code=4%2F0Abc-123456&scope=a") == "4/0Abc-123456"
+    assert code_of("") is None and code_of("short") is None and code_of("has spaces in it") is None
+    assert code_of("https://antigravity.google/oauth-callback?state=x") is None
+
+
+# ---------------------------------------------------------------- 机房 statistics, 刊 production lines
+def _stats_fixture():
+    from datetime import datetime, timedelta, timezone
+    from assetizer import db
+    now = datetime.now(timezone.utc)
+    iso = lambda d: (now - d).isoformat(timespec="seconds")  # noqa: E731
+    for sid, dur in (("a", 3600), ("b", 1800), ("c", 2400), ("d", 600), ("x", 900)):
+        db.exec("INSERT INTO sources(id, duration, delivery, created_at, updated_at) VALUES (?,?, 'DELIVERED', ?, ?)", sid, dur, iso(timedelta(0)), iso(timedelta(0)))
+    runs = [("a-r1", "a", "COMPLETE", timedelta(hours=2), "PRODUCTION"), ("b-r1", "b", "COMPLETE_PARTIAL", timedelta(days=3), "PRODUCTION"),
+            ("c-r1", "c", "FAILED", timedelta(hours=5), "PRODUCTION"), ("d-r1", "d", "COMPLETE", timedelta(days=20), "PRODUCTION"),
+            ("d-r0", "d", "COMPLETE", timedelta(days=40), "PRODUCTION"), ("x-r1", "x", "COMPLETE", timedelta(hours=1), "IMPORT"),
+            ("c-r2", "c", "RUNNING", None, "PRODUCTION")]
+    for rid, sid, state, ago, kind in runs:
+        db.exec("INSERT INTO runs(id, source_id, kind, production, created_at, started_at, finished_at) VALUES (?,?,?,?,?,?,?)",
+                rid, sid, kind, state, iso(timedelta(days=50)), iso(timedelta(days=50)), iso(ago) if ago else None)
+        for name, secs in (("UNDERSTAND", 600), ("CLIPS", 1800), ("TRANSCRIBE", 900), ("CLEANUP", 5)):
+            db.exec("INSERT INTO stages(run_id, name, ord, status, wall_seconds) VALUES (?,?,0,'DONE',?)", rid, name, secs)
+    for model, stage, ago, tokens, status in (("gemini-3.8-flash-high", "understanding-01", timedelta(hours=2), 1000, "SUCCESS"),
+                                              ("codex/gpt-6.1-terra", "knowledge-skeleton", timedelta(hours=3), 500, "SUCCESS"),
+                                              ("gemini-3.8-flash-high", "article-outline", timedelta(days=2), 300, "FAILED"),
+                                              ("gemini-3.8-flash-high", "review-check-01", timedelta(days=45), 9999, "SUCCESS")):
+        db.exec("""INSERT INTO model_calls(run_id, stage, model, status, wall_seconds, input_tokens, output_tokens, thinking_tokens, created_at)
+                   VALUES ('a-r1',?,?,?,10,?,0,0,?)""", stage, model, status, tokens, iso(ago))
+    db.exec("UPDATE sources SET current_run_id='a-r1', created_at=?, delivered_at=? WHERE id='a'", iso(timedelta(hours=3)), iso(timedelta(hours=1)))
+    db.exec("UPDATE runs SET error_class='PROVIDER_TIMEOUT' WHERE id='c-r1'")
+    return iso
+
+
+def test_engine_stats_count_by_window_and_by_model_family(home):
+    from datetime import timedelta
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    iso = _stats_fixture()
+    c = TestClient(web.app)
+    s = c.get("/api/engine/stats", headers={"host": "127.0.0.1"}).json()
+    week, month = s["windows"]["7d"], s["windows"]["30d"]
+    # imported runs and runs older than the window are left out; a failure is not "done"
+    assert (week["done"], week["partial"], week["failed"], month["done"]) == (2, 1, 1, 3)
+    assert week["video_seconds"] == 5400 and week["reasons"] == [{"kind": "PROVIDER_TIMEOUT", "n": 1}]
+    # minutes per hour of video, the median over the runs; TRANSCRIBE (background) and CLEANUP are not stages here
+    assert [(x["name"], x["minutes"]) for x in week["per_hour"]] == [("CLIPS", 45.0), ("UNDERSTAND", 15.0)]
+    assert [(x["name"], x["minutes"]) for x in month["per_hour"]] == [("CLIPS", 60.0), ("UNDERSTAND", 20.0)]
+    assert week["latency_median"] == 7200  # in at -3 h, in Notion at -1 h
+    m = week["calls"]
+    assert (m["n"], m["failed"], m["tokens"]) == (3, 1, 1800) and m["by_family"]["chatgpt"] == {"n": 1, "tokens": 500, "wall": 10.0}
+    assert [(x["key"], round(x["share"], 2)) for x in m["gemini_by_stage"]] == [("understanding", 0.77), ("article", 0.23)]
+    assert len(s["days"]) == 30 and sum(d["done"] for d in s["days"]) == 3 and sum(d["failed"] for d in s["days"]) == 1
+    assert sum(d["video_seconds"] for d in s["days"]) == 6000 and s["runway"] is None
+    # the weekly quota fell 0.21 (a reading that wavers up is not quota coming back), was reset, fell 0.5 more
+    db.set_setting("agy_quota", {"ok": True, "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+        {"window": "weekly", "remaining": 0.5, "reset_at": "x", "disabled": False, "note": None}]}]})
+    db.set_setting("agy_quota_log", [[iso(timedelta(days=9)), 1, 0.1], [iso(timedelta(days=6)), 1, 0.9], [iso(timedelta(days=5)), 1, 0.7],
+                                     [iso(timedelta(days=4.8)), 1, 0.75], [iso(timedelta(days=4.6)), 1, 0.69],
+                                     [iso(timedelta(days=4)), 1, 1.0], [iso(timedelta(hours=1)), 1, 0.5]])
+    assert c.get("/api/engine/stats", headers={"host": "127.0.0.1"}).json()["runway"] is None  # 2 issues over it: too few to tell
+    db.exec("INSERT INTO runs(id, source_id, kind, production, created_at, finished_at) VALUES ('e-r1','x','PRODUCTION','COMPLETE',?,?)",
+            iso(timedelta(days=1)), iso(timedelta(days=1)))
+    r = c.get("/api/engine/stats", headers={"host": "127.0.0.1"}).json()["runway"]
+    assert round(r["per_issue"], 3) == 0.237 and r["issues"] == 2  # 0.71 over 3 issues, 0.5 left
+
+
+def test_the_new_reads_answer_on_an_empty_database(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    s = c.get("/api/engine/stats", headers=h).json()
+    assert s["windows"]["7d"]["done"] == 0 and s["windows"]["30d"]["latency_median"] is None and s["runway"] is None
+    assert c.get("/api/status", headers=h).json() == {"alerts": [], "decisions": 0, "running": 0, "queued": 0, "paused": None}
+    o = c.get("/api/overview", headers=h).json()
+    assert o["running"] == [] and o["drain_seconds"] == 0
+    db.exec("INSERT INTO channels(id, name, mode, created_at, updated_at) VALUES ('x','X','DISCOVERY',?,?)", now(), now())
+    b = c.get("/api/channels/x/board", headers=h).json()
+    assert b["stats"]["issues"] == 0 and b["stats"]["last"] is None and b["backfill"]["pending"] == 0 and b["issues"] == []
+    assert c.get("/api/channels", headers=h).json()["channels"][0]["stats"]["weeks"] == [0] * web.WEEKS
+
+
+def test_overview_lists_every_run_in_production_and_where_a_decision_leads(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    _stats_fixture()
+    db.exec("INSERT INTO runs(id, source_id, production, created_at, started_at) VALUES ('b-r2','b','RUNNING','t','2026-01-01T00:00:00+00:00')")
+    for i, name in enumerate(("UNDERSTAND", "CLIPS")):
+        db.exec("INSERT OR REPLACE INTO stages(run_id, name, ord, status) VALUES ('b-r2',?,?,'PENDING')", name, i)
+    db.exec("INSERT INTO channels(id, name, mode, stage, created_at, updated_at) VALUES ('w','W','TRACKED','TUNING','t','t')")
+    pb = db.exec("INSERT INTO playbooks(channel_id, version, status, data, created_at) VALUES ('w',1,'NEEDS_CONFIRMATION','{}','t')")
+    db.decision("CONFIRM_PLAYBOOK", str(pb), "为「W」定稿")
+    db.set_setting("worker_slots", 3)
+    o = TestClient(web.app).get("/api/overview", headers={"host": "127.0.0.1"}).json()
+    assert {r["id"] for r in o["running"]} == {"c-r2", "b-r2"} and o["slots"] == 3
+    assert all("eta_seconds" in r and r["source"] for r in o["running"])
+    assert o["decisions"][0]["channel_id"] == "w"
+    assert next(i for i in o["issues"] if i["id"] == "a")["ready_at"]
+    # never sooner than the longest run in production (b-r2: understanding and clips of 30 minutes of video)
+    assert o["drain_seconds"] == round((12 + 30) * 30)
+    whole = sum(web.STAGE_COST.values())
+    for rid, sid in (("d-r9", "d"), ("a-r9", "a")):  # queued: each to the slot free first
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?,?,'QUEUED','t')", rid, sid)
+    assert web._drain() == round(whole * 60)  # a's hour of video, on the third slot, ends last
+
+
+# ---------------------------------------------------------------- 频道看板: stats, scans, 补录
+def _board_fixture(home, monkeypatch, stage="LOCKED"):
+    from assetizer import db, ingest
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, stage, created_at, updated_at) VALUES ('t','Tom','UCt','TRACKED',?,?,?)",
+            stage, t, t)
+    db.set_setting("ingest:t", {"enabled": True, "since": "2026-10-09T15:00:00+00:00", "min_minutes": 10})
+    db.exec("INSERT INTO sources(id, channel_id, title, duration, delivery, current_run_id, created_at, updated_at) VALUES ('AAAAAAAAAAA','t','A',3600,'DELIVERED','AAAAAAAAAAA-r1',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, summary, created_at, finished_at) VALUES ('AAAAAAAAAAA-r1','AAAAAAAAAAA','COMPLETE',?,?,?)",
+            json.dumps({"units": 12, "assets": {"clip:GENERATED": 9}}), t, t)
+    entries = [{"id": "AAAAAAAAAAA", "title": "have", "published": "2026-10-20T00:00:00+00:00", "duration": 3600, "approx": True},
+               {"id": "BBBBBBBBBBB", "title": "short", "published": "2026-10-21T00:00:00+00:00", "duration": 120, "approx": True},
+               {"id": "CCCCCCCCCCC", "title": "new", "published": "2026-10-22T00:00:00+00:00", "duration": 2400, "approx": True},
+               {"id": "DDDDDDDDDDD", "title": "before intake", "published": "2026-10-01T00:00:00+00:00", "duration": 2400, "approx": True}]
+    monkeypatch.setattr(ingest, "feed", lambda cid: entries)
+    monkeypatch.setattr(ingest, "listing", lambda cid, limit=15: entries)
+    import assetizer.delivery as d
+    monkeypatch.setattr(d, "registered_in_target", lambda src: None)
+    from assetizer.web import app as web
+    monkeypatch.setattr(web, "_listings", {})
+    monkeypatch.setattr(web, "_feeds", {})
+    return entries
+
+
+def _listed(c, url, h):
+    """The 补录 listing is read in the background: ask until it is there."""
+    import time
+    for _ in range(200):
+        r = c.get(url, headers=h)
+        if r.status_code != 200 or not r.json().get("listing"):
+            return r
+        time.sleep(0.02)
+    raise AssertionError("still listing")
+
+
+def test_a_scan_is_counted_and_kept_with_the_channel(home, monkeypatch):
+    from assetizer import db, ingest
+    _board_fixture(home, monkeypatch)
+    out = ingest.scan(db.one("SELECT * FROM channels WHERE id='t'"), db.setting("ingest:t"))
+    assert (out["found"], out["queued"], out["have"], out["short"], out["error"]) == (3, 1, 1, 1, None) and out["ids"] == ["CCCCCCCCCCC"]
+    cfg = db.setting("ingest:t")
+    assert cfg["last_poll"] == out["at"] and cfg["scans"][0]["queued"] == 1 and "ids" not in cfg["scans"][0]
+    for _ in range(12):
+        ingest.scan(db.one("SELECT * FROM channels WHERE id='t'"), db.setting("ingest:t"))
+    assert len(db.setting("ingest:t")["scans"]) == ingest.SCANS_KEPT and db.setting("ingest:t")["enabled"]
+
+
+def test_a_scan_racing_another_and_one_channel_failing_do_not_stop_intake(home, monkeypatch):
+    import sqlite3
+    from assetizer import db, ingest
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    _board_fixture(home, monkeypatch)
+
+    def taken(*a, **k):  # a 立即扫描 and the worker's round both reached the new video: the other one inserted it first
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: sources.id")
+    monkeypatch.setattr(runner, "submit", taken)
+    out = ingest.scan(db.one("SELECT * FROM channels WHERE id='t'"), db.setting("ingest:t"))
+    assert (out["found"], out["queued"], out["have"], out["short"]) == (3, 0, 2, 1) and db.setting("ingest:t")["scans"]
+    t = now()
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, stage, created_at, updated_at) VALUES ('u','Ursa','UCu','TRACKED','LOCKED',?,?)", t, t)
+    db.set_setting("ingest:u", {"enabled": True, "since": t, "min_minutes": 10})
+    seen = []
+
+    def scan(c, cfg):
+        seen.append(c["id"])
+        if c["id"] == "t":
+            raise RuntimeError("database is locked")
+        return {"ids": ["X"]}
+    monkeypatch.setattr(ingest, "scan", scan)
+    assert ingest.next_round() is None  # no round yet: no time to tell
+    assert ingest.poll() == {"queued": ["X"]} and sorted(seen) == ["t", "u"]
+    assert db.one("SELECT 1 FROM events WHERE kind='ingest' AND message LIKE 'Tom 扫描出错%'")
+    from datetime import datetime  # the next round is the worker's, not the last 立即扫描's
+    assert (datetime.fromisoformat(ingest.next_round()) - datetime.fromisoformat(db.setting("ingest_round"))).seconds == ingest.EVERY
+
+
+def test_the_channel_list_says_test_copy_and_an_empty_listing_is_an_error(home, monkeypatch):
+    from fastapi.testclient import TestClient
+    from assetizer import db, ingest
+    from assetizer.web import app as web
+    _board_fixture(home, monkeypatch)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    db.set_setting("notion:t", {"database_id": "d", "database_title": "🧪 汤姆 · 测试副本"})
+    assert c.get("/api/channels", headers=h).json()["channels"][0]["notion"]["test_copy"]  # an older config: by its name
+    db.set_setting("notion:t", {"database_id": "d", "database_title": "🧪 汤姆 · 测试副本", "is_test_copy": False})
+    assert not c.get("/api/channels", headers=h).json()["channels"][0]["notion"]["test_copy"]
+    entries = ingest.listing("UCt")
+    monkeypatch.setattr(ingest, "listing", lambda cid, limit=15: [])  # yt-dlp listed nothing: an error, and not kept
+    r = _listed(c, "/api/channels/t/backfill/candidates", h)
+    assert r.status_code == 502 and "读不到" in r.json()["detail"]
+    monkeypatch.setattr(ingest, "listing", lambda cid, limit=15: entries)
+    assert len(_listed(c, "/api/channels/t/backfill/candidates", h).json()["candidates"]) == 4
+
+
+def test_backfill_lists_just_deep_enough_for_its_range(home, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from fastapi.testclient import TestClient
+    from assetizer import ingest
+    from assetizer.web import app as web
+    _board_fixture(home, monkeypatch)
+    today = datetime.now(timezone.utc).replace(hour=12)
+    asked = []
+
+    def listing(cid, limit=15):  # a video a day
+        asked.append(limit)
+        return [{"id": f"v{i:010d}", "title": str(i), "duration": 1800, "approx": True,
+                 "published": (today - timedelta(days=i)).isoformat()} for i in range(limit)]
+    monkeypatch.setattr(ingest, "listing", listing)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    since = (today - timedelta(days=200)).date().isoformat()
+    r = _listed(c, f"/api/channels/t/backfill/candidates?since={since}", h).json()
+    assert asked == [60, 274] and r["complete"] and len(r["candidates"]) == 201 and r["listed"] == 274
+    until = (today - timedelta(days=100)).date().isoformat()
+    r = _listed(c, f"/api/channels/t/backfill/candidates?since={since}&until={until}", h).json()
+    assert asked == [60, 274] and len(r["candidates"]) == 101  # the listing is kept: no second read
+    r = _listed(c, "/api/channels/t/backfill/candidates", h).json()  # all of it: as deep as it goes
+    assert asked[-1] == web.LISTING_MAX and not r["complete"] and len(r["candidates"]) == web.LISTING_MAX
+    assert c.get("/api/channels/t/backfill/candidates?since=21-10-2026", headers=h).status_code == 422
+    assert c.get("/api/channels/t/backfill/candidates?since=2026-02-30", headers=h).status_code == 422  # no such day
+
+
+def test_board_scan_and_backfill_through_the_api(home, monkeypatch):
+    import time
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    _board_fixture(home, monkeypatch)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    b = c.get("/api/channels/t/board", headers=h).json()
+    assert b["stats"]["issues"] == 1 and b["stats"]["units"] == 12 and b["stats"]["clips"] == 9 and b["stats"]["delivered"] == 1
+    assert sum(b["stats"]["weeks"]) == 1 and len(b["stats"]["weeks"]) == web.WEEKS and b["issues"][0]["id"] == "AAAAAAAAAAA"
+    assert c.get("/api/channels", headers=h).json()["channels"][0]["stats"]["issues"] == 1
+    assert c.post("/api/channels/t/scan", headers=h, json={}).json() == {"scanning": True}
+    for _ in range(50):
+        if not c.get("/api/channels/t/board", headers=h).json()["ingest"]["scanning"]:
+            break
+        time.sleep(0.05)
+    assert db.setting("ingest:t")["scans"][0]["queued"] == 1
+    v = _listed(c, "/api/channels/t/backfill/candidates", h).json()["candidates"]
+    assert [(x["here"], x["short"]) for x in v] == [(True, False), (False, True), (True, False), (False, False)]  # CCC: the scan
+    r = _listed(c, "/api/channels/t/backfill/candidates?since=2026-10-21&until=2026-10-21", h).json()
+    assert [x["id"] for x in r["candidates"]] == ["BBBBBBBBBBB"] and r["complete"]
+    assert [x["id"] for x in c.get("/api/channels/t/candidates?limit=2", headers=h).json()["candidates"]] == ["AAAAAAAAAAA", "BBBBBBBBBBB"]
+    assert c.post("/api/channels/t/backfill", headers=h, json={"videos": [{"id": "../etc"}]}).status_code == 422
+    r = c.post("/api/channels/t/backfill", headers=h, json={"videos": [
+        {"id": "DDDDDDDDDDD", "title": "before intake", "duration": 2400}, {"id": "AAAAAAAAAAA"}]}).json()
+    assert r == {"queued": 1, "have": 1}  # lined up, not queued for production yet
+    assert _listed(c, "/api/channels/t/backfill/candidates", h).json()["candidates"][3]["queued"]
+    assert not db.one("SELECT 1 FROM runs WHERE source_id='DDDDDDDDDDD'")
+    assert c.get("/api/channels/t/board", headers=h).json()["backfill"] == {"pending": 1, "seconds": 2400, "running": None, "held": None}
+    # 试这一期: right away, normal priority, outside the 补录 line
+    r = c.post("/api/channels/t/backfill", headers=h, json={"videos": [{"id": "EEEEEEEEEEE", "title": "try"}], "now": True}).json()
+    assert r["queued"] == 1 and db.one("SELECT priority, origin FROM runs WHERE id=?", r["run_id"]) == {"priority": 0, "origin": "manual"}
+    # intake switched off: no scan; back to tuning: the line is dropped and 补录 refused
+    db.set_setting("ingest:t", {**db.setting("ingest:t"), "enabled": False})
+    assert c.post("/api/channels/t/scan", headers=h, json={}).status_code == 409
+    from assetizer import tuning
+    tuning.retune("t")
+    assert db.one("SELECT status FROM backfill_queue WHERE source_id='DDDDDDDDDDD'")["status"] == "CANCELLED"
+    assert c.post("/api/channels/t/backfill", headers=h, json={"videos": [{"id": "FFFFFFFFFFF"}]}).status_code == 409
+
+
+def test_backfill_goes_one_at_a_time_when_idle_and_the_quota_has_room(home, monkeypatch):
+    from assetizer import db, ingest
+    from assetizer.util import now
+    _board_fixture(home, monkeypatch)
+    ingest.enqueue_backfill("t", [{"id": "DDDDDDDDDDD", "title": "d"}, {"id": "GGGGGGGGGGG", "title": "g"}])
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES ('t','x',1,?)", now())
+    assert ingest.dispatch_backfill() is None  # a trial waits: it goes first
+    db.exec("DELETE FROM trial_queue")
+    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+        {"window": "weekly", "remaining": 0.2, "reset_at": None, "disabled": False, "note": None}]}]})
+    assert ingest.dispatch_backfill() is None and ingest.backfill_held() == "weekly"  # the week's quota is kept for new videos
+    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+        {"window": "weekly", "remaining": 0.8, "reset_at": None, "disabled": False, "note": None},
+        {"window": "5h", "remaining": 0.1, "reset_at": None, "disabled": False, "note": None}]}]})
+    assert ingest.dispatch_backfill() is None and ingest.backfill_held() == "5h"  # and so is most of the 5 hours
+    db.set_setting("agy_quota", {**db.setting("agy_quota"), "checked_at": "2020-01-01T00:00:00+00:00"})
+    rid = ingest.dispatch_backfill()  # a stale reading does not hold it back
+    assert rid and db.one("SELECT priority, origin FROM runs WHERE id=?", rid) == {"priority": -1, "origin": "backfill"}
+    assert db.one("SELECT channel_id FROM sources WHERE id='DDDDDDDDDDD'")["channel_id"] == "t"
+    assert ingest.dispatch_backfill() is None  # one 补录 run at a time
+    db.exec("UPDATE runs SET production='COMPLETE' WHERE id=?", rid)
+    import assetizer.delivery as d
+    monkeypatch.setattr(d, "registered_in_target", lambda src: {"url": "https://notion.so/x"})
+    assert ingest.dispatch_backfill() is None  # already in the library: skipped, and no 已登记 row floods 往期
+    assert db.one("SELECT status FROM backfill_queue WHERE source_id='GGGGGGGGGGG'")["status"] == "SKIPPED"
+    assert not db.one("SELECT 1 FROM sources WHERE id='GGGGGGGGGGG'")
+
+
+def test_a_cancel_while_backfill_asks_the_library_leaves_the_one_already_taken(home, monkeypatch):
+    import sqlite3
+    from assetizer import db, ingest
+    _board_fixture(home, monkeypatch)
+    ingest.enqueue_backfill("t", [{"id": "DDDDDDDDDDD", "title": "d"}, {"id": "GGGGGGGGGGG", "title": "g"}])
+    import assetizer.delivery as d
+    cancelled = []
+
+    def asked(src):  # 取消排队 while the library is asked about the first one (seconds)
+        cancelled.append(ingest.cancel_backfill("t"))
+        return None
+    monkeypatch.setattr(d, "registered_in_target", asked)
+    rid = ingest.dispatch_backfill()
+    assert rid and cancelled == [1]  # the one under way had gone already: the cancel counts the other
+    assert {r["source_id"]: (r["status"], r["run_id"]) for r in db.q("SELECT * FROM backfill_queue")} == \
+        {"DDDDDDDDDDD": ("DISPATCHED", rid), "GGGGGGGGGGG": ("CANCELLED", None)}
+    db.exec("UPDATE runs SET production='COMPLETE' WHERE id=?", rid)
+    ingest.enqueue_backfill("t", [{"id": "HHHHHHHHHHH", "title": "h"}])
+
+    def taken(*a, **k):  # intake reached the same video at once
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: sources.id")
+    monkeypatch.setattr(ingest, "take", taken)
+    assert ingest.dispatch_backfill() is None  # skipped once, not tried again on every tick
+    assert db.one("SELECT status FROM backfill_queue WHERE source_id='HHHHHHHHHHH'")["status"] == "SKIPPED"

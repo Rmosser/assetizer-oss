@@ -12,13 +12,13 @@ import threading
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import config, db, playback
 from ..util import now
@@ -134,29 +134,47 @@ def _issue(s: dict, n: int) -> dict:
                  s.get("current_run_id"))
     return {"no": n, "id": s["id"], "title": s.get("title") or s["id"], "headline": s.get("headline"), "channel": s.get("channel_title"),
             "channel_id": s.get("channel_id"), "published_at": s.get("published_at"), "duration": s.get("duration"),
-            "delivery": s["delivery"], "notion_url": s.get("notion_url"), "tuning": bool(ch and ch["stage"] == "TUNING"),
+            "delivery": s["delivery"], "delivery_reason": s.get("delivery_reason"), "notion_url": s.get("notion_url"),
+            "tuning": bool(ch and ch["stage"] == "TUNING"),
             "units": summ.get("units"), "must": must, "clips": clips, "notes": notes, "cover": _cover(s.get("current_run_id")), "musts": musts,
             "production": latest["production"] if latest else None, "stage": latest["stage"] if latest else None,
-            "latest_run": latest["id"] if latest else None, "updated_at": s["updated_at"]}
+            "latest_run": latest["id"] if latest else None, "updated_at": s["updated_at"],
+            "ready_at": run["finished_at"] if run else None}
 
 
 # ------------------------------------------------------------------ reads
+@app.get("/api/status")
+def status():
+    """What the masthead and the pages' warning lamps need, without the issue list (/api/overview builds every issue)."""
+    c = db.one("SELECT SUM(production='RUNNING') running, SUM(production IN ('QUEUED','WAITING','INTERRUPTED')) queued FROM runs")
+    return {"alerts": db.q("SELECT key, severity, title FROM alerts WHERE resolved_at IS NULL ORDER BY created_at DESC"),
+            "decisions": db.one("SELECT COUNT(*) n FROM decisions WHERE resolved_at IS NULL")["n"],
+            "running": c["running"] or 0, "queued": c["queued"] or 0, "paused": db.setting("queue_paused")}
+
+
 @app.get("/api/overview")
 def overview():
+    from ..pipeline.runner import worker_slots
     sources = db.q("SELECT * FROM sources ORDER BY created_at ASC")
     issues = [_issue(s, i + 1) for i, s in enumerate(sources)]
-    producing = db.one("SELECT * FROM runs WHERE production='RUNNING' LIMIT 1")
     queue = db.q("""SELECT r.id, r.source_id, r.production, r.wait_reason, s.title, s.url FROM runs r JOIN sources s ON s.id=r.source_id
                     WHERE r.production IN ('QUEUED','WAITING','INTERRUPTED') ORDER BY r.priority DESC, r.created_at""")
-    p = _run_view(producing)
-    if p:
+    running = []  # every run in production at once (setting worker_slots), the one furthest along first
+    for r in db.q("SELECT * FROM runs WHERE production='RUNNING' ORDER BY started_at"):
+        p = _run_view(r)
         p["source"] = db.one("SELECT id, title, channel_title, duration FROM sources WHERE id=?", p["source_id"])
         p["eta_seconds"] = _eta(p)
+        running.append(p)
+    running.sort(key=lambda p: p["eta_seconds"] if p["eta_seconds"] is not None else float("inf"))
+    decisions = db.q("SELECT * FROM decisions WHERE resolved_at IS NULL ORDER BY created_at DESC")
+    for d in decisions:  # 定稿 opens the channel it is about
+        pb = db.one("SELECT channel_id FROM playbooks WHERE id=?", d["ref"]) if d["kind"] == "CONFIRM_PLAYBOOK" and d["ref"] else None
+        d["channel_id"] = pb["channel_id"] if pb else None
     return {
         "issues": list(reversed(issues)),
-        "producing": p, "queue": queue,
+        "running": running, "slots": worker_slots(), "queue": queue, "drain_seconds": _drain(running),
         "alerts": db.q("SELECT * FROM alerts WHERE resolved_at IS NULL ORDER BY created_at DESC"),
-        "decisions": db.q("SELECT * FROM decisions WHERE resolved_at IS NULL ORDER BY created_at DESC"),
+        "decisions": decisions,
         "paused": db.setting("queue_paused"),
         "now": now(),
     }
@@ -164,6 +182,26 @@ def overview():
 
 # rough per-stage cost model (seconds per source-minute), refined from history later
 from ..tuning import STAGE_COST  # noqa: E402
+
+
+def _drain(running: list[dict] | None = None) -> int:
+    """Seconds until everything running or queued is through, roughly: each slot works off what is left of its run, and
+    each queued run (an hour of video when its length is not known yet), in queue order, goes to the slot free first.
+    So it is never shorter than the longest run in production."""
+    import heapq
+    from ..pipeline.runner import worker_slots
+    if running is None:
+        running = [{**r, "stages": db.q("SELECT name, status FROM stages WHERE run_id=?", r["id"])}
+                   for r in db.q("SELECT * FROM runs WHERE production='RUNNING'")]
+    queued = db.q("""SELECT s.duration FROM runs r JOIN sources s ON s.id=r.source_id
+                     WHERE r.production IN ('QUEUED','INTERRUPTED') ORDER BY r.priority DESC, r.created_at""")
+    if not running and not queued:
+        return 0
+    free = [float(_eta(r) or 0) for r in running] + [0.0] * max(0, worker_slots() - len(running))
+    heapq.heapify(free)
+    for q in queued:
+        heapq.heappush(free, heapq.heappop(free) + sum(STAGE_COST.values()) * (q["duration"] or 3600) / 60)
+    return round(max(free))
 
 
 def _eta(run: dict) -> float | None:
@@ -304,7 +342,8 @@ def _compile_state(cid: str, prompt: dict | None, pbs: list[dict]) -> dict | Non
 
 @app.get("/api/channels")
 def channels():
-    from ..ingest import EVERY
+    from ..ingest import EVERY, next_round
+    from ..notion import mapping as M
     out = []
     pending = {d["ref"]: d for d in db.q("SELECT * FROM decisions WHERE resolved_at IS NULL AND kind='CONFIRM_PLAYBOOK'")}
     for c in db.q("SELECT * FROM channels ORDER BY mode DESC, created_at"):
@@ -318,11 +357,12 @@ def channels():
         held = db.one("""SELECT SUM(delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%') blocked, SUM(delivery='HELD') held
                          FROM sources WHERE channel_id=?""", c["id"])
         out.append({**c, "playbooks": pbs, "prompts": prompts, "sources": stats["n"], "last_source": stats["last"],
-                    "ingest": {**(db.setting(f"ingest:{c['id']}") or {"enabled": False}), "every_minutes": EVERY // 60},
+                    "ingest": {**(db.setting(f"ingest:{c['id']}") or {"enabled": False}), "every_minutes": EVERY // 60, "next_at": next_round()},
                     "blocked": held["blocked"] or 0, "held": held["held"] or 0,
                     "notion": {"configured": bool(ncfg.get("database_id")), "database_title": ncfg.get("database_title"),
-                               "template": ncfg.get("template")},
+                               "template": ncfg.get("template"), "test_copy": M.test_copy(ncfg)},
                     "samples": db.one("SELECT COUNT(*) n FROM samples WHERE channel_id=?", c["id"])["n"], "samples_busy": busy,
+                    "stats": _channel_stats(c["id"]),
                     "compile": _compile_state(c["id"], prompts[0] if prompts else None, pbs),
                     "pending_playbook": next((p["id"] for p in pbs if str(p["id"]) in pending), None)})
     uni = db.one("SELECT id, prompt_id, version, status, origin, created_at, activated_at, data, audit FROM playbooks "
@@ -342,21 +382,77 @@ def healthz():
     return {"ok": True}
 
 
+_sizes: dict = {}
+_sizes_lock = threading.Lock()
+
+
+def _dir_sizes(s) -> dict:
+    """Bytes under media / runs / packages. The 机房 page asks every 10 seconds and on the box these hold tens of GB in
+    tens of thousands of files, so after the first count the last one is answered and a recount runs in the
+    background, at most once a minute."""
+    import time
+
+    def count() -> dict:
+        def size(p: Path) -> int:
+            total = 0
+            for f in p.rglob("*") if p.exists() else ():
+                try:  # the worker removes files all the time: one gone between listing and stat is skipped
+                    if f.is_file() and not f.is_symlink():
+                        total += f.stat().st_size
+                except OSError:
+                    pass
+            return total
+        return {"media": size(s.media_dir), "runs": size(s.runs_dir), "packages": size(s.packages_dir)}
+
+    def recount() -> None:
+        try:
+            v = count()
+            with _sizes_lock:
+                _sizes["v"] = v
+        finally:
+            with _sizes_lock:
+                _sizes["busy"] = False
+    with _sizes_lock:
+        if _sizes.get("home") != str(s.home):
+            _sizes.clear()
+        if "v" in _sizes:
+            if time.monotonic() - _sizes["at"] > 60 and not _sizes.get("busy"):
+                _sizes.update(at=time.monotonic(), busy=True)
+                threading.Thread(target=recount, name="dir-sizes", daemon=True).start()
+            return _sizes["v"]
+    v = count()
+    with _sizes_lock:
+        _sizes.update(v=v, at=time.monotonic(), home=str(s.home), busy=False)
+    return v
+
+
+def _providers() -> dict:
+    from ..providers import in_use
+    return {"default": db.setting("llm_provider") or "agy", "stages": db.setting("stage_providers") or {},
+            "in_use": [p.name for p in in_use()]}
+
+
 @app.get("/api/engine")
 def engine():
+    from ..pipeline.runner import worker_slots
+    from ..providers.magpie import quota_view
     s = config.get()
     du = shutil.disk_usage(s.home)
-    def size(p: Path) -> int:
-        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file() and not f.is_symlink()) if p.exists() else 0
     runs = [_run_view(r) for r in db.q("SELECT * FROM runs ORDER BY created_at DESC LIMIT 30")]
     for r in runs:
         src = db.one("SELECT title, headline FROM sources WHERE id=?", r["source_id"]) or {}
         r["title"], r["headline"] = src.get("title"), src.get("headline")
     calls = db.one("""SELECT COUNT(*) n, SUM(wall_seconds) wall, SUM(input_tokens) inp, SUM(output_tokens) outp,
                       SUM(thinking_tokens) think, MAX(peak_rss_kib) rss FROM model_calls""")
+    counts = db.one("""SELECT SUM(production='RUNNING') running, SUM(production='QUEUED') queued,
+                       SUM(production IN ('WAITING','INTERRUPTED')) waiting FROM runs""")
     return {
-        "disk": {"total": du.total, "free": du.free, "media": size(s.media_dir), "runs": size(s.runs_dir), "packages": size(s.packages_dir)},
+        "disk": {"total": du.total, "free": du.free, **_dir_sizes(s)},
         "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model,
+        "quota": {"agy": db.setting("agy_quota"), "agy_log": db.setting("agy_quota_log") or [],
+                  "magpie": quota_view(db.setting("magpie_quota"))},
+        "providers": _providers(), "slots": worker_slots(), "drain_seconds": _drain(),
+        "counts": {k: counts[k] or 0 for k in ("running", "queued", "waiting")},
         "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
                    "parent": db.setting("notion_parent_page_id")},
         "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
@@ -365,9 +461,147 @@ def engine():
         "alerts": db.q("SELECT * FROM alerts ORDER BY resolved_at IS NOT NULL, created_at DESC LIMIT 20"),
         "runs": runs, "calls": calls,
         "events": db.q("SELECT * FROM events ORDER BY id DESC LIMIT 80"),
-        "capacity_note": "串行处理：60 分钟视频约 1.5–2 小时；每日上限约 10–12 个视频小时。",
         "stage_labels": STAGE_LABELS,
     }
+
+
+def _family(model: str | None) -> str:
+    """Which subscription a model call drew on, by its model id: Gemini (agy, or the 兔子 gateway) or ChatGPT (magpie)."""
+    m = (model or "").lower()
+    return "gemini" if "gemini" in m else "chatgpt" if "gpt" in m or m.startswith("codex") else "other"
+
+
+@app.get("/api/engine/stats")
+def engine_stats():
+    """How production went over the last 7 and 30 days, with a bar per day: issues done and failed, hours of video,
+    the median time from intake to Notion, what failed most, the median minutes per hour of video of each stage, and
+    the model calls by subscription (Gemini / ChatGPT) with where Gemini's tokens went (its quota is the bottleneck).
+    Days are the server's local time (TZ=Asia/Shanghai in the package). Imported and experiment runs are left out; a
+    run's stages are counted without TRANSCRIBE (it runs in the background) and CLEANUP."""
+    from datetime import datetime, timedelta, timezone
+    from statistics import median
+    from ..providers import stage_key
+    now_l = datetime.now().astimezone()
+    since = (now_l - timedelta(days=30)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    cuts = {"7d": now_l - timedelta(days=7), "30d": now_l - timedelta(days=30)}
+    days = [(now_l - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(29, -1, -1)]
+    bars = {k: {"t": k, "done": 0, "failed": 0, "video_seconds": 0.0} for k in days}
+
+    def local(ts: str | None) -> datetime | None:
+        try:
+            return datetime.fromisoformat(ts).astimezone() if ts else None
+        except ValueError:
+            return None
+
+    def blank() -> dict:
+        return {"done": 0, "partial": 0, "failed": 0, "video_seconds": 0.0, "reasons": {}, "latency": [], "per_hour": {},
+                "calls": {"n": 0, "failed": 0, "wall": 0.0, "tokens": 0, "by_family": {}, "gemini_by_stage": {}}}
+    win = {k: blank() for k in cuts}
+    kinds = "r.kind NOT IN ('IMPORT','EXPERIMENT')"
+
+    stages: dict[str, dict[str, float]] = {}
+    for st in db.q(f"""SELECT st.run_id, st.name, st.wall_seconds FROM stages st JOIN runs r ON r.id=st.run_id
+                       WHERE r.finished_at >= ? AND {kinds} AND r.production IN ('COMPLETE','COMPLETE_PARTIAL')
+                       AND st.wall_seconds IS NOT NULL AND st.name NOT IN ('TRANSCRIBE','CLEANUP')""", since):
+        stages.setdefault(st["run_id"], {})[st["name"]] = st["wall_seconds"]
+    for r in db.q(f"""SELECT r.id, r.production, r.error_class, r.finished_at, s.duration FROM runs r JOIN sources s ON s.id=r.source_id
+                      WHERE r.finished_at >= ? AND {kinds} AND r.production IN ('COMPLETE','COMPLETE_PARTIAL','FAILED')""", since):
+        t = local(r["finished_at"])
+        if t is None:
+            continue
+        ok = r["production"] != "FAILED"
+        b = bars.get(t.strftime("%Y-%m-%d"))
+        if b:
+            b["done" if ok else "failed"] += 1
+            b["video_seconds"] += (r["duration"] or 0) if ok else 0
+        for w, cut in cuts.items():
+            if t < cut:
+                continue
+            v = win[w]
+            if not ok:
+                v["failed"] += 1
+                v["reasons"][r["error_class"] or "?"] = v["reasons"].get(r["error_class"] or "?", 0) + 1
+                continue
+            v["done"] += 1
+            v["partial"] += r["production"] == "COMPLETE_PARTIAL"
+            v["video_seconds"] += r["duration"] or 0
+            hours = (r["duration"] or 0) / 3600
+            if hours > 0.05:  # minutes each stage took per hour of this video
+                for name, secs in stages.get(r["id"], {}).items():
+                    v["per_hour"].setdefault(name, []).append(secs / 60 / hours)
+    # intake to Notion: from when the video came in to when its page was written
+    for s in db.q("""SELECT created_at, delivered_at FROM sources WHERE delivered_at >= ? AND delivery='DELIVERED'""", since):
+        a, d = local(s["created_at"]), local(s["delivered_at"])
+        for w, cut in cuts.items():
+            if a and d and d >= cut and d > a:
+                win[w]["latency"].append((d - a).total_seconds())
+    for c in db.q("""SELECT created_at, model, stage, status, wall_seconds, input_tokens, output_tokens, thinking_tokens
+                     FROM model_calls WHERE created_at >= ?""", since):
+        t = local(c["created_at"])
+        if t is None:
+            continue
+        fam, tok = _family(c["model"]), (c["input_tokens"] or 0) + (c["output_tokens"] or 0) + (c["thinking_tokens"] or 0)
+        for w, cut in cuts.items():
+            if t < cut:
+                continue
+            m = win[w]["calls"]
+            m["n"] += 1
+            m["failed"] += c["status"] not in ("SUCCESS", None)
+            m["wall"] += c["wall_seconds"] or 0
+            m["tokens"] += tok
+            f = m["by_family"].setdefault(fam, {"n": 0, "tokens": 0, "wall": 0.0})
+            f["n"] += 1
+            f["tokens"] += tok
+            f["wall"] += c["wall_seconds"] or 0
+            if fam == "gemini":
+                k = stage_key(c["stage"] or "?")
+                m["gemini_by_stage"][k] = m["gemini_by_stage"].get(k, 0) + tok
+    for v in win.values():
+        v["reasons"] = sorted(({"kind": k, "n": n} for k, n in v["reasons"].items()), key=lambda x: -x["n"])[:3]
+        v["latency_median"] = round(median(v["latency"])) if v["latency"] else None
+        del v["latency"]
+        v["per_hour"] = sorted(({"name": n, "label": STAGE_LABELS.get(n, n), "minutes": round(median(x), 1)}
+                                for n, x in v["per_hour"].items()), key=lambda x: -x["minutes"])
+        g = v["calls"]["gemini_by_stage"]
+        total = sum(g.values()) or 1
+        v["calls"]["gemini_by_stage"] = sorted(({"key": k, "tokens": n, "share": n / total} for k, n in g.items()),
+                                               key=lambda x: -x["tokens"])
+    return {"now": now_l.isoformat(timespec="seconds"), "windows": win, "days": [bars[k] for k in days],
+            "runway": _runway()}
+
+
+RUNWAY_MIN_DONE = 3  # issues finished over the readings before the quota's use per issue is told
+
+
+def _runway() -> dict | None:
+    """How many more issues the production group's weekly quota holds, roughly: the share of it used over the last week's
+    readings, divided by the issues finished over them. A rise of more than 10 points is the week's reset; smaller ones
+    are the reading wavering, not quota coming back. Runs still under way, trials and compiling (and agy used elsewhere)
+    also draw on it, so it is told only once a few issues were finished, and reads as an estimate."""
+    q = db.setting("agy_quota") or {}
+    g = next((g for g in q.get("groups") or [] if g["name"] == q.get("production_group")), None)
+    week = next((b for b in (g or {}).get("buckets", []) if b["window"] == "weekly" and not b["disabled"]), None)
+    from datetime import datetime, timedelta, timezone
+    cut = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    log = [x for x in db.setting("agy_quota_log") or [] if x[2] is not None and x[0] >= cut]
+    if not week or week["remaining"] is None or len(log) < 2:
+        return None
+    done = db.one("""SELECT COUNT(*) n FROM runs WHERE finished_at >= ? AND production IN ('COMPLETE','COMPLETE_PARTIAL')
+                     AND kind NOT IN ('IMPORT','EXPERIMENT')""", log[0][0])["n"]
+    if done < RUNWAY_MIN_DONE:
+        return None
+    used, top, low = 0.0, log[0][2], log[0][2]
+    for _, _, v in log[1:]:
+        if v > low + 0.1:  # the week's reset: what was used before it is counted
+            used += top - low
+            top = low = v
+        else:
+            low = min(low, v)
+    used += top - low
+    if used < 0.02:
+        return None
+    per = used / done
+    return {"per_issue": per, "issues": int(week["remaining"] / per), "remaining": week["remaining"], "reset_at": week["reset_at"]}
 
 
 @app.get("/api/runs/{rid}")
@@ -574,14 +808,14 @@ _throttle_lock = threading.Lock()
 _video_test_lock = threading.Lock()
 
 
-def _throttled(key: str, interval: float) -> JSONResponse | None:
+def _throttled(key: str, interval: float, what: str = "测试") -> JSONResponse | None:
     """A 429 when `key` last ran less than `interval` seconds ago; otherwise None, and this run is recorded."""
     import time
     with _throttle_lock:
         wait = _throttle_at.get(key, float("-inf")) + interval - time.monotonic()
         if wait > 0:
             secs = int(wait) + 1
-            return JSONResponse({"detail": f"测试太频繁：{secs} 秒后再试"}, status_code=429, headers={"Retry-After": str(secs)})
+            return JSONResponse({"detail": f"{what}太频繁：{secs} 秒后再试"}, status_code=429, headers={"Retry-After": str(secs)})
         _throttle_at[key] = time.monotonic()
     return None
 
@@ -641,6 +875,156 @@ def channel_ingest(cid: str, body: Ingest):
     return set_enabled(cid, body.enabled, body.min_minutes)
 
 
+# ------------------------------------------------------------------ 频道看板: stats, scans, 补录
+WEEKS = 20  # weekly bars on the 看板 (the 频道 overview shows the last 12 of them)
+
+
+def _channel_stats(cid: str) -> dict:
+    """What a channel has produced: issues (made with any version), this and last month, units, clips, video time,
+    校注 per issue, where delivery stands, the model tokens it took, and issues per week (by the day each was ready).
+    Only what was produced counts: a video intake found already in the library is 已登记 without a run, not an issue
+    (`registered` is an issue whose page turned out to be there already)."""
+    from datetime import datetime, timedelta
+    rows = db.q("""SELECT s.id, s.delivery, s.duration, r.finished_at, r.summary FROM sources s JOIN runs r ON r.id=s.current_run_id
+                   WHERE s.channel_id=?""", cid)
+    notes = db.one("""SELECT COUNT(*) n FROM flags f JOIN sources s ON s.id=f.source_id AND f.run_id=s.current_run_id
+                      WHERE s.channel_id=? AND f.severity!='INFO'""", cid)["n"]
+    tok = db.one("""SELECT SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(thinking_tokens,0)) n FROM model_calls m
+                    JOIN runs r ON r.id=m.run_id JOIN sources s ON s.id=r.source_id WHERE s.channel_id=?""", cid)["n"] or 0
+    active = db.one("""SELECT SUM(r.production='RUNNING') running, SUM(r.production IN ('QUEUED','WAITING','INTERRUPTED')) queued
+                       FROM runs r JOIN sources s ON s.id=r.source_id WHERE s.channel_id=?""", cid)
+    today = datetime.now().astimezone()
+    month = today.strftime("%Y-%m")
+    last_month = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    monday = (today - timedelta(days=today.weekday())).date()
+    weeks = [0] * WEEKS
+    out = {"issues": len(rows), "month": 0, "last_month": 0, "units": 0, "clips": 0, "seconds": 0.0, "notes": notes, "tokens": tok,
+           "delivered": 0, "registered": 0, "failed": 0, "waiting": 0,
+           "running": active["running"] or 0, "queued": active["queued"] or 0}
+    for r in rows:
+        summ = db.unj(r["summary"], {}) or {}
+        out["units"] += summ.get("units") or 0
+        out["clips"] += (summ.get("assets") or {}).get("clip:GENERATED", 0)
+        out["seconds"] += r["duration"] or 0
+        d = r["delivery"]
+        out["delivered" if d == "DELIVERED" else "registered" if d == "REGISTERED" else "failed" if d in ("FAILED", "BLOCKED")
+            else "waiting"] += 1
+        try:
+            t = datetime.fromisoformat(r["finished_at"]).astimezone() if r["finished_at"] else None
+        except ValueError:
+            t = None
+        if t:
+            out["month"] += t.strftime("%Y-%m") == month
+            out["last_month"] += t.strftime("%Y-%m") == last_month
+            ago = (monday - (t.date() - timedelta(days=t.weekday()))).days // 7
+            if 0 <= ago < WEEKS:
+                weeks[WEEKS - 1 - ago] += 1
+    out["weeks"] = weeks
+    out["week_start"] = (monday - timedelta(weeks=WEEKS - 1)).isoformat()
+    last = db.one("""SELECT s.id, s.title, s.headline, s.published_at, s.delivery, r.finished_at FROM sources s
+                     JOIN runs r ON r.id=s.current_run_id WHERE s.channel_id=? ORDER BY r.finished_at DESC LIMIT 1""", cid)
+    out["last"] = last
+    return out
+
+
+_scanning: set[str] = set()
+_board_lock = threading.Lock()
+
+
+def _tracked(cid: str, locked: bool = False) -> dict:
+    c = db.one("SELECT * FROM channels WHERE id=? AND mode='TRACKED' AND youtube_channel_id IS NOT NULL", cid)
+    if not c:
+        raise HTTPException(404, "不是在跟踪的频道")
+    if locked and c["stage"] != "LOCKED":
+        raise HTTPException(409, "定稿后才能补录或扫描")
+    return c
+
+
+@app.get("/api/channels/{cid}/board")
+def channel_board(cid: str):
+    """The 看板 of one channel: its stats, intake settings with the last scans, and every issue it has."""
+    from ..ingest import EVERY, backfill_held, next_round
+    if not db.one("SELECT id FROM channels WHERE id=?", cid):
+        raise HTTPException(404)
+    sources = db.q("SELECT * FROM sources WHERE channel_id=? ORDER BY created_at ASC", cid)
+    issues = [_issue(s, i + 1) for i, s in enumerate(sources)]
+    line = db.one("""SELECT COUNT(*) n, SUM(duration) seconds FROM backfill_queue WHERE channel_id=? AND status='PENDING'""", cid)
+    now_run = db.one("""SELECT r.id, r.production, r.wait_reason, s.title FROM runs r JOIN sources s ON s.id=r.source_id
+                        WHERE s.channel_id=? AND r.origin='backfill' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')""", cid)
+    from ..tuning import minutes_per_video_minute
+    return {"stats": _channel_stats(cid), "issues": list(reversed(issues)),
+            "ingest": {**(db.setting(f"ingest:{cid}") or {"enabled": False}), "every_minutes": EVERY // 60, "next_at": next_round(),
+                       "scanning": cid in _scanning},
+            # held: the window ("weekly", "5h") that holds the waiting 补录 back
+            "backfill": {"pending": line["n"], "seconds": line["seconds"] or 0, "running": now_run,
+                         "held": backfill_held() if line["n"] else None},
+            # for the 补录 sheet's estimate: minutes of production per minute of video here, and the weekly quota an issue takes
+            "pace": minutes_per_video_minute(cid), "runway": _runway()}
+
+
+@app.post("/api/channels/{cid}/scan")
+def channel_scan(cid: str):
+    """Look at the channel's feed now instead of at the next half-hour round (intake must be on)."""
+    from .. import ingest
+    c = _tracked(cid, locked=True)
+    cfg = db.setting(f"ingest:{cid}") or {}
+    if not cfg.get("enabled"):
+        raise HTTPException(409, "先打开自动收录")
+    with _board_lock:
+        if cid in _scanning:
+            return {"scanning": True}
+        _scanning.add(cid)
+
+    def run() -> None:
+        try:
+            ingest.scan(c, cfg)
+        except Exception as e:  # noqa: BLE001
+            db.event("ingest", f"{c['name']} 扫描出错：{e}", level="warn")
+        finally:
+            _scanning.discard(cid)
+    threading.Thread(target=run, name=f"scan-{cid}", daemon=True).start()
+    return {"scanning": True}
+
+
+class BackfillItem(BaseModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{11}$")
+    title: str = Field(default="", max_length=500)
+    duration: float | None = Field(default=None, ge=0, le=86400)
+
+
+class Backfill(BaseModel):
+    videos: list[BackfillItem] = Field(min_length=1, max_length=1000)  # a whole listing (LISTING_MAX), picked by date
+    now: bool = False  # 试这一期: produce right away with normal priority, not through the 补录 line
+
+
+@app.post("/api/channels/{cid}/backfill")
+def channel_backfill(cid: str, body: Backfill):
+    """补录 for a locked channel: line the chosen videos up (produced one at a time while idle and the quota has room),
+    or with `now` take the one video right away."""
+    from .. import ingest
+    c = _tracked(cid, locked=True)
+    if body.now:
+        v = body.videos[0]
+        if db.one("SELECT 1 FROM sources WHERE id=?", v.id):
+            raise HTTPException(409, "这一期已经在了")
+        state, rid = ingest.take(c, {"id": v.id, "title": v.title.strip()}, "试收", origin="manual", register=False)
+        return {"queued": int(bool(rid)), "registered": int(not rid), "have": 0, "run_id": rid}
+    out = ingest.enqueue_backfill(cid, [v.model_dump() for v in body.videos])
+    if out["queued"]:
+        db.event("ingest", f"补录排队：{c['name']} · {out['queued']} 期")
+    return out
+
+
+@app.post("/api/channels/{cid}/backfill/cancel")
+def channel_backfill_cancel(cid: str):
+    from .. import ingest
+    _tracked(cid)
+    n = ingest.cancel_backfill(cid)
+    if n:
+        db.event("ingest", f"取消补录：{n} 期")
+    return {"cancelled": n}
+
+
 def _bg(fn, *args, label: str = "") -> None:
     def run():
         try:
@@ -663,28 +1047,131 @@ def channel_workbench(cid: str):
     return tuning.workbench(cid)
 
 
-@app.get("/api/channels/{cid}/candidates")
-def channel_candidates(cid: str):
-    """Recent uploads from the channel feed, marked 已是样片 / 已生产 / 库里已有."""
+FEED_TTL = 300        # seconds the channel's latest videos are kept (the 看板's 试一期, the sample picker)
+LISTING_TTL = 600     # and a 补录 listing (one sitting of picking)
+LISTING_MAX = 1000    # the deepest listing: 补录 reaches this many of the channel's latest videos
+_feeds: dict[str, tuple[float, list]] = {}
+_listings: dict[tuple[str, int], dict] = {}
+
+
+def _marked(cid: str, entries: list[dict], lib: dict) -> list[dict]:
+    """Each video marked 已是样片 / 已在本刊 / 库里已有 / 补录排队中 / 太短."""
+    samples = {r["source_id"] for r in db.q("SELECT source_id FROM samples WHERE channel_id=?", cid)}
+    lined = {r["source_id"] for r in db.q("SELECT source_id FROM backfill_queue WHERE channel_id=? AND status='PENDING'", cid)}
+    least = 60 * int((db.setting(f"ingest:{cid}") or {}).get("min_minutes") or 0)
+    out = []
+    for e in entries:
+        s = db.one("SELECT current_run_id FROM sources WHERE id=?", e["id"])
+        out.append({**e, "sample": e["id"] in samples, "produced": bool(s and s["current_run_id"]), "here": bool(s),
+                    "library": lib.get(e["id"]), "queued": e["id"] in lined,
+                    "short": bool(least and e.get("duration") and e["duration"] < least)})
+    return out
+
+
+def _library(cid: str, entries: list[dict]) -> dict:
     from ..delivery import registered_many
+    try:
+        return registered_many({"channel_id": cid}, [e["id"] for e in entries])
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+@app.get("/api/channels/{cid}/candidates")
+def channel_candidates(cid: str, limit: int = 15):
+    """The channel's latest videos (up to 15, from the feed; kept FEED_TTL), marked: the 调试台's sample picker and the
+    看板's 试一期."""
+    import time
     from ..ingest import feed
     ch = db.one("SELECT * FROM channels WHERE id=?", cid)
     if not ch or not ch.get("youtube_channel_id"):
         raise HTTPException(404)
-    try:
-        entries = feed(ch["youtube_channel_id"])
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"读不到频道最近的视频：{e}")
-    samples = {r["source_id"] for r in db.q("SELECT source_id FROM samples WHERE channel_id=?", cid)}
-    try:
-        lib = registered_many({"channel_id": cid}, [e["id"] for e in entries])
-    except Exception:  # noqa: BLE001
-        lib = {}
-    out = []
-    for e in entries:
-        s = db.one("SELECT current_run_id FROM sources WHERE id=?", e["id"])
-        out.append({**e, "sample": e["id"] in samples, "produced": bool(s and s["current_run_id"]), "library": lib.get(e["id"])})
-    return {"candidates": out}
+    hit = _feeds.get(cid)
+    if hit and time.monotonic() - hit[0] < FEED_TTL:
+        entries = hit[1]
+    else:
+        try:
+            entries = feed(ch["youtube_channel_id"])
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"读不到频道最近的视频：{e}")
+        _feeds[cid] = (time.monotonic(), entries)
+    entries = entries[:max(1, min(limit, 15))]
+    least = int((db.setting(f"ingest:{cid}") or {}).get("min_minutes") or 0)
+    return {"candidates": _marked(cid, entries, _library(cid, entries)), "min_minutes": least}
+
+
+def _listing(ch: dict, depth: int) -> dict:
+    """The channel's latest `depth` videos with what its Notion database already has, read in the background (yt-dlp
+    takes a minute for the deepest) and kept LISTING_TTL: {"entries", "library"} once read, {"busy": True} until then,
+    {"error"} once when it failed (asking again starts over). A fresh deeper listing serves a shallower one: its first
+    videos are the same."""
+    import time
+    from ..ingest import listing
+    cid = ch["id"]
+    with _board_lock:
+        for k in [k for k, v in _listings.items() if "at" in v and time.monotonic() - v["at"] >= LISTING_TTL]:
+            del _listings[k]  # past their time: not kept around
+        fresh = sorted((d, v) for (c, d), v in _listings.items()
+                       if c == cid and d >= depth and "entries" in v and time.monotonic() - v["at"] < LISTING_TTL)
+        if fresh:
+            return {**fresh[0][1], "entries": fresh[0][1]["entries"][:depth]}
+        hit = _listings.get((cid, depth))
+        if hit and hit.get("error"):
+            del _listings[(cid, depth)]
+        if hit and ("busy" in hit or "error" in hit):
+            return hit
+        _listings[(cid, depth)] = {"busy": True}
+
+    def run() -> None:
+        try:
+            entries = listing(ch["youtube_channel_id"], depth)
+            if not entries:  # yt-dlp failed on both tabs (it reports no error)
+                raise RuntimeError("yt-dlp 没有列出任何视频")
+            v = {"at": time.monotonic(), "entries": entries, "library": _library(cid, entries)}
+        except Exception as e:  # noqa: BLE001
+            v = {"error": f"读不到频道的视频：{e}"[:300]}
+        with _board_lock:
+            _listings[(cid, depth)] = v
+    threading.Thread(target=run, name=f"listing-{cid}", daemon=True).start()
+    return {"busy": True}
+
+
+@app.get("/api/channels/{cid}/backfill/candidates")
+def backfill_candidates(cid: str, since: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+                        until: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$")):
+    """补录's choice: the channel's videos published from `since` to `until` (days, both included; no `since`: all of
+    them, up to LISTING_MAX), marked. yt-dlp's listing is read just deep enough to reach `since` — guessed from how often
+    the channel posts — and dates its videos roughly ("3 weeks ago"), so the range is approximate at its ends.
+    {"listing": true} while it is read."""
+    from datetime import date, datetime, timezone
+    try:  # the pattern lets 2026-02-30 through
+        for d in (since, until):
+            if d:
+                date.fromisoformat(d)
+    except ValueError:
+        raise HTTPException(422, "没有这一天")
+    ch = _tracked(cid)
+    today = datetime.now(timezone.utc).date()
+    depth = 60 if since else LISTING_MAX
+    while True:
+        r = _listing(ch, depth)
+        if "entries" not in r:
+            break
+        dated = [e for e in r["entries"] if e.get("published")]
+        oldest = dated[-1]["published"][:10] if dated else None
+        if not since or len(r["entries"]) < depth or depth >= LISTING_MAX or not oldest or oldest < since:
+            break
+        per_day = len(dated) / max(1, (today - date.fromisoformat(oldest)).days)
+        depth = min(LISTING_MAX, max(depth * 2, int(per_day * (today - date.fromisoformat(since)).days * 1.2) + 30))
+    if r.get("busy"):
+        return {"listing": True}
+    if r.get("error"):
+        raise HTTPException(502, r["error"])
+    entries = r["entries"]
+    inside = [e for e in entries if (not since or (e.get("published") or "")[:10] >= since)
+              and (not until or (e.get("published") or "")[:10] <= until)]
+    reached = len(entries) < depth or bool(since and oldest and oldest < since)
+    least = int((db.setting(f"ingest:{cid}") or {}).get("min_minutes") or 0)
+    return {"candidates": _marked(cid, inside, r["library"]), "min_minutes": least, "listed": len(entries), "complete": reached}
 
 
 class SampleBody(BaseModel):
@@ -864,8 +1351,7 @@ def _notion_view(cid: str, cfg: dict) -> dict:
                 except NotionError:
                     titles[pid] = None
     return {"database": {"id": dbo["id"], "url": dbo.get("url"), "title": "".join(t.get("plain_text", "") for t in dbo.get("title", []))},
-            # an explicit flag once the target was picked in the app; older configs go by the 🧪 copy's name
-            "test_copy": bool(cfg["is_test_copy"]) if "is_test_copy" in cfg else "测试副本" in title,
+            "test_copy": M.test_copy(cfg, title),
             "config": {k: cfg.get(k) for k in ("template", "heading", "icon")}, **view, "page_titles": titles,
             "sample_source": s and {"id": s["id"], "title": s["title"]},
             "templates": M.TEMPLATES, "source_labels": {k: v[0] for k, v in M.SOURCES.items()},
@@ -1123,14 +1609,72 @@ def channel_update(cid: str, body: ChannelInfo):
     return db.one("SELECT id, name, why FROM channels WHERE id=?", cid)
 
 
+# ------------------------------------------------------------------ agy: sign-in and quota (机房)
+class LoginCode(BaseModel):
+    code: str = Field(max_length=4096)
+
+
+@app.get("/api/agy/login")
+def agy_login_state():
+    from ..providers import agy_login
+    return agy_login.current()
+
+
+@app.post("/api/agy/login")
+def agy_login_start():
+    """Start (or rejoin) the one sign-in session; the page polls GET for the link, then posts the code."""
+    from ..providers import agy_login
+    return agy_login.start()
+
+
+@app.post("/api/agy/login/code")
+def agy_login_code(body: LoginCode):
+    from ..providers import agy_login
+    try:
+        return agy_login.submit(body.code)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.post("/api/agy/login/cancel")
+def agy_login_cancel():
+    from ..providers import agy_login
+    return agy_login.cancel()
+
+
+def _read_agy() -> dict:
+    """Read agy's quota (`agy -p /usage`: no turn, no quota spent). agy answering is what clears its sign-in alert —
+    after a sign-in in the terminal, say."""
+    from ..pipeline.runner import agy_answers
+    from ..providers.agy import AgyProvider, record_usage
+    q = record_usage(AgyProvider().usage())
+    if q.get("ok"):
+        agy_answers()
+    return q
+
+
+@app.post("/api/agy/quota")
+def agy_quota_refresh():
+    """Read the quota now; at most once every 20 seconds."""
+    if busy := _throttled("agy-quota", 20.0, "刷新"):
+        return busy
+    return _read_agy()
+
+
 @app.post("/api/queue/resume")
 def resume():
+    """手动恢复: the queue goes on and what waited for the model is queued again. agy's sign-in alert is not the click's
+    to clear: agy is asked in the background, and the alert goes once it answers (a run that fails on it raises it again)."""
+    from ..pipeline.runner import auth_alert_provider
     paused = db.setting("queue_paused")
     db.set_setting("queue_paused", None)
     reasons = ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA")
     db.exec(f"UPDATE runs SET production='QUEUED', wait_reason=NULL WHERE production='WAITING' AND wait_reason IN {reasons}")
-    for r in reasons:
-        db.resolve_alert(r)
+    db.resolve_alert("PROVIDER_QUOTA")
+    if auth_alert_provider() == "agy":
+        threading.Thread(target=_read_agy, name="agy-usage", daemon=True).start()
+    else:
+        db.resolve_alert("AGY_AUTH_REQUIRED")
     return {"ok": True, "was": paused}
 
 
