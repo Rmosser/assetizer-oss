@@ -7,6 +7,7 @@ import { parseDay, WAIT } from "../../util";
 import { about, big, Columns, hrs, Kpi, pct, ymd } from "../Figures";
 import { Sheet, type SheetHandle } from "../Sheet";
 import { Fault } from "../States";
+import { Days } from "./Days";
 import { fmt, hm, nextScan, Stepper, Switch } from "./bits";
 import type { Mode } from "./Header";
 import type { Board as BoardData, Candidate, Channel, Scan } from "./types";
@@ -161,14 +162,11 @@ function Picker({ ch, b, onClose, onDone }: { ch: Channel; b: BoardData; onClose
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const sheet = useRef<SheetHandle>(null);
-  const today = ymd(new Date());
-  const wrong = !!since && !!until && since > until;
   useEffect(() => {
     let alive = true;
     let t: number | undefined;
     setData(null);
     setErr(null);
-    if (wrong) return;
     const q = new URLSearchParams();
     if (since) q.set("since", since);
     if (until) q.set("until", until);
@@ -181,9 +179,8 @@ function Picker({ ch, b, onClose, onDone }: { ch: Channel; b: BoardData; onClose
     }).catch((e) => { if (alive) setErr((e as Error).message); });
     ask();
     return () => { alive = false; clearTimeout(t); };
-  }, [ch.id, since, until, again, wrong]);
+  }, [ch.id, since, until, again]);
   const pick = (r: Range) => { setRange(r); setDays(span(r)); };
-  const day = (which: 0 | 1, v: string) => { setRange("custom"); setDays(which ? [since, v] : [v, until]); };
   const list = data?.candidates || [];
   const open = list.filter((c) => fresh(c) && !c.short);
   const chosen = list.filter((c) => picked.has(c.id));
@@ -211,13 +208,9 @@ function Picker({ ch, b, onClose, onDone }: { ch: Channel; b: BoardData; onClose
                 onClick={() => pick(o.value)}>{o.label}</button>
             ))}
           </div>
-          <div className="ch-pkd">
-            <input type="date" aria-label="从" value={since} max={until || today} onChange={(e) => day(0, e.target.value)} />
-            <span aria-hidden>至</span>
-            <input type="date" aria-label="到" value={until} min={since || undefined} max={today} onChange={(e) => day(1, e.target.value)} />
-          </div>
+          <Days since={since} until={until} on={range === "custom"} onChange={(a, z) => { setRange("custom"); setDays([a, z]); }} />
         </div>
-        {wrong ? <p className="ch-err">开始的日子晚于结束的日子</p> : !data && !err ? (
+        {!data && !err ? (
           <p className="ch-pkw"><i className="spin" aria-hidden />正在列出这段时间的视频…</p>
         ) : null}
         {data && (
