@@ -1,5 +1,5 @@
 package: cloud.lazycat.app.assetizer
-version: 0.4.18
+version: 0.4.19
 name: Assetizer
 description: Turns long investment videos into knowledge units, clips and Notion pages.
 author: Rmosser
@@ -9,5 +9,5 @@ locales:
     name: Assetizer
     description: Turns long investment videos into knowledge units, clips and Notion pages.
   zh:
-    name: 投资内容资产化
+    name: 课代表
     description: 把长篇投资视频整理成知识单元、短片和 Notion 页面。

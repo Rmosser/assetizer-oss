@@ -404,7 +404,7 @@ def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None,
         s = db.one("SELECT * FROM sources WHERE id=?", sid)
         name = s.get("title") or sid
         if act == "replace" and not s.get("notion_page_id"):
-            raise LockRefused(f"「{name}」库里那一页不是资产刊写的，只能保留")
+            raise LockRefused(f"「{name}」库里那一页不是课代表写的，只能保留")
         run_id = None
         if act == "wait":
             r = db.one(f"SELECT id FROM runs WHERE source_id=? AND production IN {ACTIVE_RUN} ORDER BY created_at DESC LIMIT 1", sid)

@@ -1,7 +1,7 @@
 [project]
 name = "assetizer"
 version = "0.1.0"
-description = "投资内容自动资产化 Agent — long investment videos to Knowledge Units, clips, Notion and publication packages"
+description = "课代表 — long videos to Knowledge Units, clips, Notion and publication packages"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.110",

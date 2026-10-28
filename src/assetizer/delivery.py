@@ -66,7 +66,7 @@ def ensure_database(n: Notion) -> str:
     r = n._req("POST", "/databases", json={
         "parent": {"type": "page_id", "page_id": parent}, "is_inline": True,
         "icon": {"type": "emoji", "emoji": "🎬"},
-        "title": [{"type": "text", "text": {"content": db.setting("notion_database_title", "投资内容资产 · Assetizer")}}],
+        "title": [{"type": "text", "text": {"content": db.setting("notion_database_title", "课代表")}}],
         "properties": DB_PROPS})
     db.set_setting("notion_database_id", r["id"])
     db.set_setting("notion_schema", 2)
@@ -101,7 +101,7 @@ def _default_plan(source: dict, run_id: str) -> list[dict]:
     from .templates import composition
     plan: list[dict] = []
     head = (f"来源：{source.get('channel_title') or ''} · {source.get('url') or ''} · 时长 {fmt_tc(source.get('duration') or 0)}。"
-            "观点归原作者；本文由 Assetizer 自动整理，截图与解释性内容未经逐项事实审计。")
+            "观点归原作者；本文由课代表自动整理，截图与解释性内容未经逐项事实审计。")
     plan.append({"key": "head", "block": B.callout(head, "🧭")})
     for bi, blk in enumerate(composition(run_id)):
         k = blk["section_id"]

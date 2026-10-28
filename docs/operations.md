@@ -1,6 +1,6 @@
 # 运维：部署、升级与排障
 
-Assetizer 以懒猫 LPK 运行（包名 `cloud.lazycat.app.assetizer`，版本在 `package.yml`）。两台盒子：
+课代表以懒猫 LPK 运行（包名 `cloud.lazycat.app.assetizer`，版本在 `package.yml`）。两台盒子：
 
 | 盒子 | 用途 | 入口 |
 |---|---|---|

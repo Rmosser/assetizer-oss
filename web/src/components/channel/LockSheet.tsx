@@ -66,7 +66,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
                   <div className="srow">
                     <span className="t" title={r.title}>{r.title}</span>
                     {!r.adopted && !r.running ? <span className="n z">还没有完成的版本</span>
-                      : r.library && !r.can_replace ? <span className="n" title="库里那一页不是资产刊写的">库里已有 · 保留</span>
+                      : r.library && !r.can_replace ? <span className="n" title="库里那一页不是课代表写的">库里已有 · 保留</span>
                       : r.library ? (<><span className="n">库里已有</span>
                         <Seg small label={`${r.title}：库里已有`} value={baseOf(r)} onChange={(x) => setBase({ ...base, [r.source_id]: x })}
                           options={[{ value: "keep", label: "保留库里的页" }, { value: "replace", label: `换成 v${r.adopted?.version ?? "?"}`, title: "旧页移到 Notion 归档，不删除" }]} /></>)

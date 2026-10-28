@@ -79,7 +79,7 @@ def setup() -> dict:
     p = config.get().secrets_dir / "telegram-chat-id"
     p.write_text(str(chat["id"]))
     p.chmod(0o600)
-    ok = send(f"Assetizer 通知已接通。之后生产失败、告警、worker 异常重启和每日摘要都会发到这里。\n{link()}".strip())
+    ok = send(f"课代表通知已接通。之后生产失败、告警、worker 异常重启和每日摘要都会发到这里。\n{link()}".strip())
     return {"bot": me["result"].get("username"), "chat_id": chat["id"],
             "chat": chat.get("title") or chat.get("username") or chat.get("first_name"), "test_sent": ok}
 
@@ -122,7 +122,7 @@ def digest() -> str:
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat(timespec="seconds")
     done = {r["production"]: r["n"] for r in db.q(
         "SELECT production, COUNT(*) n FROM runs WHERE finished_at>=? GROUP BY production", since)}
-    lines = [f"📋 Assetizer 日报（{dt.datetime.now(TZ):%m-%d %H:%M}）",
+    lines = [f"📋 课代表日报（{dt.datetime.now(TZ):%m-%d %H:%M}）",
              "过去 24 小时：完成 {} · 部分完成 {} · 失败 {}".format(
                  done.get("COMPLETE", 0), done.get("COMPLETE_PARTIAL", 0), done.get("FAILED", 0))]
     run = db.one("SELECT id, stage FROM runs WHERE production='RUNNING' LIMIT 1")

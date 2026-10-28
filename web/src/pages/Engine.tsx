@@ -234,7 +234,7 @@ function Lamps({ data, choice, setOpen, onCc }: { data: any; choice: boolean | n
           </div>
           <div className="inst">
             <span className="label">Notion 交付</span>
-            <div className="sub">{data.notion.token ? (data.notion.database ? "写入 Assetizer 数据库；各频道的目标库在频道页设置" : "频道没有目标库时写入的位置未指定") : "没有放 Notion token"}</div>
+            <div className="sub">{data.notion.token ? (data.notion.database ? "写入课代表数据库；各频道的目标库在频道页设置" : "频道没有目标库时写入的位置未指定") : "没有放 Notion token"}</div>
           </div>
           <div className="inst">
             <span className="label">磁盘</span>

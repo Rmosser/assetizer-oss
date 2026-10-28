@@ -1,6 +1,6 @@
 # 当前架构
 
-Assetizer（资产刊）把长期关注的投资 / 金融长视频，按频道的学习目标拆成知识单元，生成文章、截图、视频片段、字幕和 Notion 页面。本页描述**现在的**系统结构；长期决定与理由见 [design.md](design.md)，频道页见 [channel-page.md](channel-page.md)。
+课代表把长期关注的投资 / 金融长视频，按频道的学习目标拆成知识单元，生成文章、截图、视频片段、字幕和 Notion 页面。本页描述**现在的**系统结构；长期决定与理由见 [design.md](design.md)，频道页见 [channel-page.md](channel-page.md)。
 
 ## 进程与数据
 
@@ -50,7 +50,7 @@ CLEANUP                                                     非阻塞
 
 ## 交付到 Notion
 
-- 每个频道有自己的目标库与属性映射（设置 `notion:<频道>`，`notion/mapping.py`）；没有频道目标的期写入 Assetizer 自己的数据库（设置 `notion_database_id`，没有时在 `notion_parent_page_id` 下自动创建）。
+- 每个频道有自己的目标库与属性映射（设置 `notion:<频道>`，`notion/mapping.py`）；没有频道目标的期写入课代表自己的数据库（设置 `notion_database_id`，没有时在 `notion_parent_page_id` 下自动创建）。
 - worker 在一期生产完成后，或空闲时，逐期交付（`delivery.deliver_pending` → `deliver`）。**调试中的频道不交付**，样片等定稿时按定稿单写入。
 - 交付前核对映射（属性类型、选项是否存在）：不一致时该期 `BLOCKED`，原因以 `NOTION_MAPPING` 开头，频道显示「交付暂停」，修好映射后自动继续。
 - 写入用块映射加续传前读回对账（`notion_blocks` 表），崩溃后不会重复追加。

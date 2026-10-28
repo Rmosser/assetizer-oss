@@ -204,7 +204,7 @@ export function CookieCloudSheet({ yt: polled, onClose, reload }: { yt: any; onC
         </Step>
 
         <Step n={2} title="填写 Access 服务令牌" status={steps[1]}>
-          <p className="cc-why">Cloudflare 用它确认请求来自资产刊的服务器。Origin 一般不用改。</p>
+          <p className="cc-why">Cloudflare 用它确认请求来自课代表的服务器。Origin 一般不用改。</p>
           <div className="sheet-form cc-form">
             <div className="cc-field">
               <div className="cc-head"><label htmlFor="cc-origin">Origin</label><span className="cc-st">{cc?.origin ? "已配置" : "未配置"}</span></div>
@@ -236,7 +236,7 @@ export function CookieCloudSheet({ yt: polled, onClose, reload }: { yt: any; onC
           </div>
           <details className="cc-help" open={helpOpen[2]}>
             <summary>从哪里拿</summary>
-            <p>打开 <a href={SETUP} target="_blank" rel="noreferrer">CookieCloud Setup ↗</a>，在「步骤 3：外部应用访问令牌」里：名称随便填（比如「资产刊」），域名只填一行 <code>youtube.com</code>，点「创建只读令牌」。令牌只显示一次，复制后直接粘贴到上面。以前建过但手里没有它的值，就把旧的「吊销」，再建一个。</p>
+            <p>打开 <a href={SETUP} target="_blank" rel="noreferrer">CookieCloud Setup ↗</a>，在「步骤 3：外部应用访问令牌」里：名称随便填（比如「课代表」），域名只填一行 <code>youtube.com</code>，点「创建只读令牌」。令牌只显示一次，复制后直接粘贴到上面。以前建过但手里没有它的值，就把旧的「吊销」，再建一个。</p>
           </details>
           <div className="cc-save">
             <button type="button" className="btn solid" onClick={save} disabled={!!busy || !dirty}>{busy === "save" ? "保存中…" : "保存第 2、3 步"}</button>

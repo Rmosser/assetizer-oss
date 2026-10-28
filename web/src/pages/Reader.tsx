@@ -750,7 +750,7 @@ function Paiji({ kicker, source, units, flags, tuning }: { kicker: string; sourc
   const judged = [by("ACCEPTED") && `无误${cnNum(by("ACCEPTED"))}`, by("FIXED") && `改${cnNum(by("FIXED"))}`, by("DISMISSED") && `略${cnNum(by("DISMISSED"))}`].filter(Boolean).join("、");
   return (
     <div className="paiji" role="note" aria-label="本期牌记">
-      <p>资产刊 · {kicker}</p>
+      <p>课代表 · {kicker}</p>
       {pub && <p>原讲于{cnYear(pub.getFullYear())}年{cnDay(source.published_at)}</p>}
       <p>{cnNum(units.length)}单元，必学{cnNum(must)}</p>
       <p>校注{cnNum(review.length)}处{open ? `，未看${cnNum(open)}处` : judged ? `：${judged}` : ""}</p>
@@ -810,7 +810,7 @@ export default function Reader({ id }: { id: string }) {
   const firstMust = units.find((u) => u.learning_priority === 3);
   const headline = data?.source ? issueHeadline(data.source.headline, firstMust?.title, data.source.title || data.source.id) : "";
   useEffect(() => {
-    if (headline) document.title = `${headline} · 资产刊`;
+    if (headline) document.title = `${headline} · 课代表`;
   }, [headline]);
 
   useEffect(() => {

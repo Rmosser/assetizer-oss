@@ -1694,7 +1694,7 @@ def test_daily_digest(sent, monkeypatch):
     Clock.hour_now = 9
     assert notify.digest_due()
     notify.send_digest()
-    assert not notify.digest_due() and sent[-1].startswith("📋 Assetizer 日报（10-24 09:00）")
+    assert not notify.digest_due() and sent[-1].startswith("📋 课代表日报（10-24 09:00）")
 
 
 # ---------------------------------------------------------------- LazyCat package (docs/lazycat-lpk-plan.md)

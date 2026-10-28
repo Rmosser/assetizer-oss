@@ -133,7 +133,7 @@ export function AgyLoginSheet({ onClose }: { onClose: () => void }) {
           </div>
         )}
         {err && <p className="agy-err" role="alert">{err}</p>}
-        {lost && <p className="agy-err" role="status">连不上资产刊，正在重试…</p>}
+        {lost && <p className="agy-err" role="status">连不上课代表，正在重试…</p>}
       </div>
     </Sheet>
   );

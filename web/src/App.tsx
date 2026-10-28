@@ -10,7 +10,7 @@ import ChannelPage from "./pages/Channel";
 import Engine from "./pages/Engine";
 
 function Seal() {
-  return <span className="seal" aria-hidden>刊</span>;
+  return <span className="seal" aria-hidden>课</span>;
 }
 
 function ThemeToggle() {
@@ -159,7 +159,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.chrome = "shown";
-    if (!path.startsWith("/issue/")) document.title = tab === "channels" ? "频道 · 资产刊" : tab === "engine" ? "机房 · 资产刊" : "资产刊";
+    if (!path.startsWith("/issue/")) document.title = tab === "channels" ? "频道 · 课代表" : tab === "engine" ? "机房 · 课代表" : "课代表";
   }, [path, tab]);
 
   let page;
@@ -174,9 +174,9 @@ export default function App() {
     <>
       <a className="skip" href="#main">跳到正文</a>
       <header className="masthead">
-        <a className="brand" {...linkProps("/")} aria-label="资产刊 首页">
+        <a className="brand" {...linkProps("/")} aria-label="课代表 首页">
           <Seal />
-          <span className="wordmark"><b>资产刊</b></span>
+          <span className="wordmark"><b>课代表</b></span>
         </a>
         <nav className="nav" aria-label="主导航">
           <a {...linkProps("/")} className={tab === "issues" ? "on" : ""} aria-current={tab === "issues" ? "page" : undefined}>
