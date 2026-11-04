@@ -1,6 +1,6 @@
 # 需求：在「机房」图形化配置 CookieCloud 凭据
 
-> **状态：已实现**。Assetizer 是 CookieCloud 的只读消费者。「机房」面板配置读取入口的 origin（设置 `cookiecloud_origin`）和三项只写凭据：CookieCloud App Token，以及 Cloudflare Access 服务令牌的 Client ID 与 Secret（存在 `secrets/`，界面不回显）。面板可以测试连接，并用一个会员视频验证 YouTube 登录态；失败时按 CookieCloud 返回的 `code` 显示可读说明。下文的 Access 令牌名和来源 IP 白名单是 OVH 时期的配置，懒猫出口不同，以 Cloudflare Access 的现行策略为准。实现以 `src/assetizer/cookies.py` 和 `web/src/components/CookieCloud.tsx` 为准。
+> **状态：已实现**。Assetizer 是 CookieCloud 的只读消费者。「机房」面板配置读取入口的 origin（设置 `cookiecloud_origin`）和三项只写凭据：CookieCloud App Token，以及 Cloudflare Access 服务令牌的 Client ID 与 Secret（存在 `secrets/`，界面不回显）。面板可以测试连接，并用一个会员视频验证 YouTube 登录态；失败时按 CookieCloud 返回的 `code` 显示可读说明。下文的 Access 令牌名和来源 IP 白名单是 OVH 时期的配置，懒猫出口不同；现行白名单在 CookieCloud Setup 的 `/setup/read-allowlist`。出口 IP 不在白名单时，错误码是 `ip_not_allowed`，面板会显示当前出口 IP 和白名单入口。实现以 `src/assetizer/cookies.py` 和 `web/src/components/CookieCloud.tsx` 为准。
 
 - 提出方：CookieCloud 只读入口的交付方 · 2026-10-13
 - 执行方：Assetizer 的 agent
@@ -73,7 +73,8 @@ Assetizer 的读取侧已经实现（`src/assetizer/cookies.py`）：
 
 | 现象 | 来源 | 建议 code |
 |---|---|---|
-| 401/403，响应不是 JSON | Cloudflare（缺服务令牌头、IP 不符、服务令牌无效） | `access_denied`（已有，逻辑正确） |
+| 403，WAF 拦截页（`you have been blocked`），已带服务令牌头 | Cloudflare WAF：来源 IP 不在白名单 | `ip_not_allowed`，并查一次 `cdn-cgi/trace` 记下出口 IP |
+| 其他 401/403，响应不是 JSON | Cloudflare（缺服务令牌头、服务令牌无效） | `access_denied` |
 | 429，响应不是 JSON | Cloudflare 边缘限流：每 IP 每 10 秒 5 次 | 新增 `rate_limited` |
 | 429 JSON，`code: ingress_rate_limited` | 盒子上的 ingress proxy：每分钟 30 次 | 新增 `FIX` 文案 |
 | 404 JSON，`code: not_found` | ingress 不开放这个路径，通常是 origin 填错 | 新增 `FIX` 文案 |
@@ -135,7 +136,7 @@ pytest（`tests/test_core.py` 已有 CookieCloud 测试，在那里补）：
 | 项 | 来源 |
 |---|---|
 | origin | `https://cookiecloud-read.example.com` |
-| Access Client ID / Secret | 用户 Mac 上的 `~/.cache/cookiecloud-read-handoff/cf-access-client-id` 和 `cf-access-client-secret`（0600）。可以用 `pbcopy < 文件` 复制后粘贴，导入后删除该目录 |
+| Access Client ID / Secret | Cloudflare Zero Trust →「Access controls」→「Service credentials」新建服务令牌（Secret 只显示一次），再把它加进只读入口 Access 应用的策略 |
 | App Token | CookieCloud Setup（`https://cookiecloud.prodbox.heiyu.space/setup`）→「步骤 3：外部应用访问令牌」→ 名称 `assetizer`，域名填一行 `youtube.com` →「创建只读令牌」。令牌只显示一次 |
 
 吊销方式不变：Access 服务令牌在 Zero Trust → Access controls → Service credentials 里吊销 `assetizer-ovh`；App Token 在 CookieCloud Setup 里吊销 `assetizer`。服务令牌于 2027-10-13 过期。

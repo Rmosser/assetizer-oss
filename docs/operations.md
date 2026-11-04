@@ -79,7 +79,7 @@ lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <�
   网页只处理「没登录」的情况；agy 已登录时不会退出重登，换 Google 账号仍用上面的命令行（在 agy 里 `/logout` 再登录）。
 - **agy 额度**：`agy -p /usage --output-format json` 由 agy 自己回答，不开对话、不耗额度。worker 在 agy 在用时每 15 分钟读一次（设置 `agy_quota`、一周走势 `agy_quota_log`），机房的「刷新」立即读一次。ChatGPT（magpie）的额度取自最近一次调用回执里的 `codex.rate_limits`（设置 `magpie_quota`）。
 
-- **YouTube**：用 CookieCloud，在「机房」→「YouTube 会话」里按面板步骤配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)）。
+- **YouTube**：用 CookieCloud，在「机房」→「YouTube 会话」里按面板步骤配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)）。容器走的代理节点换 IP 后，读取会报 `ip_not_allowed`：令牌不用动，把面板显示的出口 IP 加进 CookieCloud Setup 的 `/setup/read-allowlist` 并同步，旧 IP 删掉。
 
 ## Notion 目标与测试副本
 

@@ -697,6 +697,9 @@ class _Resp:
 NETSCAPE = "# Netscape HTTP Cookie File\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx\n.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\ty\n"
 
 
+WAF_BLOCK = "<html><title>Attention Required! | Cloudflare</title><h1>Sorry, you have been blocked</h1></html>"
+
+
 def _cc(home, monkeypatch, resp):
     from assetizer import cookies, db
     db.set_setting("cookiecloud_origin", "https://cc.example.net/")
@@ -725,6 +728,7 @@ def test_cookiecloud_fetch_sends_both_credentials_and_counts_httponly(home, monk
 
 @pytest.mark.parametrize("resp,code", [
     (_Resp(403, "<html>Access</html>", "text/html"), "access_denied"),
+    (_Resp(403, WAF_BLOCK, "text/html"), "ip_not_allowed"),
     (_Resp(302, ""), "access_denied"),
     (_Resp(401, "", "application/json", {"code": "token_revoked"}), "token_revoked"),
     (_Resp(404, "", "application/json", {"code": "cookie_payload_missing"}), "cookie_payload_missing"),
@@ -736,6 +740,35 @@ def test_cookiecloud_errors_have_codes(home, monkeypatch, resp, code):
     with pytest.raises(cookies.CookieError) as e:
         cookies.fetch()
     assert e.value.code == code and code in cookies.FIX
+
+
+def test_cookiecloud_blocked_ip_reports_the_egress_address(home, monkeypatch):
+    from assetizer import cookies, db
+    _cc(home, monkeypatch, _Resp(403, WAF_BLOCK, "text/html"))
+    real = cookies.httpx.get
+    monkeypatch.setattr(cookies.httpx, "get", lambda url, **kw: _Resp(200, "fl=1\nip=203.0.113.7\nts=2\n") if "trace" in url else real(url, **kw))
+    out = cookies.probe()
+    assert out["code"] == "ip_not_allowed" and out["detail"] == "出口 IP 203.0.113.7"
+    assert db.setting("youtube_cookies_state")["detail"] == "出口 IP 203.0.113.7"
+    with cookies.ytdlp_login() as (_, how):
+        assert how["code"] == "ip_not_allowed"
+    assert "203.0.113.7" in db.connect().execute("SELECT body FROM alerts WHERE key='cookiecloud'").fetchone()[0]
+
+
+def test_cookiecloud_block_page_without_service_token_is_not_blamed_on_the_ip(home, monkeypatch):
+    from assetizer import cookies
+    _cc(home, monkeypatch, _Resp(403, WAF_BLOCK, "text/html"))
+    monkeypatch.delenv("ASSETIZER_CF_ACCESS_CLIENT_SECRET")
+    assert cookies.probe()["code"] == "access_denied"
+
+
+def test_egress_ip_is_none_when_the_lookup_fails(home, monkeypatch):
+    from assetizer import cookies
+
+    def down(url, **kw):
+        raise cookies.httpx.ConnectError("x")
+    monkeypatch.setattr(cookies.httpx, "get", down)
+    assert cookies.egress_ip() is None
 
 
 def test_ytdlp_args_uses_a_private_temp_file_and_removes_it(home, monkeypatch):
@@ -935,7 +968,8 @@ def test_status_tells_where_each_secret_comes_from_but_not_what_it_is(home, monk
 
 @pytest.mark.parametrize("resp,code", [
     (_Resp(401, "<html>Unauthorized</html>", "text/html"), "access_denied"),  # Cloudflare: no service token
-    (_Resp(403, "<html>Forbidden</html>", "text/html"), "access_denied"),     # Cloudflare: wrong IP or bad token
+    (_Resp(403, "<html>Forbidden</html>", "text/html"), "access_denied"),     # Cloudflare Access: bad service token
+    (_Resp(403, WAF_BLOCK, "text/html"), "ip_not_allowed"),                   # Cloudflare WAF: source IP off the allowlist
     (_Resp(429, "error code: 1015", "text/plain"), "rate_limited"),            # Cloudflare edge rate limit
     (_Resp(429, "", "application/json", {"error": "Too Many Requests", "code": "ingress_rate_limited"}), "ingress_rate_limited"),
     (_Resp(404, "", "application/json", {"error": "Not Found", "code": "not_found"}), "not_found"),

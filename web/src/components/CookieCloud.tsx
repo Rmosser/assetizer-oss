@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { post } from "../api";
 import { ago } from "../util";
-import { Cmd } from "./Cmd";
 import { Sheet } from "./Sheet";
 
 /* 机房 · YouTube 会话: setting up CookieCloud in four steps, each saying where its value comes from, then two tests.
@@ -15,8 +14,8 @@ type Secret = { key: string; label: string; hint: string };
 
 const ORIGIN = "https://cookiecloud-read.example.com";
 const SETUP = "https://cookiecloud.prodbox.heiyu.space/setup";
+const ALLOWLIST = `${SETUP}/read-allowlist`;
 const ZERO_TRUST = "https://one.dash.cloudflare.com/";
-const HANDOFF = "~/.cache/cookiecloud-read-handoff";
 const ACCESS: Secret[] = [
   { key: "access_client_id", label: "Access Client ID", hint: "以 .access 结尾" },
   { key: "access_client_secret", label: "Access Client Secret", hint: "一长串字母、数字和符号" },
@@ -140,6 +139,7 @@ export function CookieCloudSheet({ yt: polled, onClose, reload }: { yt: any; onC
   const [helpOpen] = useState(() => ccSteps(polled).map((s) => s[0] !== "ok"));
   const steps = ccSteps(yt);
   const vt = yt?.video_test?.verdict ? yt.video_test : null;
+  const blocked = yt?.state?.source === "cookiecloud" && yt.state.code === "ip_not_allowed" ? yt.state : null;
   const originDirty = !!origin.trim() && origin.trim().replace(/\/+$/, "") !== (cc?.origin || "");
   const dirty = originDirty || SECRETS.some((f) => (vals[f.key] || "").trim());
   const fail = (e: unknown) => setMsg({ bad: true, text: String((e as Error).message || e) });
@@ -190,6 +190,7 @@ export function CookieCloudSheet({ yt: polled, onClose, reload }: { yt: any; onC
   return (
     <Sheet title="配置 CookieCloud" onClose={onClose}>
       <p className="sheet-lede">让服务器用你 Chrome 里的 YouTube 登录态下载视频，会员视频也一样。按顺序做完下面 4 步。密钥只写不读：保存后不再显示，留空表示不修改。</p>
+      {blocked && <p className="cc-msg bad" role="status">{blocked.detail?.startsWith("出口 IP") ? blocked.detail : "出口 IP"} 不在白名单，令牌不用改。<a href={ALLOWLIST} target="_blank" rel="noreferrer">打开白名单 ↗</a></p>}
       <ol className="cc-steps">
         <Step n={1} title="配对 Chrome 插件" status={steps[0]}>
           <p className="cc-why">让 Chrome 把你的登录态同步到 CookieCloud（prodbox 那一台）。</p>
@@ -221,10 +222,7 @@ export function CookieCloudSheet({ yt: polled, onClose, reload }: { yt: any; onC
           </div>
           <details className="cc-help" open={helpOpen[1]}>
             <summary>这两项从哪里拿</summary>
-            <p><strong>第一次配置：</strong>交付方把它们放在了你的 Mac 上。在 Mac 的终端运行下面这条，再到 Client ID 输入框粘贴；Client Secret 用第二条，做法一样。</p>
-            <Cmd text={`pbcopy < ${HANDOFF}/cf-access-client-id`} />
-            <Cmd text={`pbcopy < ${HANDOFF}/cf-access-client-secret`} />
-            <p><strong>那个目录删了，或者令牌过期了</strong>（2027-10-13 到期）：在 <a href={ZERO_TRUST} target="_blank" rel="noreferrer">Cloudflare Zero Trust ↗</a> 的「Access controls」→「Service credentials」新建一个服务令牌，复制 Client ID 和 Client Secret（Secret 只显示一次），再把这个令牌加进 CookieCloud 只读入口那个 Access 应用的策略。</p>
+            <p>在 <a href={ZERO_TRUST} target="_blank" rel="noreferrer">Cloudflare Zero Trust ↗</a> 的「Access controls」→「Service credentials」新建一个服务令牌，复制 Client ID 和 Client Secret（Secret 只显示一次），再把这个令牌加进 CookieCloud 只读入口那个 Access 应用的策略。已填写的令牌 2027-10-13 到期，没过期就不用换。</p>
           </details>
         </Step>
 

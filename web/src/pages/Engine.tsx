@@ -226,7 +226,7 @@ function Lamps({ data, choice, setOpen, onCc, reload }: { data: any; choice: boo
             <span className="label">YouTube 会话</span>
             <div className="sub">
               {!cc?.configured ? "服务器 Chromium"
-                : ccDown ? <>{data.youtube.fix?.[ccs.code] || ccs.code}（错误码 {ccs.code}{ccs.at && ` · ${ago(ccs.at)}`}）这段时间的下载改用服务器上的 Chromium。</>
+                : ccDown ? <>{data.youtube.fix?.[ccs.code] || ccs.code}（错误码 {ccs.code}{ccs.code === "ip_not_allowed" && ccs.detail ? ` · ${ccs.detail}` : ""}{ccs.at && ` · ${ago(ccs.at)}`}）这段时间的下载改用服务器上的 Chromium。</>
                 : <>CookieCloud{ccs?.at && <> · {ago(ccs.at)}读取</>}{ccs?.ok && <> · <span className="num">{ccs.count}</span> 条</>}</>}
             </div>
             {cc?.configured && vt && <div className="sub">视频测试{vt.ok ? "通过" : "没通过"}{vt.video?.title ? ` · 《${vt.video.title}》` : ""}{vt.at ? ` · ${ago(vt.at)}` : ""}</div>}

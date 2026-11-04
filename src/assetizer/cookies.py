@@ -36,7 +36,8 @@ FIX: dict[str, str] = {
     "unreachable": "连不上 CookieCloud 的公网入口：检查 Cloudflare Tunnel 与 ingress 是否在线。",
     "tunnel_down": "Cloudflare 连不上 CookieCloud 只读入口背后的隧道（HTTP 530）：懒猫微服上给只读入口用的 cloudflared 可能断了，检查它是否在线。",
     "proxy_down": "隧道在线，但连不上懒猫微服上的只读代理（read-proxy，HTTP 502）：检查 CookieCloud 应用里的 read-proxy 是否在运行。",
-    "access_denied": "Cloudflare Access 拒绝了请求：检查 Access Client ID / Client Secret 和 IP 白名单。",
+    "ip_not_allowed": "Cloudflare 拦下了这个出口 IP：把它加进 CookieCloud 只读入口的 IP 白名单，令牌不用改。",
+    "access_denied": "Cloudflare Access 不认这组服务令牌：检查 Access Client ID / Client Secret 是否填全、是否过期。",
     "rate_limited": "Cloudflare 限流（每个 IP 每 10 秒 5 次，与正常下载共用）：等十几秒再试。",
     "ingress_rate_limited": "CookieCloud 只读入口限流（每分钟 30 次）：等一分钟再试。",
     "not_found": "只读入口不开放这个地址：通常是 origin 填错了，应为 https://cookiecloud-read.example.com。",
@@ -72,7 +73,7 @@ def _cloudflare_error(r) -> bool:
 class CookieError(RuntimeError):
     def __init__(self, code: str, message: str = ""):
         super().__init__(f"{code}: {message}" if message else code)
-        self.code, self.detail = code, message or None  # detail: an exception class or "HTTP 403", never a value
+        self.code, self.detail = code, message or None  # detail: an exception class, "HTTP 403" or the egress IP, never a secret
 
 
 def fix(code: str) -> str:
@@ -125,6 +126,23 @@ def _get(path: str, params: dict | None, timeout: float, accept: str = "text/pla
         time.sleep(2)
 
 
+def _ip_blocked(r) -> bool:
+    """The WAF rule's block page. The rule turns away a source IP off the allowlist and a request without the service
+    token headers, so with both headers sent it is the IP; a bad service token gets 401 from Access further on."""
+    s = config.get()
+    return (r.status_code == 403 and "you have been blocked" in r.text.lower()
+            and bool(s.secret("cf-access-client-id") and s.secret("cf-access-client-secret")))
+
+
+def egress_ip(timeout: float = 8) -> str | None:
+    """The address Cloudflare sees this server at, through the same proxy settings as the reads."""
+    try:
+        m = re.search(r"^ip=(\S+)$", httpx.get("https://www.cloudflare.com/cdn-cgi/trace", timeout=timeout).text, re.M)
+    except httpx.HTTPError:
+        return None
+    return m.group(1) if m else None
+
+
 def _error_code(r) -> str:
     """Name a non-200 answer. JSON from the ingress proxy or CookieCloud carries its own `code`; everything else is
     Cloudflare in front of them (docs/cookiecloud-credentials-ui.md §3.2, docs/cookiecloud-read-tunnel-530.md)."""
@@ -136,8 +154,10 @@ def _error_code(r) -> str:
             code = None
         if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
             return code
+    if _ip_blocked(r):
+        return "ip_not_allowed"
     if status in _REDIRECT or status in (401, 403):
-        return "access_denied"  # Cloudflare Access: service token missing or invalid, or the source IP is not allowed
+        return "access_denied"  # Cloudflare Access: service token missing or invalid
     if status == 429:
         return "rate_limited"   # Cloudflare's edge rate limit
     if status == 404:
@@ -166,7 +186,9 @@ def fetch(timeout: float = 30) -> str:
         raise CookieError("not_configured")
     r = _get("/api/v3/cookies", {"format": "netscape", "domains": domains()}, timeout)
     if r.status_code != 200:
-        raise CookieError(_error_code(r), f"HTTP {r.status_code}")
+        code = _error_code(r)
+        ip = egress_ip() if code == "ip_not_allowed" else None
+        raise CookieError(code, f"出口 IP {ip}" if ip else f"HTTP {r.status_code}")
     if "html" in r.headers.get("content-type", ""):
         raise CookieError("not_found", "HTML page")  # some other site answered: the origin is wrong
     lines = _cookie_lines(r.text)
@@ -293,7 +315,7 @@ def ytdlp_login() -> Iterator[tuple[list[str], dict]]:
             how["code"] = e.code
             _record(False, "cookiecloud", e.code, detail=e.detail)
             db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态，已改用服务器 Chromium",
-                           f"{fix(e.code)}（错误码 {e.code}{f'，{e.detail}' if e.code == 'unreachable' and e.detail else ''}）")
+                           f"{fix(e.code)}（错误码 {e.code}{f'，{e.detail}' if e.code in ('unreachable', 'ip_not_allowed') and e.detail else ''}）")
         except OSError:
             # Preparation can fail after mkstemp (write/chmod or the status update). Remove the
             # plaintext cookie file before falling back, and never hand yt-dlp a partial file.

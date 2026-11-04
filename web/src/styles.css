@@ -833,6 +833,7 @@ dialog { color: var(--ink); }
 .cc-msg { margin: var(--s3) 0 0; font: 14px var(--sans); color: var(--ink-2); }
 .cc-result { margin: var(--s3) 0 0; font: 14px/1.7 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
 .cc-msg.bad, .cc-result.bad { color: var(--zhu); }
+.sheet-lede + .cc-msg { margin: 0 0 var(--s3); }
 .cc-tok { font-size: 13px; color: var(--ink-2); }
 /* the four setup steps: number (✓ once done), title, where it stands; then why, fields and a foldable how-to */
 .cc-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s5); }
