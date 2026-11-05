@@ -83,14 +83,24 @@ export const PRODUCTION: Record<string, string> = {
 export const WAIT: Record<string, string> = {
   AGY_AUTH_REQUIRED: "模型登录失效", PROVIDER_QUOTA: "模型配额", YOUTUBE_AUTH: "YouTube 需登录",
   DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "频道待定稿", LIVE_IN_PROGRESS: "直播未结束",
-  AGY_MEDIA_READ: "agy 读不了视频", NETWORK: "网络中断，稍后重试",
+  AGY_MEDIA_READ: "agy 读不了视频", NETWORK: "网络中断，稍后重试", YTDLP_OUTDATED: "下载工具需更新",
+  YOUTUBE_REFUSED: "YouTube 拒绝下载",
+};
+/** a video no login opens: why, for 视频不可用 (a15) */
+export const UNAVAILABLE: Record<string, string> = {
+  VIDEO_REMOVED: "已删除", VIDEO_PRIVATE: "私享", VIDEO_MEMBERS: "会员限定", SOURCE_UNAVAILABLE: "看不了",
 };
 /** the waits that stop production (vermilion); the others pass by themselves (a live still on air, the network) */
-export const STOPS = ["AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "YOUTUBE_AUTH", "DISK_LOW", "AGY_MEDIA_READ"];
+export const STOPS = ["AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "AGY_MEDIA_READ", "YTDLP_OUTDATED"];
 export const DELIVERY: Record<string, string> = {
   NOT_STARTED: "待交付", BLOCKED: "Notion 未配置", DELIVERING: "交付中", DELIVERED: "已入 Notion",
-  STALE: "待更新", FAILED: "交付失败", REGISTERED: "库里已有",
+  STALE: "待更新", FAILED: "交付失败", REGISTERED: "库里已有", HELD: "等跑完",
 };
+/** why a delivery is held, when it is not for a run to end: a partial version (a08), a page in the library it may be
+ *  (a05), what is yours on the page it would replace (a07) */
+export const HELD: Record<string, string> = { PARTIAL: "待补齐", MAYBE_HAVE: "待确认", YOURS_ON_PAGE: "待确认" };
+/** a delivery state in words */
+export const deliveryLabel = (d: string, reason?: string | null) => (d === "HELD" && reason && HELD[reason]) || DELIVERY[d] || d;
 
 export function clock(iso?: string | null) {
   if (!iso) return "";

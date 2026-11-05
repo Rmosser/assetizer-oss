@@ -1,6 +1,7 @@
 """Minimal Notion REST client: pages, blocks, file uploads (single + multipart)."""
 from __future__ import annotations
 
+import json
 import math
 import time
 from pathlib import Path
@@ -15,10 +16,24 @@ PART_SIZE = 10 * 1024 * 1024
 
 
 class NotionError(RuntimeError):
+    """What Notion answered, said in a line: its own message, or for an HTML page (a 502 from its edge) only that
+    Notion is not available. The whole answer stays in ``body``."""
+
     def __init__(self, status: int, body: str):
-        super().__init__(f"Notion {status}: {body[:400]}")
+        super().__init__(_said(status, body))
         self.status = status
         self.body = body
+
+
+def _said(status: int, body: str) -> str:
+    t = (body or "").strip()
+    if t.startswith("<") or "<html" in t[:300].lower():
+        return f"Notion 暂时不可用（{status}）"
+    try:
+        msg = json.loads(t).get("message")
+    except (ValueError, AttributeError):
+        msg = None
+    return f"Notion {status}: {(msg or t)[:400]}"
 
 
 class Notion:

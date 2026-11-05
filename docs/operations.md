@@ -47,7 +47,7 @@
 
    `lzc-cli app status` 的 `Installed` 只说明装上了；lzc-cli 2.0.9 的 `app log` 未实现。
 
-**回滚**：重装上一个版本的 LPK。数据库迁移只补列（`db.py` 的 `_migrate`），旧版本能读新库。需要恢复数据时先停应用，再用备份替换 `assetizer.db` 并删掉旁边的 `-wal` / `-shm`。
+**回滚**：重装上一个版本的 LPK。数据库迁移只补列、表和索引（`db.py` 的 `_migrate`；另把重复排队的同一期同一版本试跑取消到只剩一条），旧版本能读新库。需要恢复数据时先停应用，再用备份替换 `assetizer.db` 并删掉旁边的 `-wal` / `-shm`。
 
 ## 容器里的命令行
 
@@ -55,9 +55,40 @@
 lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <命令>
 ```
 
-常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（机房卡片里能改的设置也可以这样写，键和范围见 `knobs.py`，例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`。
+常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（机房卡片里能改的设置也可以这样写，键和范围见 `knobs.py`，例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`、`logs`（只读导出日志，见下面「日志与迭代」）。
 
-队列由 worker 自动暂停和恢复（例如模型登录失效、读不了视频），不要手动设置 `queue_paused`；需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」，它们还会把等待中的运行重新排队、解除对应告警。agy 的登录告警例外：按钮不解除它，只在 agy 回答 `/usage` 时解除（恢复时会在后台问一次）；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
+队列由 worker 自动暂停和恢复（例如模型登录失效、读不了视频），不要手动设置 `queue_paused`；需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」，它们还会把等待中的运行重新排队、解除对应告警。agy 的登录告警例外：按钮不解除它，只在 agy 回答 `/usage` 时解除（恢复时会在后台问一次）；模型调用报「未登录」时 worker 也先问一次 `/usage`，答得上就只让这一期等网络，不暂停生产；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
+
+## 日志与迭代
+
+agy 和 yt-dlp 更新得勤，改适配代码时要参考它们最近的表现。课代表保留一个月的日志（`logs.py`），每天清理一次过期的：
+
+| 日志 | 在哪 | 留多久 |
+|---|---|---|
+| yt-dlp 每次下载的输出，读视频信息失败时的输出 | `logs/yt-dlp/<UTC 时间>-<视频 id>-<download 或 metadata>.log` | 30 天（`ASSETIZER_LOG_RETENTION_DAYS`） |
+| 每次模型调用的报错与原始输出（`stderr.log`、`raw-output.jsonl`、`prompt.md` 等） | `runs/<运行>/calls/<工序>/attempt-N/`，编译在 `compile/` 下 | 30 天；回执 `invocation.json` 和回答 `response.txt` 不删，重试时复用 |
+| 运行事件（`events` 表） | 数据库 | 30 天；还在排队、在跑或在等的运行的事件不删 |
+
+运行、工序明细和模型调用记录（`model_calls`）是产品数据，不随日志删。
+
+每周一的日报多几行「🔧 迭代」：过去 7 天失败、等待、模型调用出错各几次（按原因），部分完成几期，有没有前一个月没见过的报错。网络抖动、直播没结束、视频不可用、清空时停下、太短不收不算。合计 5 次以上，或出现了新的报错，就写「日志多了，可以让开发用的 agent 扫一遍」。
+
+**扫一遍**由开发者用的 agent 主动发起：Mac 上的 Claude Code 每周一有定时任务按下面做，别的 agent 也照这个做。
+
+1. `lzc-cli box default` 确认默认盒子是 prodbox；不要 `box switch`。
+2. 只读导出：
+
+   ```bash
+   lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli logs --summary
+   lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli logs > /tmp/assetizer-logs.json
+   ```
+
+   `--summary` 是这一周的读数，`many` 为 true 才往下看；不加 `--summary` 是保留着的全部日志（`runs` 失败与部分完成的运行、`calls` 出错的模型调用带 stderr 末尾、`yt_dlp` 的原话、`events` 里的警告和错误），已去掉 token、cookie 和链接里的密钥。
+3. 归类，对照代码判断要不要迭代：
+   - yt-dlp：`YTDLP_OUTDATED`、`YOUTUBE_REFUSED` 变多，看 `yt_dlp` 里的原话，对照 `docker/requirements.lock` 的版本和 `youtube.py` 的 `classify()`；被判成 `UNKNOWN` 的新说法要登记进 `classify()`。
+   - agy：按 `agy_version` 看 `calls`，新版本之后才出现的错误（读不了视频、越界读文件、输出不合规、超时），对照 `providers/agy.py`（`MEDIA_READ`、`classify_error`）和 `llm.py`。
+   - 其他 `UNKNOWN` 失败：看 `runs` 里的 `error` 和同一运行的 `events`。
+4. 写结论：要不要迭代、改哪里、依据（报错原话、次数、版本）。扫描只读：不安装、不升级、不改设置、不试跑，不读凭据文件，不调用模型。要改代码就在仓库里照常改和测，发版要用户同意。
 
 ## 凭据与登录
 

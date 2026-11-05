@@ -25,6 +25,7 @@
 | agy 在网页里登录、额度（5 小时 / 每周） | [operations.md](operations.md)「凭据与登录」、[design.md](design.md) §R6-3、§R6-4 | `providers/agy_login.py`、`providers/agy.py`（`usage`、`record_usage`）、`providers/magpie.py`（`quota_view`）、`web/src/components/AgyLogin.tsx` |
 | YouTube 登录与 CookieCloud | [README.md](../README.md)、[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)、[cookiecloud-read-ingress.md](cookiecloud-read-ingress.md) | `cookies.py`、`youtube.py` |
 | 告警与 Telegram 通知 | [README.md](../README.md)「通知」 | `notify.py`、`pipeline/runner.py`（告警） |
+| agy、yt-dlp 改版后要不要迭代、日志留在哪 | [operations.md](operations.md)「日志与迭代」 | `logs.py`、`youtube.py`（`classify`）、`providers/agy.py` |
 | 其他页面：刊、对照视图、机房，统计口径 | [architecture.md](architecture.md)「前端」、[design.md](design.md) §R6-1、§R6-2 | `web/src/pages/`、`web/src/components/Figures.tsx`、`web/app.py`（`/api/engine/stats`） |
 | 为什么这样设计（长期决定与理由） | [design.md](design.md) | — |
 | 内容原则：视频是唯一事实来源 | [`contracts/policy.md`](../src/assetizer/contracts/policy.md) | — |

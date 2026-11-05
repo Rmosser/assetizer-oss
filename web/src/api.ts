@@ -21,10 +21,15 @@ export async function get<T = any>(path: string): Promise<T> {
   return r.json();
 }
 
+/** An error answer, with its status: 409 says the page asked about a state that has moved on (another device). */
+export class HttpError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 export async function post<T = any>(path: string, body: unknown = {}): Promise<T> {
   const r = await parse(await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((data as any).detail || r.statusText);
+  if (!r.ok) throw new HttpError((data as any).detail || r.statusText, r.status);
   return data as T;
 }
 

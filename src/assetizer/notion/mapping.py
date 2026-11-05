@@ -144,6 +144,18 @@ def remap(cfg: dict, schema: dict) -> tuple[dict, list[str], list[str]]:
         if sp["type"] == "relation" and m.get("source") == "fixed" and m.get("value"):
             nm.pop("value")
             repick.append(sp["name"])
+        v = m.get("value")
+        if m.get("source") == "fixed" and v and m.get("type") != sp["type"] and \
+                m.get("type") in OPTION_TYPES and sp["type"] in OPTION_TYPES:
+            # one option or many: the value takes the new property's shape; many for a property that holds one is
+            # picked again rather than guessed
+            if sp["type"] == "multi_select":
+                nm["value"] = v if isinstance(v, list) else [v]
+            elif isinstance(v, list) and len(v) == 1:
+                nm["value"] = v[0]
+            elif isinstance(v, list):
+                nm.pop("value")
+                repick.append(sp["name"])
         props[pid] = nm
     return sync({**cfg, "properties": props}, schema), repick, dropped
 
@@ -191,13 +203,20 @@ def _map_options(m: dict, t: str, f) -> object:
 def sync(cfg: dict, schema: dict) -> dict:
     """Follow what was renamed in Notion. Each mapping takes its property's current name, and each option it writes
     goes by the option id pinned in ``option_ids`` (name → id; pinned by name the first time it is seen), so a renamed
-    option keeps being written. An option whose id is gone stays as it was for problems() to name."""
+    option keeps being written. An option whose id is gone stays as it was for problems() to name. A property deleted
+    and made again under the same name and type is the same property to the user: taken up when it is the only such one
+    and nothing else is mapped to it (a13)."""
     props = {}
+    used = set(cfg.get("properties") or {})
     for pid, m in (cfg.get("properties") or {}).items():
         sp = schema.get(pid)
         if not sp:
-            props[pid] = m
-            continue
+            same = [k for k, x in schema.items() if x["name"] == m.get("name") and x["type"] == m.get("type")]
+            if len(same) != 1 or same[0] in used:
+                props[pid] = m
+                continue
+            pid, sp = same[0], schema[same[0]]
+            used.add(pid)
         nm = {**m, "name": sp["name"]}
         if sp["type"] == m.get("type") and sp["type"] in OPTION_TYPES:
             live = sp.get("option_ids") or {}
@@ -299,7 +318,7 @@ def context(source: dict, run_id: str, channel: dict | None) -> dict:
         "channel": (channel or {}).get("name") or source.get("channel_title") or "",
         "date": date or "", "date8": (date or "").replace("-", ""),
         "datetime": datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="minutes") if ts else date,
-        "headline": run_headline(run_id) or source.get("headline") or source.get("title") or "",
+        "headline": run_headline(run_id) or source.get("headline") or "",
         "video_title": source.get("title") or source.get("id"),
         "url": source.get("url") or f"https://www.youtube.com/watch?v={source['id']}",
         "access": access_kind(info),
@@ -325,12 +344,43 @@ def key_levels(run_id: str, limit: int = 12) -> str:
     return "\n".join(lines)
 
 
+SEP = re.compile(r"\W{1,3}")  # what stands between two variables in a title: a few non-word characters ("-", " · ", "｜")
+
+
+def pieces(template: str, ctx: dict) -> list[dict]:
+    """"{channel}-{date8}-{headline}" → the pieces of the filled-in text, each variable marked. A variable with nothing
+    to say is left out with the separator before it (first in the template: the one after it), so no title ends in
+    a lone 「-」."""
+    out, pos = [], 0
+    for m in re.finditer(r"\{(\w+)\}", template or ""):
+        if m.start() > pos:
+            out.append({"text": template[pos:m.start()]})
+        out.append({"text": str(ctx.get(m[1], "") or ""), "var": m[1]})
+        pos = m.end()
+    if pos < len(template or ""):
+        out.append({"text": template[pos:]})
+    keep: list[dict] = []
+    for i, p in enumerate(out):
+        if p.get("var") and not p["text"]:
+            if len(keep) > 1 and "var" not in keep[-1] and SEP.fullmatch(keep[-1]["text"]):
+                keep.pop()
+            elif i + 1 < len(out) and "var" not in out[i + 1] and SEP.fullmatch(out[i + 1]["text"]):
+                out[i + 1] = {"text": ""}
+            continue
+        keep.append(p)
+    return [p for p in keep if p["text"]]
+
+
+def fill(template: str, ctx: dict) -> str:
+    return "".join(p["text"] for p in pieces(template, ctx)).strip()
+
+
 def value(m: dict, ctx: dict) -> object:
     src, v = m.get("source"), m.get("value")
     if src == "fixed":
         return v
-    if src == "template":
-        return re.sub(r"\{(\w+)\}", lambda x: str(ctx.get(x[1], "")), v or "").strip()
+    if src == "template":  # a title is never empty: with nothing filled in, the video's own title
+        return fill(v or "", ctx) or str(ctx.get("video_title") or "")
     if src == "published_date":
         return ctx["date"] or None
     if src == "published_datetime":

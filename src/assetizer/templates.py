@@ -83,7 +83,7 @@ def reading_guide(source: dict, run_id: str, target: dict) -> list[dict]:
     ctx = _ctx(source, run_id)
     blocks = composition(run_id)
     plan: list[dict] = [{"key": "src", "block": B.block("paragraph", f"**来源链接**：[{ctx['url']}]({ctx['url']})")}]
-    heading = re.sub(r"\{(\w+)\}", lambda x: str(ctx.get(x[1], "")), target.get("heading") or "").strip()
+    heading = M.fill(target.get("heading") or "", ctx)
     if heading:
         plan.append({"key": "h1", "block": B.block("heading_1", heading)})
     intro = next((b for b in blocks if b["kind"] == "INTRO"), None)
@@ -155,7 +155,7 @@ def chapters(source: dict, run_id: str, target: dict) -> list[dict]:
     if ctx["date"]:
         y, m, d = ctx["date"].split("-")
         plan.append({"key": "pub", "block": B.block("paragraph", f"视频发布于{y}年{m}月{d}日")})
-    heading = re.sub(r"\{(\w+)\}", lambda x: str(ctx.get(x[1], "")), target.get("heading") or "").strip()
+    heading = M.fill(target.get("heading") or "", ctx)
     if heading:
         plan.append({"key": "h1", "block": B.block("heading_1", heading)})
     intro = next((b for b in blocks if b["kind"] == "INTRO"), None)

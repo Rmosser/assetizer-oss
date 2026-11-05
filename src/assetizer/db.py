@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS runs (
   origin TEXT,                                         -- manual | ingest | backfill | trial (NULL: before 2026-10-28)
   attempts INTEGER NOT NULL DEFAULT 0,
   pgid INTEGER,
+  stop_at TEXT,                                        -- 清空 asked this trial to stop (a10): the worker stops it
   pins TEXT,                                           -- JSON: playbook, policy, pipeline, model, agy version
   summary TEXT,                                        -- JSON stats
   revision_of TEXT,
@@ -174,6 +175,7 @@ CREATE TABLE IF NOT EXISTS sections (
   overlay TEXT,
   rev INTEGER NOT NULL DEFAULT 1
 );
+CREATE INDEX IF NOT EXISTS sections_run ON sections(run_id, ord);  -- the 调试台 matrix asks per run: no scan of them all
 CREATE TABLE IF NOT EXISTS assets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL REFERENCES runs(id),
@@ -220,8 +222,9 @@ CREATE TABLE IF NOT EXISTS alerts (
   title TEXT NOT NULL,
   body TEXT,
   action TEXT,
-  created_at TEXT NOT NULL,
-  resolved_at TEXT
+  created_at TEXT NOT NULL,                            -- when this occurrence began
+  resolved_at TEXT,
+  notified_at TEXT                                     -- pushed to Telegram (non-urgent ones only once 10 minutes old)
 );
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,9 +287,15 @@ CREATE TABLE IF NOT EXISTS events (
   message TEXT NOT NULL,
   data TEXT
 );
+CREATE INDEX IF NOT EXISTS events_run ON events(run_id);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notify_outbox (           -- Telegram messages it could not take yet: sent as one later
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  text TEXT NOT NULL
 );
 """
 
@@ -329,13 +338,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
         r = conn.execute("SELECT value FROM settings WHERE key='notion_database_id'").fetchone()
         if r and json.loads(r[0]):  # pages delivered so far live in the Assetizer database
             conn.execute("UPDATE sources SET notion_database_id=? WHERE notion_page_id IS NOT NULL", (json.loads(r[0]),))
-    if "origin" not in {r[1] for r in conn.execute("PRAGMA table_info(runs)")}:
+    runs = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    if "origin" not in runs:
         conn.execute("ALTER TABLE runs ADD COLUMN origin TEXT")
+    if "stop_at" not in runs:
+        conn.execute("ALTER TABLE runs ADD COLUMN stop_at TEXT")
+    if "notified_at" not in {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}:
+        conn.execute("ALTER TABLE alerts ADD COLUMN notified_at TEXT")
+        conn.execute("UPDATE alerts SET notified_at=created_at")  # raised before: pushed already
     if "stage" not in {r[1] for r in conn.execute("PRAGMA table_info(channels)")}:
         conn.execute("ALTER TABLE channels ADD COLUMN stage TEXT NOT NULL DEFAULT 'TUNING'")
         # a channel whose playbook is already confirmed has been through tuning
         conn.execute("""UPDATE channels SET stage='LOCKED'
                         WHERE id IN (SELECT channel_id FROM playbooks WHERE status='ACTIVE' AND channel_id IS NOT NULL)""")
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='trial_queue_pending'").fetchone():
+        # a version of a sample is queued once (two overlapping requests put it in twice): the doubles go first
+        conn.execute("""UPDATE trial_queue SET status='CANCELLED' WHERE status='PENDING' AND id NOT IN
+                        (SELECT MIN(id) FROM trial_queue WHERE status='PENDING' GROUP BY source_id, playbook_id)""")
+        conn.execute("CREATE UNIQUE INDEX trial_queue_pending ON trial_queue(source_id, playbook_id) WHERE status='PENDING'")
 
 
 @contextmanager
@@ -381,19 +401,23 @@ def event(kind: str, message: str, run_id: str | None = None, level: str = "info
 def raise_alert(key: str, severity: str, title: str, body: str = "", action: dict | None = None) -> None:
     from . import notify
     was_open = one("SELECT 1 FROM alerts WHERE key=? AND resolved_at IS NULL", key)
+    # one that came back after it was resolved is a new occurrence: its own start, not yet pushed
     exec("""INSERT INTO alerts(key, severity, title, body, action, created_at) VALUES (?,?,?,?,?,?)
             ON CONFLICT(key) DO UPDATE SET severity=excluded.severity, title=excluded.title, body=excluded.body,
-            action=excluded.action, resolved_at=NULL""",
+            action=excluded.action,
+            created_at=CASE WHEN alerts.resolved_at IS NULL THEN alerts.created_at ELSE excluded.created_at END,
+            notified_at=CASE WHEN alerts.resolved_at IS NULL THEN alerts.notified_at END, resolved_at=NULL""",
          key, severity, title, body, j(action) if action else None, now())
-    if not was_open:  # alerts are re-raised on every retry: tell the user once per occurrence
+    if not was_open and key in notify.URGENT:  # re-raised on every retry: told once per occurrence; the rest after a wait
         notify.alert_raised(severity, title, body)
+        exec("UPDATE alerts SET notified_at=? WHERE key=?", now(), key)
 
 
 def resolve_alert(key: str) -> None:
     from . import notify
-    a = one("SELECT title FROM alerts WHERE key=? AND resolved_at IS NULL", key)
+    a = one("SELECT title, notified_at FROM alerts WHERE key=? AND resolved_at IS NULL", key)
     exec("UPDATE alerts SET resolved_at=? WHERE key=? AND resolved_at IS NULL", now(), key)
-    if a:
+    if a and a["notified_at"]:  # one never pushed (it passed within its wait) is not followed by a recovery either
         notify.alert_resolved(a["title"])
 
 

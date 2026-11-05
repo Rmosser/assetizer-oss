@@ -41,6 +41,7 @@ class Settings:
     boundary_pad_seconds: int = 30
     disk_high_watermark: float = 0.85
     source_retention_days: int = 7
+    log_retention_days: int = 30  # the logs iterating reads (logs.py)
     agy_print_timeout: str = "35m"
     extra: dict = field(default_factory=dict)
 
@@ -55,6 +56,10 @@ class Settings:
     @property
     def runs_dir(self) -> Path:
         return self.home / "runs"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.home / "logs"
 
     @property
     def packages_dir(self) -> Path:
@@ -102,6 +107,7 @@ def load() -> Settings:
         web_host=_env("ASSETIZER_HOST", "127.0.0.1"),
         web_port=int(_env("ASSETIZER_PORT", "8770")),
         source_retention_days=int(_env("ASSETIZER_RETENTION_DAYS", "7")),
+        log_retention_days=int(_env("ASSETIZER_LOG_RETENTION_DAYS", "30")),
     )
 
 

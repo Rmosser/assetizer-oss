@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { get } from "../../api";
 import { Fold } from "../Fold";
-import { hm, Icon, nextScan, Seg, short, Stepper, Switch, TYPE_ICON, useNarrow } from "./bits";
+import { hm, Icon, minRule, nextScan, Seg, short, Stepper, Switch, TYPE_ICON, useNarrow } from "./bits";
 import type { Mode } from "./Header";
 import { keys } from "./lit";
 import { Opt } from "./NotionPane";
@@ -435,7 +435,7 @@ export function IntakeCard({ ch, mode, onSet, onBoard }: {
     const state = ing.enabled ? `每 ${ing.every_minutes || 30} 分钟` : "已暂停";
     return (
       <Card n="伍" title="收录" right={state} sum={state}>
-        <p className="ch-row2 q">{ing.enabled ? "自动收录中" : "自动收录已暂停"} · 短于 {ing.min_minutes ?? 10} 分钟的不收</p>
+        <p className="ch-row2 q">{ing.enabled ? "自动收录中" : "自动收录已暂停"} · {minRule(ing.min_minutes ?? 10)}</p>
         <button className="ch-btn sm" onClick={onBoard}>去看板</button>
       </Card>
     );
@@ -445,9 +445,9 @@ export function IntakeCard({ ch, mode, onSet, onBoard }: {
       sum={mode !== "locked" ? "定稿后开启" : can && ing.enabled ? `每 ${ing.every_minutes || 30} 分钟` : "已暂停"}>
       <div className="ch-sw"><Switch on={!!ing.enabled && can} disabled={!can} label="自动收录新视频" onChange={(v) => send(v, min)} /><span>自动收录新视频</span></div>
       <div className="ch-row2">
-        <span>短于</span>
-        <Stepper label="最短时长" value={min} onChange={(v) => { setMin(v); clearTimeout(t.current); t.current = window.setTimeout(() => send(!!ing.enabled, v), 600); }} />
-        <span>分钟的不收</span>
+        <span>{min ? "短于" : "时长"}</span>
+        <Stepper label="最短时长" zero="不限" value={min} onChange={(v) => { setMin(v); clearTimeout(t.current); t.current = window.setTimeout(() => send(!!ing.enabled, v), 600); }} />
+        {min > 0 && <span>分钟的不收</span>}
       </div>
       {can && ing.enabled && (
         <p className="ch-row2 q">{ing.last_poll ? `上次 ${hm(ing.last_poll)}${nextScan(ing) ? ` · ${nextScan(ing)}` : ""}` : "等第一次查看"}

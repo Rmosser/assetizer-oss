@@ -29,7 +29,31 @@ export function usePoll<T>(path: string | null, interval = 0) {
     const t = setInterval(() => { if (!document.hidden && (every || !has.current)) load(); }, every || 15000);
     return () => { alive.current = false; clearInterval(t); };
   }, [load, interval]);
+  // what is polled is read again the moment the page is back (a Mac waking, a tab brought forward, the network back),
+  // not a whole interval later
+  useBack(interval ? load : null);
   return { data, error, loadedAt, reload: load, setData };
+}
+
+/** Call `fn` when the page comes back into view, gets the focus again, or the network returns (at most every 2 s). */
+export function useBack(fn: (() => void) | null) {
+  useEffect(() => {
+    if (!fn) return;
+    let last = 0;
+    const on = () => {
+      if (document.hidden || Date.now() - last < 2000) return;
+      last = Date.now();
+      fn();
+    };
+    document.addEventListener("visibilitychange", on);
+    addEventListener("focus", on);
+    addEventListener("online", on);
+    return () => {
+      document.removeEventListener("visibilitychange", on);
+      removeEventListener("focus", on);
+      removeEventListener("online", on);
+    };
+  }, [fn]);
 }
 
 /** Run once per browser, remembered in localStorage (guarded: storage can be unavailable). */

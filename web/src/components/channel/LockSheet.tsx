@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { get, post } from "../../api";
 import { Sheet, type SheetHandle } from "../Sheet";
-import { Icon, Seg, short, Stepper, Switch } from "./bits";
+import { day, Icon, Seg, short, Stepper, Switch } from "./bits";
 import type { LockPreview, LockRow, NotionView } from "./types";
 
 type Base = "write" | "keep" | "replace";
 
 /** 定稿单: lock on one version and decide, per sample, what goes to Notion — then the 「定」 stamp. */
 export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRetarget, onTrial }: {
-  cid: string; defaultPb: number; onClose: () => void; onLocked: (r: { version: number; write: number; keep: number; wait: number; ingest: any }) => void;
+  cid: string; defaultPb: number; onClose: () => void; onLocked: (r: { version: number; write: number; keep: number; wait: number; ingest: any; backfill?: number }) => void;
   onConflict: (clauseId: string) => void; onRetarget: () => void; onTrial: (pbId: number) => Promise<void>;
 }) {
   const [pbId, setPbId] = useState(defaultPb);
@@ -17,6 +17,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
   const [base, setBase] = useState<Record<string, Base>>({});
   const [wait, setWait] = useState<Record<string, boolean>>({});
   const [ing, setIng] = useState<{ enabled: boolean; min: number } | null>(null);
+  const [skip, setSkip] = useState<Set<string>>(new Set());  // posted while tuned, unticked: not taken in
   const [busy, setBusy] = useState(false);
   const [stamped, setStamped] = useState(false);
   const sheet = useRef<SheetHandle>(null);
@@ -25,7 +26,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
     let alive = true;
     setLp(null); setErr(null);
     get<LockPreview>(`/api/channels/${cid}/lock-preview?playbook_id=${pbId}`)
-      .then((d) => { if (!alive) return; setLp(d); setIng((x) => x || { enabled: true, min: d.ingest.min_minutes || 10 }); })
+      .then((d) => { if (!alive) return; setLp(d); setIng((x) => x || { enabled: true, min: d.ingest.min_minutes ?? 10 }); })
       .catch((e) => alive && setErr((e as Error).message));
     return () => { alive = false; };
   }, [cid, pbId]);
@@ -39,6 +40,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
       const r = await post<any>(`/api/channels/${cid}/lock`, {
         playbook_id: pbId, samples: lp.samples.filter((s) => s.adopted || s.running).map((s) => ({ source_id: s.source_id, action: action(s) })),
         ingest: lp.ingest.available && ing ? { enabled: ing.enabled, min_minutes: ing.min } : null,
+        backfill: (lp.missed || []).filter((m) => !skip.has(m.id)).map((m) => ({ id: m.id, title: m.title || "", duration: m.duration ?? null })),
       });
       setStamped(true);
       window.setTimeout(() => close(() => onLocked(r)), 700);
@@ -102,13 +104,28 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
               ) : null}
               {!lp.library_checked && <div className="srow quiet"><span className="t">没能核对库里已有的页：{short(lp.library_error || "", 40)}</span></div>}
             </div>
+            {(lp.missed?.length || lp.missed_error) ? (
+              <div className="sgrp">
+                <div className="gh">调试期间发的 · 定稿后补录</div>
+                {lp.missed?.map((m) => (
+                  <label key={m.id} className="srow">
+                    <input type="checkbox" checked={!skip.has(m.id)} aria-label={`补录 ${m.title || m.id}`}
+                      onChange={() => setSkip((x) => { const n = new Set(x); if (n.has(m.id)) n.delete(m.id); else n.add(m.id); return n; })} />
+                    <span className="t" title={m.title || m.id}>{m.title || m.id}</span>
+                    <span className="n">{day(m.published)}</span>
+                  </label>
+                ))}
+                {lp.missed_error && <div className="srow quiet"><span className="t">{short(lp.missed_error, 40)}</span></div>}
+              </div>
+            ) : null}
             {lp.ingest.available && ing && (
               <div className="sgrp">
                 <div className="gh">之后</div>
                 <div className="srow">
                   <Switch on={ing.enabled} onChange={(x) => setIng({ ...ing, enabled: x })} label="自动收录新视频" />
                   <span className="t">自动收录新视频</span>
-                  <span className="n">短于</span><Stepper label="最短时长" value={ing.min} onChange={(x) => setIng({ ...ing, min: x })} /><span className="n">分钟的不收 · 只收定稿之后发布的</span>
+                  <span className="n">{ing.min ? "短于" : "时长"}</span><Stepper label="最短时长" zero="不限" value={ing.min} onChange={(x) => setIng({ ...ing, min: x })} />
+                  <span className="n">{ing.min ? "分钟的不收 · " : "· "}只收定稿之后发布的</span>
                 </div>
               </div>
             )}

@@ -5,8 +5,9 @@ import type { Channel, Run, Sample, Workbench } from "./types";
 
 const WAIT: Record<string, string> = {
   NETWORK: "等网络", YOUTUBE_AUTH: "等 YouTube 登录", AGY_AUTH_REQUIRED: "等模型登录", DISK_LOW: "等磁盘空间",
-  LIVE_NOT_OVER: "等直播结束", PLAYBOOK_CONFIRMATION: "等定稿",
+  LIVE_NOT_OVER: "等直播结束", PLAYBOOK_CONFIRMATION: "等定稿", YOUTUBE_REFUSED: "等 YouTube 放行",
 };
+const stopped = (r: Run) => r.production === "CANCELLED" && r.error_class === "STOPPED";  // 清空 stopped it (a10)
 export const done = (r?: Run | null): r is Run & { production: `COMPLETE${string}` } => !!r && r.production.startsWith("COMPLETE");
 const live = (r: Run) => ["QUEUED", "RUNNING", "WAITING", "INTERRUPTED"].includes(r.production);
 
@@ -96,6 +97,14 @@ function Cell({ s, pb, run, queued, sel, cmp, onPick, act }: {
   }
   if (queued >= 0) {
     return <div className="ch-cell dis" aria-label={label}><span className="qd" /><span className="cap"><span>排队第 {queued + 1}</span></span></div>;
+  }
+  if (run && stopped(run)) {
+    return (
+      <div className="ch-cell dis" aria-label={label}>
+        <span className="qd" />
+        <span className="cap"><span>已停下</span><button className="lnk" onClick={() => act.retry(run.id)}>重试</button></span>
+      </div>
+    );
   }
   if (run) {  // FAILED / CANCELLED
     return (
@@ -202,6 +211,7 @@ export function RunPending({ wb, want, act, switcher }: { wb: Workbench; want: W
           <><span className="ch-prog" style={{ width: 160 }}><b style={{ width: `${b ? Math.round((a / b) * 100) : 4}%` }} /></span>
             <span>{run.production === "WAITING" ? (WAIT[run.wait_reason || ""] || "等待") : run.production === "QUEUED" ? "排队中" : "进行中"} {a}/{b}{run.eta_seconds ? ` · ${est(run.eta_seconds / 60)}` : ""}</span></>
         ) : queued >= 0 ? <span>v{pb.version} 排队第 {queued + 1}</span>
+          : run && stopped(run) ? (<><span>v{pb.version} 已停下</span><button className="ch-btn sm" onClick={() => act.retry(run.id)}>重试</button></>)
           : run ? (<><span className="z" title={run.error_line || undefined}>v{pb.version} 没有跑完{run.error_line ? `：${run.error_line}` : ""}</span>
             <button className="ch-btn sm" onClick={() => act.retry(run.id)}>重试</button></>)
           : (<><span>v{pb.version} 还没在这期上跑过</span>
@@ -237,6 +247,7 @@ function Grid({ wb, ch, sel, cmp, onPick, act }: MatrixProps) {
         {compiling && <div className="vh"><span className="vh1"><span className="vl">新版本</span><span className="ch-chip sm">编译中</span></span><span className="vm">约 3 分钟</span></div>}
         {cols.map((p) => {
           const queued = wb.queue.filter((q) => q.playbook_id === p.id).length;
+          const running = wb.samples.reduce((n, s) => n + s.runs.filter((r) => r.playbook_id === p.id && live(r)).length, 0);
           return (
             <div key={p.id} className="vh">
               <span className="vh1">
@@ -250,9 +261,10 @@ function Grid({ wb, ch, sel, cmp, onPick, act }: MatrixProps) {
                 {p.missing > 0 && (
                   <button className="ch-vrun" onClick={() => act.trial([p.id])}><Icon name="play" size={9} fill />试跑 {p.missing} 期 · {est(p.est_minutes)}</button>
                 )}
-                {queued > 0 && (
-                  // 清空 takes the place of 试跑 N 期 the moment it is clicked: a second click must not drop the whole queue
-                  <span className="ch-vq"><span>排队 {queued}</span>{clearing === p.id
+                {queued + running > 0 && (
+                  // 清空 takes the place of 试跑 N 期 the moment it is clicked: a second click must not drop the whole queue;
+                  // it stops what runs as well (a10)
+                  <span className="ch-vq"><span>{[running && `在跑 ${running}`, queued && `排队 ${queued}`].filter(Boolean).join(" · ")}</span>{clearing === p.id
                     ? <><button onClick={() => { setClearing(null); act.clear(); }}>确认清空</button><button onClick={() => setClearing(null)}>取消</button></>
                     : <button onClick={() => setClearing(p.id)}>清空</button>}</span>
                 )}

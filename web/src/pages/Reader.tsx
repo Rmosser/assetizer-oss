@@ -9,7 +9,7 @@ import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll, Empty } from "../components/States";
 import { useLeaving, useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDay, cnNum, cnYear, DELIVERY, mins, parseDay, reduceMotion, tc } from "../util";
+import { cnDay, cnNum, cnYear, deliveryLabel, mins, parseDay, reduceMotion, tc } from "../util";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -982,7 +982,7 @@ export default function Reader({ id }: { id: string }) {
           <Stepper count={queue.length} total={flags.filter(isReview).length} pos={queue.length ? Math.min(pos, queue.length - 1) : -1} onStep={step} />
           {!mobile && source.delivery !== "DELIVERED" && (
             <span className="rb-deliv" title={source.delivery_reason || ""}>
-              {DELIVERY[source.delivery] || source.delivery}
+              {deliveryLabel(source.delivery, source.delivery_reason)}
               {["FAILED", "STALE"].includes(source.delivery) && (
                 <button className="link" onClick={async () => { await post(`/api/sources/${source.id}/deliver`); reload(); }}>重新交付</button>
               )}

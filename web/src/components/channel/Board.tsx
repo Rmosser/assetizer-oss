@@ -103,9 +103,9 @@ function Intake({ ch, mode, b, onSet, onScan }: {
         <Switch on={on} disabled={!can} label="自动收录新视频" onChange={(v) => send(v, min)} /><span>自动收录新视频</span>
       </div>
       <div className="ch-row2">
-        <span>短于</span>
-        <Stepper label="最短时长" value={min} onChange={(v) => { setMin(v); clearTimeout(t.current); t.current = window.setTimeout(() => send(want.current, v), 600); }} />
-        <span>分钟的不收</span>
+        <span>{min ? "短于" : "时长"}</span>
+        <Stepper label="最短时长" zero="不限" value={min} onChange={(v) => { setMin(v); clearTimeout(t.current); t.current = window.setTimeout(() => send(want.current, v), 600); }} />
+        {min > 0 && <span>分钟的不收</span>}
       </div>
       {!can ? <p className="q">定稿后开启</p> : on ? (
         <div className="ch-bst">
@@ -184,7 +184,7 @@ function span(r: Range): [string, string] {
   return r === "month" ? [ymd(new Date(t.getFullYear(), t.getMonth(), 1)), ymd(t)] : r === "30" ? [back(30), ymd(t)]
     : r === "90" ? [back(90), ymd(t)] : r === "year" ? [`${t.getFullYear()}-01-01`, ymd(t)] : ["", ymd(t)];
 }
-type Listed = { listing?: boolean; candidates: Candidate[]; listed: number; complete: boolean };
+type Listed = { listing?: boolean; candidates: Candidate[]; listed: number; complete: boolean; library_checked?: boolean };
 
 /** 补录 by date: a range (a preset, or two days) lists the channel's videos then, all the new ones ticked; untick what
  *  to leave out. The dates are YouTube's rough ones ("3 weeks ago"), so the range is approximate at its ends. */
@@ -210,14 +210,16 @@ function Picker({ ch, b, onClose, onDone }: { ch: Channel; b: BoardData; onClose
       if (!alive) return;
       if (d.listing) { t = window.setTimeout(ask, 1500); return; }
       setData(d);
-      setPicked(new Set(d.candidates.filter((c) => fresh(c) && !c.short).map((c) => c.id)));
+      // Notion could not be asked: what is already in the library is unknown, so nothing is ticked for you
+      // 可能已有 (a page written by hand, a05) is left for you to tick
+      setPicked(new Set(d.library_checked === false ? [] : d.candidates.filter((c) => fresh(c) && !c.short && !c.maybe).map((c) => c.id)));
     }).catch((e) => { if (alive) setErr((e as Error).message); });
     ask();
     return () => { alive = false; clearTimeout(t); };
   }, [ch.id, since, until, again]);
   const pick = (r: Range) => { setRange(r); setDays(span(r)); };
   const list = data?.candidates || [];
-  const open = list.filter((c) => fresh(c) && !c.short);
+  const open = list.filter((c) => fresh(c) && !c.short && !c.maybe);
   const chosen = list.filter((c) => picked.has(c.id));
   const all = open.length > 0 && open.every((c) => picked.has(c.id));
   const secs = chosen.reduce((a, c) => a + (c.duration || 0), 0);
@@ -232,7 +234,8 @@ function Picker({ ch, b, onClose, onDone }: { ch: Channel; b: BoardData; onClose
       sheet.current?.close(() => onDone(`补录排队 ${r.queued} 期 · 空闲且额度充足时逐期付印`));
     } catch (e) { setErr((e as Error).message); setBusy(false); }
   };
-  const state = (c: Candidate) => (c.here ? "已在本刊" : c.library ? "库里已有" : c.queued ? "排队中" : c.sample ? "样片" : c.short ? "太短" : "");
+  const state = (c: Candidate) => (c.here ? "已在本刊" : c.library ? "库里已有" : c.queued ? "排队中" : c.sample ? "样片" : c.short ? "太短"
+    : c.maybe ? "可能已有" : "");
   return (
     <Sheet ref={sheet} title="补录" tall onClose={onClose}>
       <div className="chp ch-pk">
@@ -264,13 +267,16 @@ function Picker({ ch, b, onClose, onDone }: { ch: Channel; b: BoardData; onClose
                     <span className="d">{age(c)}</span>
                     <span className="t"><IssueTitle title={c.title || c.id} /></span>
                     <span className="m">{c.duration ? fmt(c.duration) : ""}</span>
-                    <span className={`s${c.short && fresh(c) ? " w" : ""}`}>{state(c)}</span>
+                    <span className={`s${(c.short || c.maybe) && fresh(c) ? " w" : ""}`} title={c.maybe && fresh(c) ? `库里「${c.maybe.title}」` : undefined}>{state(c)}</span>
                   </label>
                 </li>
               ))}
               {!list.length && <li className="off"><p>这段时间没有视频</p></li>}
             </ol>
             {!data.complete && <p className="ch-pkn">只列出了频道最近 {data.listed} 期，更早的没有列进来</p>}
+            {data.library_checked === false && (
+              <p className="ch-err">没能核对 Notion 库里已有哪些期，所以一期都没勾 <button className="ch-btn xs" onClick={() => setAgain((n) => n + 1)}>重新核对</button></p>
+            )}
           </>
         )}
         {err && <p className="ch-err">{err} <button className="ch-btn xs" onClick={() => setAgain((n) => n + 1)}>重试</button></p>}

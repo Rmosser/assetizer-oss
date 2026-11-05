@@ -40,9 +40,18 @@ ARGV_LIMIT = 120_000
 # media self-test then pauses production, and its alert says which tool and parameters to add here.
 MEDIA_READ = {"view_file": "AbsolutePath", "read_file": "Path"}
 LIVE_PGIDS: set[int] = set()  # process groups of in-flight agy calls (killed on worker shutdown)
+LIVE_RUNS: dict[int, str] = {}  # those working for a run: the run (清空 stops a trial's call, a10)
 USAGE_LOCK = threading.Lock()  # `agy -p /usage`: one at a time in a process
 # after an error step at a media read, how long agy gets to say why before it is stopped
 MEDIA_ERROR_GRACE = 30.0
+
+
+def run_of(path: Path | str) -> str | None:
+    """The run a path under the runs directory belongs to (None: no run's, e.g. a compile)."""
+    try:
+        return Path(path).resolve().relative_to(config.get().runs_dir.resolve()).parts[0]
+    except (ValueError, IndexError):
+        return None
 
 
 class ProviderError(RuntimeError):
@@ -69,12 +78,17 @@ class CallResult:
 _TRANSIENT_RE = re.compile(r"\b(429|500|502|503|504)\b|resource_exhausted|unavailable|deadline exceeded|timed out|"
                            r"temporarily|overloaded|rate limit|connection reset|broken pipe|unexpected eof|"
                            r"connection refused|tls handshake|no such host|i/o timeout|"
+                           # the box without a network: Go's resolver and dialer
+                           r"network is unreachable|host is unreachable|no route to host|server misbehaving|"
+                           r"temporary failure in name resolution|name or service not known|"
                            # Go's net/http when the connection drops mid-request: `Post "https://…": EOF`
                            # (2026-10-25: two runs failed at once on prodbox during a short egress outage)
                            r"\": eof\b|"
                            # agy's own result when the model stream drops; until calls ended at their result the
                            # watchdog killed these and they counted as timeouts (VigCKskxyeE-r1, 2026-10-26)
                            r"stream was interrupted", re.I)
+# the weekly limit in agy's own words ("You have hit your weekly limit… refreshes in 2 days"): no outage to wait out
+_QUOTA_RE = re.compile(r"weekly limit|usage limit|limit will reset|refreshes in", re.I)
 _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sign in again|invalid_grant|"
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
 # what a signed-out agy answers to `-p /usage` with stdin closed (1.2.16): "Error: authentication required. Run 'agy'
@@ -148,7 +162,7 @@ def classify_error(text: str) -> str:
         return "PROVIDER_OUTPUT_LIMIT"
     if "invalid_argument" in t and ("schema" in t or "function_declarations" in t):
         return "PROVIDER_SCHEMA_REJECTED"
-    if "quota" in t or "exceeded your" in t or "billing" in t:
+    if "quota" in t or "exceeded your" in t or "billing" in t or _QUOTA_RE.search(t):
         return "PROVIDER_QUOTA"
     if _AUTH_RE.search(t):
         return "AGY_AUTH_REQUIRED"
@@ -253,6 +267,8 @@ class AgyProvider:
                     time.sleep(0.25)
 
             LIVE_PGIDS.add(proc.pid)
+            if rid := run_of(call_dir):
+                LIVE_RUNS[proc.pid] = rid
             threading.Thread(target=monitor, daemon=True).start()
             limit = _seconds(timeout or self.s.agy_print_timeout) + 300
             last_line = [time.monotonic()]
@@ -347,6 +363,7 @@ class AgyProvider:
             for g in grace:
                 g.cancel()
             LIVE_PGIDS.discard(proc.pid)
+            LIVE_RUNS.pop(proc.pid, None)
         if stdin_file:
             stdin_file.close()
 
@@ -368,7 +385,8 @@ class AgyProvider:
 
         if killed[0]:
             receipt["watchdog"] = killed[0]
-        cause = classify_error(" ".join([str((result or {}).get("error", "")), last_error_text]))
+        # what agy said on stderr counts too: the quota running out at the media read was said only there (2026-10-25)
+        cause = classify_error(" ".join([str((result or {}).get("error", "")), last_error_text, stderr_tail]))
         if receipt.get("media_error") and cause != "PROVIDER_FAILURE":  # quota, auth, network: not the media
             receipt["status"] = "FAILED"
             kind_err = receipt["error_class"] = cause

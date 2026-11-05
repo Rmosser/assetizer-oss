@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import shutil
+import subprocess
 import threading
 from pathlib import Path
 
@@ -34,6 +35,16 @@ class _Gate:
 # ("UNEXPECTED_EOF_WHILE_READING", 5 of 7 failed, prodbox 2026-10-25), so downloads queue here while the rest
 # of each run goes on in parallel: setting `download_slots` (1–4, default 2).
 DOWNLOADS = _Gate(lambda: knobs.get("download_slots"))
+# what yt-dlp met that no video can help: wait for the fix (retried every 30 minutes) rather than fail the issue
+WAITS = {"TOOL_OUTDATED": "YTDLP_OUTDATED", "YOUTUBE_REFUSED": "YOUTUBE_REFUSED"}
+
+
+def _hours_since(iso: str | None) -> float:
+    from datetime import datetime, timezone
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds() / 3600
+    except (TypeError, ValueError):
+        return float("inf")
 
 
 def resolve(ctx: RunContext) -> dict:
@@ -47,13 +58,22 @@ def resolve(ctx: RunContext) -> dict:
             raise Waiting("YOUTUBE_AUTH", str(e))
         if e.kind == "LIVE_UPCOMING":  # yt-dlp refuses a scheduled live outright instead of reporting is_upcoming
             raise Waiting("LIVE_IN_PROGRESS", "直播尚未开始，稍后自动重试")
+        if e.kind in ("NETWORK", "RATE_LIMITED"):  # an outage or YouTube holding back: not this video — later
+            raise Waiting("NETWORK", str(e))
+        if e.kind in WAITS:
+            raise Waiting(WAITS[e.kind], str(e))
         raise
+    except subprocess.TimeoutExpired as e:  # yt-dlp hung on the network
+        raise Waiting("NETWORK", f"读取视频信息超时：{e}")
     if info.get("live_status") in ("is_live", "is_upcoming"):
         raise Waiting("LIVE_IN_PROGRESS", "直播尚未结束，稍后自动重试")
     channel = db.one("SELECT * FROM channels WHERE youtube_channel_id=?", info.get("channel_id"))
     cfg = db.setting(f"ingest:{channel['id']}") if channel else None
-    if cfg and cfg.get("enabled") and (info.get("duration") or 0) < 60 * cfg.get("min_minutes", 10) \
-            and db.one("SELECT 1 FROM events WHERE run_id=? AND kind='ingest'", ctx.id):
+    intake = cfg and cfg.get("enabled") and db.one("SELECT 1 FROM events WHERE run_id=? AND kind='ingest'", ctx.id)
+    if intake and info.get("duration") is None and _hours_since(ctx.run["created_at"]) < 24:
+        # a live just over, a premiere not yet on: no length yet — judged once it has one, not taken for too short
+        raise Waiting("LIVE_IN_PROGRESS", "还读不到视频时长（直播刚结束或首播还没开始），稍后再判断")
+    if intake and info.get("duration") is not None and info["duration"] < 60 * cfg.get("min_minutes", 10):
         raise RuntimeError(f"SKIPPED_SHORT: {info.get('duration')}s below channel minimum")
     db.exec("""UPDATE sources SET youtube_channel_id=?, channel_title=?, title=?, published_at=?, duration=?, info=?,
                channel_id=COALESCE(channel_id, ?), updated_at=? WHERE id=?""",
@@ -110,9 +130,13 @@ def acquire(ctx: RunContext) -> dict:
     except youtube.AcquireError as e:
         if e.needs_human:
             raise Waiting("YOUTUBE_AUTH", str(e))
-        if e.kind == "NETWORK":  # the connection kept dropping: an outage, not this video — resume it later
+        if e.kind in ("NETWORK", "RATE_LIMITED"):  # the connection kept dropping, or YouTube held back: resume it later
             raise Waiting("NETWORK", str(e))
+        if e.kind in WAITS:
+            raise Waiting(WAITS[e.kind], str(e))
         raise
+    except subprocess.TimeoutExpired as e:  # a download throttled past its time: not this video's fault — again later
+        raise Waiting("NETWORK", f"下载超时：{e}")
     pr = ffmpeg.probe(p)
     v = [x for x in pr["streams"] if x["codec_type"] == "video"]
     height = v[0].get("height") if v else 0

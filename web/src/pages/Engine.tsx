@@ -10,17 +10,18 @@ import { AsrCard, asrLamp, DiskKnobs, NotionDefault, ParallelKnobs, Routing, Tel
 import { Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { ago, bytes, clock, PRODUCTION, STOPS, WAIT } from "../util";
+import { ago, bytes, clock, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
 
 const SSH = "ssh -N -L 6080:127.0.0.1:6080 ovh-investment";
-const KIND: Record<string, string> = { worker: "机房", stage: "工序", run: "付印", delivery: "交付", review: "审阅", compile: "编译", ingest: "收录", alert: "告警", experiment: "实验", config: "配置" };
+const KIND: Record<string, string> = { worker: "机房", stage: "工序", run: "付印", delivery: "交付", review: "审阅", compile: "编译", ingest: "收录", alert: "告警", experiment: "实验", config: "配置", notify: "通知" };
 /** stage keys of model calls (providers.stage_key) */
 const STEP: Record<string, string> = { understanding: "理解", merge: "合并", knowledge: "知识", article: "文章", selection: "选片", boundary: "边界", review: "预审", compile: "编译", health: "探测", media: "自检" };
 const MAIN_STEPS = ["understanding", "merge", "knowledge", "article", "selection", "boundary", "review"];
 const ERRORS: Record<string, string> = {
   PROVIDER_TIMEOUT: "模型超时", PROVIDER_FAILURE: "模型出错", PROVIDER_TRANSIENT: "模型暂时不可用", PROVIDER_OUTPUT_LIMIT: "输出超长",
   MODALITY_ROUTING_DEVIATION: "模型越界读文件", MEDIA_READ_FAILED: "读不了视频", CONTRACT: "输出不合规", DOWNLOAD: "下载失败",
-  TOO_MANY_RESTARTS: "反复重启", "?": "未分类",
+  TOO_MANY_RESTARTS: "反复重启", VIDEO_REMOVED: "视频已删除", VIDEO_PRIVATE: "视频设为私享", VIDEO_MEMBERS: "会员限定视频",
+  SOURCE_UNAVAILABLE: "视频看不了", STOPPED: "清空时停下", "?": "未分类",
 };
 const FIXES: Record<string, string> = { YOUTUBE_AUTH: "配置与测试" };
 /** "CLEANUP 完成" → "清理 完成": stage and error codes in log lines read as their Chinese labels */
@@ -60,6 +61,7 @@ function StageBar({ stages }: { stages: any[] }) {
 }
 
 function RunRow({ r, reload }: { r: any; reload: () => void }) {
+  const [busy, setBusy] = useState(false);
   const bad = r.production === "FAILED" || (r.production === "WAITING" && STOPS.includes(r.wait_reason));
   return (
     <li className="run-row">
@@ -69,8 +71,16 @@ function RunRow({ r, reload }: { r: any; reload: () => void }) {
       <span className={`run-state${bad ? " bad" : ""}`}>
         {PRODUCTION[r.production] || r.production}{r.wait_reason ? ` · ${WAIT[r.wait_reason] || r.wait_reason}` : ""}{r.error_class ? ` · ${ERRORS[r.error_class] || r.error_class}` : ""}
       </span>
-      {["FAILED", "WAITING", "COMPLETE_PARTIAL"].includes(r.production) && r.kind !== "IMPORT" &&
-        <button className="btn sm" onClick={async () => { await post(`/api/runs/${r.id}/retry`); reload(); }}>重试</button>}
+      {(["FAILED", "WAITING", "COMPLETE_PARTIAL"].includes(r.production) || (r.production === "CANCELLED" && r.error_class === "STOPPED")) && r.kind !== "IMPORT" &&
+        <button className="btn sm" disabled={busy} onClick={async () => {
+          setBusy(true);
+          try { await post(`/api/runs/${r.id}/retry`); reload(); } finally { setBusy(false); }
+        }}>重试</button>}
+      {r.production === "FAILED" && UNAVAILABLE[r.error_class] &&
+        <button className="btn sm" disabled={busy} onClick={async () => {
+          setBusy(true);
+          try { await post(`/api/runs/${r.id}/ignore`); reload(); } finally { setBusy(false); }
+        }}>忽略</button>}
     </li>
   );
 }
@@ -209,10 +219,11 @@ function Lamps({ data, choice, setOpen, onCc, reload }: { data: any; choice: boo
   const nBig = data.notion.token ? (data.notion.database ? "已连接" : "待指定位置") : "未配置";
   const dLamp = d.free / d.total < 0.15 ? "bad" : "ok";
   const [aLamp, aBig] = asrLamp(data.asr);
-  const tLamp = tg.token && tg.chat ? "ok" : "idle";
-  // the last two are optional: not set up, they do not unfold the cards on their own (a failing test does)
+  const tLamp = !(tg.token && tg.chat) ? "idle" : tg.ok === false || tg.pending ? "bad" : "ok";
+  const tBig = tLamp === "idle" ? (tg.token ? "待接通" : "未接") : tg.pending ? `${tg.pending} 条没发出去` : tg.ok === false ? "发不出去" : "已接通";
+  // the last two are optional: not set up, they do not unfold the cards on their own (a failing test or a message not sent does)
   const items: [string, string, string, boolean?][] = [["YouTube", ytLamp, ytBig], ["Notion", nLamp, nBig], ["磁盘", dLamp, `${bytes(d.free)} 可用`],
-    ["并行", "ok", `${data.slots} 槽`], ["转写", aLamp, aBig, true], ["通知", tLamp, tLamp === "ok" ? "已接通" : tg.token ? "待接通" : "未接", true]];
+    ["并行", "ok", `${data.slots} 槽`], ["转写", aLamp, aBig, true], ["通知", tLamp, tBig, true]];
   const open = choice ?? items.some(([, lamp, , optional]) => (optional ? lamp === "bad" : lamp !== "ok"));
   return (
     <section className="sys" aria-label="系统">

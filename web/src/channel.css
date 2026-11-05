@@ -83,7 +83,8 @@
 .ch-switch:disabled { opacity: 0.5; }
 .ch-step { display: inline-flex; align-items: center; border: 1px solid var(--rule-2); border-radius: 8px; overflow: hidden; background: var(--nt-bg); }
 .ch-step button { width: 28px; height: 28px; color: var(--ink-2); }
-.ch-step button:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.ch-step button:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.ch-step button:disabled { color: var(--ink-4); }  /* at the end of the range */
 .ch-step b { min-width: 34px; text-align: center; font: 500 13px var(--mono); }
 .ch-input { height: 30px; border: 1px solid var(--rule-2); border-radius: 8px; padding: 0 10px; font: 13px var(--sans); color: var(--ink); background: var(--nt-bg); width: 100%; }
 .ch-input.emoji { width: 64px; text-align: center; }
@@ -561,9 +562,10 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-dock .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--paper); box-shadow: 0 0 0 4px color-mix(in srgb, var(--paper) 16%, transparent); flex: none; }
 .ch-dock .ch-btn { border-color: color-mix(in srgb, var(--paper) 28%, transparent); color: var(--paper); }
 .ch-dock .ch-btn.solid { background: var(--paper); color: var(--ink); border-color: var(--paper); }
+.ch-dock .ch-btn.solid:hover:not(:disabled) { background: color-mix(in srgb, var(--paper) 86%, var(--zhu)); }  /* not the ink of .ch-btn.solid:hover */
 .ch-dock input { height: 32px; width: 280px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--paper) 25%, transparent); background: color-mix(in srgb, var(--paper) 6%, transparent); color: var(--paper); padding: 0 14px; font: 13px var(--sans); }
 .ch-dock input::placeholder { color: color-mix(in srgb, var(--paper) 50%, transparent); }
-.ch-dock .err { color: #f4a08f; font-size: 12px; }
+.ch-dock .err { color: color-mix(in srgb, var(--zhu) 55%, var(--paper)); font-size: 12px; }  /* on the ink bar, light or dark */
 .ch-toast { position: fixed; left: 50%; bottom: calc(26px + var(--safe-b)); transform: translateX(-50%); padding: 10px 18px; border-radius: 999px; background: var(--ink); color: var(--paper);
   font-size: 13.5px; z-index: 46; box-shadow: 0 18px 46px -12px rgba(0, 0, 0, 0.45); animation: ch-rise 0.4s var(--ease); display: flex; gap: 10px; align-items: center; width: max-content; max-width: calc(100vw - 32px);
   transition: bottom 0.3s var(--ease); }
@@ -899,9 +901,13 @@ button.ch-cardh { width: 100%; text-align: left; margin: 0; }
   .ch-pkl input { grid-row: 1 / span 2; }
 }
 
-/* fingers: the 看板's and the 补录 sheet's controls at the size of the app's other touch targets */
+/* fingers: the 看板's, the 补录 / 定稿 / 换库 sheets' and the save bar's controls at the size of the app's other touch
+   targets (the sheets and the bar are portalled to <body>, outside .chp) */
 @media (pointer: coarse) {
-  .chp .ch-btn.sm, .chp .ch-btn.xs { height: 44px; padding: 0 16px; font-size: 13.5px; }
+  .chp .ch-btn.sm, .chp .ch-btn.xs, :is(.ch-sheet, .ch-target) .ch-btn.sm { height: 44px; padding: 0 16px; font-size: 13.5px; }
+  :is(.ch-sheet, .ch-target) .ch-btn:not(.sm):not(.xs), .ch-dock .ch-btn { height: 44px; }
+  :is(.ch-sheet, .ch-target) .ch-seg button { height: 40px; padding: 0 12px; }
+  .ch-dock input { height: 40px; }
   .ch-head > .ch-seg button { height: 40px; padding: 0 14px; }
   .ch-pkc { gap: 5px; }
   .ch-pkc button { height: 40px; padding: 0 11px; }  /* the five ranges on one row of a phone */

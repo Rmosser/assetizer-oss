@@ -39,7 +39,7 @@ export type Board = {
 };
 export type Candidate = {
   id: string; title: string | null; published: string; duration?: number | null; approx?: boolean;
-  sample: boolean; produced: boolean; here: boolean; library: any; queued: boolean; short: boolean;
+  sample: boolean; produced: boolean; here: boolean; library: any; maybe?: any; queued: boolean; short: boolean;
 };
 export type ChannelsResp = { channels: Channel[]; universal: Playbook | null; decisions: any[] };
 
@@ -86,7 +86,7 @@ export type NotionView = {
   configured: boolean; database: { id: string; url: string; title: string }; config: { template: string; heading: string; icon: string };
   rows: NotionRow[]; problems: number; warnings: Record<string, string>; page_titles: Record<string, string | null>;
   templates: Record<string, string>; source_labels: Record<string, string>; template_vars: Record<string, string>; access_labels: Record<string, string>;
-  repick?: string[]; dropped?: string[];
+  repick?: string[]; dropped?: string[]; rev?: number;
 };
 export type Draft = { properties: Record<string, Mapping>; template: string; heading: string; icon: string };
 
@@ -122,6 +122,8 @@ export type LockPreview = {
   candidates: { id: number; version: number; status: string; tested: boolean }[]; conflicts: { clause_id: string; rule_id?: string; issue: string }[];
   samples: LockRow[]; target: { configured: boolean; title: string; test_copy: boolean };
   ingest: { available: boolean; enabled: boolean; min_minutes: number }; library_checked: boolean; library_error?: string;
+  // posted while the channel was tuned (intake paused): offered to 补录 (a11)
+  missed?: { id: string; title: string | null; published: string | null; duration: number | null }[]; missed_error?: string | null;
 };
 export type Issue = {
   id: string; title: string; published_at: string | null; duration: number | null; delivery: string; delivery_reason: string | null;

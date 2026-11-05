@@ -138,6 +138,12 @@ def cmd_notify_digest(a) -> None:
         print("sent" if notify.send(notify.digest()) else "not sent (Telegram 未配置或发送失败)")
 
 
+def cmd_logs(a) -> None:
+    """Read only: what a developer's agent scans to iterate — the week (--summary), or all the logs kept, redacted."""
+    from . import logs
+    _print(logs.summary(a.days or logs.WEEK) if a.summary else logs.export(a.days))
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="assetizer")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -161,6 +167,8 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("telegram-setup", help="给 bot 发过消息后运行：记下 chat id 并发一条测试消息").set_defaults(fn=cmd_telegram_setup)
     x = sub.add_parser("notify-digest", help="打印日报；--send 立即发到 Telegram"); x.add_argument("--send", action="store_true")
     x.set_defaults(fn=cmd_notify_digest)
+    x = sub.add_parser("logs", help="只读：最近的日志（去掉凭据），给开发用的 agent 扫；--summary 只看这一周")
+    x.add_argument("--days", type=int); x.add_argument("--summary", action="store_true"); x.set_defaults(fn=cmd_logs)
     a = p.parse_args(argv)
     a.fn(a)
 

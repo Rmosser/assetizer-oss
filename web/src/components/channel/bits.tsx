@@ -95,17 +95,20 @@ export function Switch({ on, onChange, label, disabled }: { on: boolean; onChang
   return <button type="button" role="switch" aria-checked={on} aria-label={label} disabled={disabled} className={`ch-switch${on ? " on" : ""}`} onClick={() => onChange(!on)} />;
 }
 
-export function Stepper({ value, onChange, step = 5, min = 0, max = 240, label }: {
-  value: number; onChange: (v: number) => void; step?: number; min?: number; max?: number; label: string;
+export function Stepper({ value, onChange, step = 5, min = 0, max = 240, label, zero }: {
+  value: number; onChange: (v: number) => void; step?: number; min?: number; max?: number; label: string; zero?: string;
 }) {
   return (
     <span className="ch-step" role="group" aria-label={label}>
-      <button type="button" aria-label="减少" onClick={() => onChange(Math.max(min, value - step))}>−</button>
-      <b>{value}</b>
-      <button type="button" aria-label="增加" onClick={() => onChange(Math.min(max, value + step))}>+</button>
+      <button type="button" aria-label="减少" disabled={value <= min} onClick={() => onChange(Math.max(min, value - step))}>−</button>
+      <b>{value === 0 && zero ? zero : value}</b>
+      <button type="button" aria-label="增加" disabled={value >= max} onClick={() => onChange(Math.min(max, value + step))}>+</button>
     </span>
   );
 }
+
+/** The intake's minimum length in words: 0 takes every video, Shorts too (a18). */
+export const minRule = (m: number) => (m ? `短于 ${m} 分钟的不收` : "时长不限");
 
 /** ✓ in a ring: this run is the issue's version. Filled = pinned by you (a newer run won't replace it). */
 export function Adopt({ pinned, small }: { pinned: boolean; small?: boolean }) {

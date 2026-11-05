@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { post } from "../api";
+import { HttpError, post } from "../api";
 import { Fault, Stale, Unroll } from "../components/States";
-import { useLeaving, usePoll } from "../hooks";
+import { useLeaving, usePoll, useBack } from "../hooks";
 import { navigate, usePath } from "../router";
 import { reduceMotion, smooth } from "../util";
 import { cn, Seg, Toast, useCompact, useNarrow } from "../components/channel/bits";
@@ -100,11 +100,11 @@ export default function ChannelPage() {
     navigate(`/channels/${parts[1]}${to}`, { replace: true, quiet: true });
   }, [path]); // eslint-disable-line react-hooks/exhaustive-deps
   const busy = list?.channels.some((c) => c.compile?.state === "running" || c.samples_busy > 0);
-  useEffect(() => {
-    if (!busy) return;
-    const t = setInterval(() => { if (!document.hidden) reload(); }, 15000);
+  useEffect(() => {  // idle too, slower: a lock or a trial from another device shows here without a reload
+    const t = setInterval(() => { if (!document.hidden) reload(); }, busy ? 15000 : 60000);
     return () => clearInterval(t);
   }, [busy, reload]);
+  useBack(reload);
   useEffect(() => {  // the overview's figures and lamps follow intake and production
     if (cidParam) return;
     const t = setInterval(() => { if (!document.hidden) reload(); }, 30000);
@@ -123,6 +123,10 @@ export default function ChannelPage() {
   );
 }
 
+/** Notion settings changed and not saved yet, per channel: they wait for you while you look at another channel or
+ *  another page of the app, and come back with their save bar (a reload or a closed tab asks first, below). */
+const unsaved = new Map<string, Draft>();
+
 function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: ChannelsResp; reloadList: () => void; sub: Page | null }) {
   const mode = modeOf(ch);
   const qs = new URLSearchParams(location.search);
@@ -137,7 +141,8 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const [view, setView] = useState<View>(["manuscript", "rules"].includes(qs.get("view") || "") ? (qs.get("view") as View) : "studio");
   const [sel, setSel] = useState<{ sample: string | null; run: string | null }>({ sample: qs.get("sample"), run: qs.get("run") });
   const [cmp, setCmp] = useState(false);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(() => unsaved.get(ch.id) ?? null);
+  useEffect(() => { if (draft) unsaved.set(ch.id, draft); else unsaved.delete(ch.id); }, [draft, ch.id]);
   const [open, setOpen] = useState<string | null>(null);
   const [sheet, setSheet] = useState(false);
   const [target, setTarget] = useState(false);
@@ -153,6 +158,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const studio = useRef<HTMLDivElement>(null);
   const pane = useRef<HTMLDivElement>(null);
   const toastT = useRef<number | undefined>(undefined);
+  const inflight = useRef(new Set<string>());  // requests that spend model quota, under way
   useLitDelegation(studio);
   const flash = useCallback((text: string, seal?: boolean) => {
     setToast({ text, seal });
@@ -165,10 +171,11 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const wb = wbQ.data;
   const wbBusy = !!wb && (wb.samples.some((s) => s.busy) || wb.queue.length > 0);
   useEffect(() => {
-    if (!wbBusy) return;
-    const t = setInterval(() => { if (!document.hidden) wbQ.reload(); }, 15000);
+    if (mode !== "tuning") return;
+    const t = setInterval(() => { if (!document.hidden) wbQ.reload(); }, wbBusy ? 15000 : 60000);
     return () => clearInterval(t);
-  }, [wbBusy, wbQ.reload]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mode, wbBusy, wbQ.reload]); // eslint-disable-line react-hooks/exhaustive-deps
+  useBack(mode === "tuning" ? wbQ.reload : null);
   // the 调试台's reads wait until it is first shown: a locked channel opens on its 看板
   const recentQ = usePoll<{ issues: Issue[] }>(mode !== "tuning" && studioSeen ? `/api/channels/${ch.id}/recent?limit=4` : null, 0);
   const issues = recentQ.data?.issues || [];
@@ -284,28 +291,43 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
 
   // ------------------------------------------------------------------ actions
   const guard = <A extends unknown[]>(fn: (...a: A) => Promise<void>) => async (...a: A) => {
-    try { await fn(...a); } catch (e) { flash((e as Error).message); }
+    try { await fn(...a); } catch (e) {
+      flash((e as Error).message);
+      if (e instanceof HttpError && e.status === 409) reloadList();  // locked or retuned elsewhere: show it as it is now
+    }
+  };
+  // what spends model quota goes out once: a second click while its request is under way does nothing
+  const once = <A extends unknown[]>(key: (...a: A) => string, fn: (...a: A) => Promise<void>) => async (...a: A) => {
+    const k = key(...a);
+    if (inflight.current.has(k)) return;
+    inflight.current.add(k);
+    try { await fn(...a); } finally { inflight.current.delete(k); }
   };
   const act: MatrixActions = {
-    trial: guard(async (pids: number[], sids?: string[]) => {
+    trial: once((pids: number[], sids?: string[]) => `t:${pids}:${sids || ""}`, guard(async (pids: number[], sids?: string[]) => {
       wbQ.setData(await post<Workbench>(`/api/channels/${ch.id}/trial`, { playbook_ids: pids, source_ids: sids || null }));
       reloadList(); flash("已排进试跑队列");
-    }),
+    })),
     add: async (url: string) => { wbQ.setData(await post<Workbench>(`/api/channels/${ch.id}/samples`, { url })); reloadList(); },
     remove: guard(async (sid: string) => { wbQ.setData(await post<Workbench>(`/api/channels/${ch.id}/samples/${encodeURIComponent(sid)}/remove`)); reloadList(); }),
     clear: guard(async () => { wbQ.setData(await post<Workbench>(`/api/channels/${ch.id}/trial-queue/clear`)); }),
-    retry: guard(async (rid: string) => { await post(`/api/runs/${encodeURIComponent(rid)}/retry`); wbQ.reload(); }),
+    retry: once((rid: string) => `r:${rid}`, guard(async (rid: string) => { await post(`/api/runs/${encodeURIComponent(rid)}/retry`); wbQ.reload(); })),
   };
   const adopt = guard(async (sid: string, rid: string | null, pinned: boolean) => {
     await post(`/api/sources/${encodeURIComponent(sid)}/adopt`, { run_id: rid, pinned });
     wbQ.reload();
   });
-  const saveNotion = guard(async () => {
+  // saved since on another device (a12): this save waits for 用我的覆盖 or 放弃我的
+  const [overtaken, setOvertaken] = useState(false);
+  const saveNotion = guard(async (force = false) => {
     if (!draft) return;
-    const v = await post<NotionView>(`/api/channels/${ch.id}/notion`, draft);
-    notionQ.setData(v); setDraft(null); reloadList();
+    let v: NotionView;
+    try { v = await post<NotionView>(`/api/channels/${ch.id}/notion`, { ...draft, rev: notionQ.data?.rev, force }); }
+    catch (e) { if (e instanceof HttpError && e.status === 412) { setOvertaken(true); return; } throw e; }
+    setOvertaken(false); notionQ.setData(v); setDraft(null); reloadList();
     flash(v.problems ? `已保存，还有 ${v.problems} 处和 Notion 对不上` : mode === "locked" ? "已保存 · 下一期起按新设置写入" : "已保存");
   });
+  const dropNotion = () => { setOvertaken(false); setDraft(null); notionQ.reload(); };
   const retune = async () => { await post(`/api/channels/${ch.id}/retune`); reloadList(); flash("已回到调试期 · 自动收录已暂停"); };
   const setIngest = async (enabled: boolean, min: number) => { await post(`/api/channels/${ch.id}/ingest`, { enabled, min_minutes: min }); reloadList(); };
   const savePrompt = async (text: string, note: string) => {
@@ -432,14 +454,20 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
       {dock.shown && (
         <div className={`ch-dock${dock.leaving ? " leaving" : ""}`} role="region" aria-label="保存" inert={dock.leaving}>
           <span className="pulse" aria-hidden />
-          <span>Notion 设置有改动{mode === "locked" ? " · 下一期起生效" : ""}</span>
-          <button className="ch-btn sm" onClick={() => setDraft(null)}>放弃</button>
-          <button className="ch-btn sm solid" onClick={saveNotion}>保存</button>
+          {overtaken ? <>
+            <span>这个频道的 Notion 设置刚在别处改过</span>
+            <button className="ch-btn sm" onClick={dropNotion}>放弃我的</button>
+            <button className="ch-btn sm solid" onClick={() => saveNotion(true)}>用我的覆盖</button>
+          </> : <>
+            <span>Notion 设置有改动{mode === "locked" ? " · 下一期起生效" : ""}</span>
+            <button className="ch-btn sm" onClick={dropNotion}>放弃</button>
+            <button className="ch-btn sm solid" onClick={() => saveNotion()}>保存</button>
+          </>}
         </div>
       )}
       {sheet && lockPb && (
         <LockSheet cid={ch.id} defaultPb={lockPb.id} onClose={() => setSheet(false)}
-          onLocked={(r) => { setSheet(false); reloadList(); flash(`已定稿 v${r.version} · 写入 ${r.write} 期${r.ingest?.enabled ? " · 自动收录已开启" : ""}`, true); }}
+          onLocked={(r) => { setSheet(false); reloadList(); flash(`已定稿 v${r.version} · 写入 ${r.write} 期${r.backfill ? ` · 补录 ${r.backfill} 期` : ""}${r.ingest?.enabled ? " · 自动收录已开启" : ""}`, true); }}
           onConflict={(c) => { setSheet(false); openMs("manuscript", `cl:${c}`); }} onRetarget={() => { setSheet(false); setTarget(true); }}
           onTrial={async (pid) => { await act.trial([pid]); }} />
       )}

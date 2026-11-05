@@ -158,7 +158,7 @@ def _command(wav: Path, out: Path, offset: float, language: str | None, initial_
 def transcribe(wav: Path, offset: float = 0.0, language: str | None = "zh",
                initial_prompt: str | None = None) -> dict:
     """Return {'segments': [{start,end,text}], 'words': [{start,end,word}]} in offset-shifted seconds."""
-    from ..providers.agy import LIVE_PGIDS  # the worker kills these groups on shutdown
+    from ..providers.agy import LIVE_PGIDS, LIVE_RUNS, run_of  # the worker kills these groups on shutdown, or a10's stop
 
     out = wav.with_name(wav.name + ".asr.json")
     with _lock:
@@ -166,6 +166,8 @@ def transcribe(wav: Path, offset: float = 0.0, language: str | None = "zh",
         proc = subprocess.Popen(_command(wav, out, offset, language, initial_prompt), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
         LIVE_PGIDS.add(proc.pid)
+        if rid := run_of(wav):
+            LIVE_RUNS[proc.pid] = rid
         try:
             _, err = proc.communicate()
         except BaseException:
@@ -174,6 +176,7 @@ def transcribe(wav: Path, offset: float = 0.0, language: str | None = "zh",
             raise
         finally:
             LIVE_PGIDS.discard(proc.pid)
+            LIVE_RUNS.pop(proc.pid, None)
         if proc.returncode != 0 or not out.exists():
             how = "killed (out of memory?)" if proc.returncode == -signal.SIGKILL else f"exit {proc.returncode}"
             raise RuntimeError(f"whisper child {how}: {err.decode(errors='replace')[-800:].strip()}")

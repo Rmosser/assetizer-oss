@@ -1730,14 +1730,16 @@ def test_worker_reports_a_restart_by_systemd_but_not_a_deploy(sent, monkeypatch)
 
 
 def test_memory_alert_raises_near_the_limit_and_clears_well_below(sent, monkeypatch):
-    from assetizer import db
+    from assetizer import db, notify
     from assetizer.pipeline import runner
+    seen = []
     for used in (5.0, 7.6, 7.8, 6.0, 5.0, 8.0):
         monkeypatch.setattr(runner, "cgroup_memory", lambda u=used: (int(u * 2**30), 9 * 2**30))
         runner.memory_alert()
-    assert [m.split("\n")[0] for m in sent] == ["🟠 Worker 内存接近上限", "✅ 已恢复：Worker 内存接近上限",
-                                                 "🟠 Worker 内存接近上限"]
-    assert db.one("SELECT resolved_at FROM alerts WHERE key='MEMORY_HIGH'")["resolved_at"] is None
+        seen.append(db.one("SELECT 1 FROM alerts WHERE key='MEMORY_HIGH' AND resolved_at IS NULL") is not None)
+    assert seen == [False, True, True, True, False, True]
+    notify.send_due_alerts()
+    assert sent == []  # a17: not urgent — pushed only if it is still there 10 minutes on
 
 
 def test_telegram_setup_finds_the_chat_and_keeps_its_id(home, monkeypatch):
@@ -1802,6 +1804,24 @@ def test_daily_digest(sent, monkeypatch):
     assert notify.digest_due()
     notify.send_digest()
     assert not notify.digest_due() and sent[-1].startswith("📋 课代表日报（10-24 09:00）")
+
+
+def test_digest_goes_at_the_hour_set_in_the_engine_room_and_waits_between_tries(sent, monkeypatch):
+    import datetime as dt
+    from assetizer import db, notify
+
+    class Clock(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 10, 24, 7, 0, tzinfo=tz)
+    monkeypatch.setattr(notify.dt, "datetime", Clock)
+    assert not notify.digest_due()  # 7:00, and the default is 9:00
+    db.set_setting("digest_hour", 7)
+    assert notify.digest_due()
+    db.set_setting("digest_tried", "2026-10-24T06:50:00+00:00")  # Telegram did not take it ten minutes ago
+    assert not notify.digest_due()
+    db.set_setting("digest_tried", "2026-10-24T06:40:00+00:00")
+    assert notify.digest_due()
 
 
 # ---------------------------------------------------------------- LazyCat package (docs/lazycat-lpk-plan.md)
@@ -3620,6 +3640,1406 @@ def test_a_cancel_while_backfill_asks_the_library_leaves_the_one_already_taken(h
     assert db.one("SELECT status FROM backfill_queue WHERE source_id='HHHHHHHHHHH'")["status"] == "SKIPPED"
 
 
+# ---------------------------------------------------------------- 使用场景边界 review（2026-10-28）：注释里的 Sxx 是场景编号
+def test_the_library_lookup_reads_every_page_of_its_answer(home, monkeypatch):
+    # S01: fifty videos asked at once can match more than a page of results (a library with duplicates)
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    from assetizer.util import now
+    db.exec("INSERT INTO channels(id, name, mode, stage, created_at, updated_at) VALUES ('trader-tom','Tom','TRACKED','LOCKED',?,?)", now(), now())
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
+    ids = [f"vid{i:08d}" for i in range(50)]
+    pages = [{"id": f"pg{i}", "url": f"https://notion/{i}", "properties": {"视频链接": {"type": "url", "url": f"https://youtu.be/{v}"}}}
+             for i, v in enumerate([ids[i // 3] for i in range(102)] + ids[34:])]
+
+    class Paged:
+        def _req(self, method, path, **kw):
+            if path.endswith("/query"):
+                at = int(kw["json"].get("start_cursor") or 0)
+                size = kw["json"]["page_size"]
+                more = at + size < len(pages)
+                return {"results": pages[at:at + size], "has_more": more, "next_cursor": str(at + size) if more else None}
+            return LIB
+    monkeypatch.setattr(delivery, "client", lambda: Paged())
+    assert sorted(delivery.registered_many({"channel_id": "trader-tom"}, ids)) == ids
+
+
+def test_the_backfill_list_says_when_the_library_could_not_be_checked(home, monkeypatch):
+    # S01: a failed lookup is not "none of them are in the library"; asked again once Notion answers
+    from fastapi.testclient import TestClient
+    from assetizer import delivery
+    from assetizer.web import app as web
+    _board_fixture(home, monkeypatch)
+
+    def down(src, ids):
+        raise RuntimeError("Notion 502")
+    monkeypatch.setattr(delivery, "registered_many", down)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    assert _listed(c, "/api/channels/t/backfill/candidates", h).json()["library_checked"] is False
+    monkeypatch.setattr(delivery, "registered_many", lambda src, ids: {"CCCCCCCCCCC": {"id": "p", "url": "u", "title": "t"}})
+    r = _listed(c, "/api/channels/t/backfill/candidates", h).json()
+    assert r["library_checked"] is True and next(x for x in r["candidates"] if x["id"] == "CCCCCCCCCCC")["library"]
+
+
+def test_samples_are_not_counted_as_issues(home):
+    # S03: a channel still being tuned has samples, run again and again and not in Notion: they are not issues
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    t = now()
+    db.exec("INSERT INTO channels(id, name, mode, stage, created_at, updated_at) VALUES ('w','Wang','TRACKED','TUNING',?,?), ('t','Tom','TRACKED','LOCKED',?,?)",
+            t, t, t, t)
+    for sid, cid, delivery in [("W1", "w", "NOT_STARTED"), ("W2", "w", "NOT_STARTED"), ("T1", "t", "DELIVERED")]:
+        db.exec("INSERT INTO sources(id, channel_id, title, duration, delivery, current_run_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                sid, cid, sid, 1800, delivery, sid + "-r2", t, t)
+        for r in ("r1", "r2"):
+            db.exec("INSERT INTO runs(id, source_id, production, summary, created_at, finished_at) VALUES (?,?,'COMPLETE',?,?,?)",
+                    f"{sid}-{r}", sid, json.dumps({"units": 5}), t, t)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    issues = {i["id"]: i for i in c.get("/api/overview", headers=h).json()["issues"]}
+    assert [issues[k]["sample"] for k in ("W1", "W2", "T1")] == [True, True, False]
+    assert issues["T1"]["no"] == 1 and issues["W1"]["no"] is None  # a sample takes no issue number
+    stats = {ch["id"]: ch["stats"] for ch in c.get("/api/channels", headers=h).json()["channels"]}
+    assert (stats["w"]["issues"], stats["w"]["units"], stats["t"]["issues"], stats["t"]["units"]) == (0, 0, 1, 5)
+
+
+def test_a_page_that_cannot_be_archived_is_not_written_a_second_time(home, monkeypatch):
+    # S06: replacing the page of an issue run again: when archiving the old page fails, no second page is made
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    from assetizer.notion.client import NotionError
+    _run_fixture(home)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
+    db.exec("UPDATE sources SET current_run_id='r', notion_page_id='old', notion_synced_run='r0', notion_database_id='lib', delivery='STALE'")
+    calls = []
+
+    class Fake:
+        status = 502
+
+        def _req(self, method, path, **kw):
+            calls.append((method, path))
+            if path == "/pages":
+                raise NotionError(418, "stop: a page would be made here")
+            return {"results": []} if path.endswith("/query") or path.startswith("/comments") else LIB
+
+        def page(self, pid):
+            return {"archived": False, "icon": None}
+
+        def me(self):
+            return {"id": "bot"}
+
+        def children(self, pid):  # the old page as Assetizer left it (a07)
+            return []
+
+        def archive_page(self, pid):
+            raise NotionError(self.status, "<!DOCTYPE html>")
+    fake = Fake()
+    monkeypatch.setattr(delivery, "client", lambda: fake)
+    assert delivery.deliver("v")["status"] == "FAILED"
+    assert ("POST", "/pages") not in calls and db.one("SELECT notion_page_id FROM sources")["notion_page_id"] == "old"
+    fake.status = 404  # the old page is gone already (deleted in Notion): a new one is right
+    delivery.deliver("v")
+    assert ("POST", "/pages") in calls
+
+
+def test_a_page_made_but_whose_answer_was_lost_is_taken_up_not_registered(home, monkeypatch):
+    # S07: Notion made the page but the answer was lost; the next try finds it in the library: it is ours, carry on
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    from assetizer.notion.client import NotionError
+    _run_fixture(home)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
+    db.exec("UPDATE sources SET current_run_id='r'")
+    calls, made = [], []
+
+    class Fake:
+        def _req(self, method, path, **kw):
+            calls.append((method, path))
+            if path == "/pages":
+                made.append({"id": "made", "url": "https://notion/made", "archived": False, "created_by": {"id": "bot"},
+                             "properties": {"Name": {"type": "title", "title": [{"plain_text": "交易员汤姆-20260908-题眼"}]}}})
+                raise NotionError(599, "the answer was lost on the way back")
+            if path.endswith("/query"):
+                return {"results": made}
+            if path.startswith("/blocks"):
+                raise NotionError(418, "stop: writing would go on here")
+            return LIB
+
+        def page(self, pid):
+            return {"archived": False, "icon": None}
+
+        def me(self):
+            return {"id": "bot", "type": "bot"}
+    monkeypatch.setattr(delivery, "client", lambda: Fake())
+    assert delivery.deliver("v")["status"] == "FAILED"
+    assert delivery.deliver("v")["status"] != "REGISTERED"
+    assert db.one("SELECT notion_page_id FROM sources")["notion_page_id"] == "made" and calls.count(("POST", "/pages")) == 1
+
+
+def test_a_run_waiting_for_the_youtube_login_keeps_waiting_through_an_error_nobody_knows(home, monkeypatch):
+    # S12: nine days waiting for the login, then one retry is answered 403 — that is no reason to give the issue up
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    from assetizer.youtube import AcquireError
+    t = now()
+    for sid, wait in (("m", "YOUTUBE_AUTH"), ("p", None)):
+        db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES (?,'NOT_STARTED',?,?)", sid, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, wait_reason, attempts, created_at) VALUES (?,?,'QUEUED',?,7,?)",
+                f"{sid}-r1", sid, wait, t)
+
+    def acquire(ctx):
+        raise AcquireError("UNKNOWN", "ERROR: unable to download video data: HTTP Error 403: Forbidden")
+    monkeypatch.setattr(runner, "STAGES", [("ACQUIRE", acquire, True)])
+    assert runner._execute("m-r1") == "WAITING"
+    # and waiting is not a restart: the count starts again, so the next worker restart does not end it
+    assert db.one("SELECT production, wait_reason, attempts FROM runs WHERE id='m-r1'") == \
+        {"production": "WAITING", "wait_reason": "YOUTUBE_AUTH", "attempts": 0}
+    assert runner._execute("p-r1") == "FAILED"  # not waiting before: an unknown error is a failure as ever
+
+
+def test_the_youtube_login_alert_stays_while_a_video_still_waits_for_it(home, monkeypatch):
+    # S12 / S50: a video whose metadata is cached finishing RESOLVE says nothing about the login a members' video needs
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    t = now()
+    for sid, state, wait in (("m", "WAITING", "YOUTUBE_AUTH"), ("p", "QUEUED", None), ("q", "QUEUED", None), ("r", "QUEUED", None)):
+        db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES (?,'NOT_STARTED',?,?)", sid, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, wait_reason, created_at) VALUES (?,?,?,?,?)", f"{sid}-r1", sid, state, wait, t)
+    db.raise_alert("YOUTUBE_AUTH", "critical", "YouTube 需要登录或会员权限", "…")
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", lambda ctx: {"cached": True}, True)])
+    runner._execute("p-r1")
+    assert db.one("SELECT 1 FROM alerts WHERE key='YOUTUBE_AUTH' AND resolved_at IS NULL")
+    db.exec("UPDATE runs SET production='COMPLETE', wait_reason=NULL WHERE id='m-r1'")  # the members' video got through
+    runner._execute("q-r1")  # nobody waits now, but this one did not ask YouTube either
+    assert db.one("SELECT 1 FROM alerts WHERE key='YOUTUBE_AUTH' AND resolved_at IS NULL")
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", lambda ctx: {"title": "read from YouTube"}, True)])
+    runner._execute("r-r1")
+    assert not db.one("SELECT 1 FROM alerts WHERE key='YOUTUBE_AUTH' AND resolved_at IS NULL")
+    assert "视频测试" in runner.ALERT_TEXT["YOUTUBE_AUTH"][1]  # how to go on at once, not only "every 30 minutes"
+
+
+def test_an_outage_while_reading_the_video_holds_the_run(home, monkeypatch):
+    # S14: the box offline for hours — reading the video's metadata (RESOLVE) waits for the network like the rest
+    import subprocess
+    from assetizer import db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now
+    t = now()
+    outages = [youtube.AcquireError(youtube.classify(s), s) for s in (
+        "ERROR: [youtube] x: Unable to download API page: <urlopen error [Errno 113] No route to host>",
+        "ERROR: [youtube] x: Unable to download webpage: <urlopen error [Errno -2] Name or service not known>",
+        "ERROR: [youtube] x: Unable to download API page: HTTP Error 503: Service Unavailable",
+        "ERROR: [youtube] x: HTTP Error 429: Too Many Requests")] + [subprocess.TimeoutExpired("yt-dlp", 180)]
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", acquire.resolve, True)])
+    for i, e in enumerate(outages):
+        db.exec("INSERT INTO sources(id, url, delivery, created_at, updated_at) VALUES (?,?,'NOT_STARTED',?,?)", f"v{i}", f"v{i}", t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?,?,'QUEUED',?)", f"v{i}-r1", f"v{i}", t)
+
+        def metadata(url, e=e):
+            raise e
+        monkeypatch.setattr(youtube, "metadata", metadata)
+        assert runner._execute(f"v{i}-r1") == "WAITING", e
+        assert db.one("SELECT wait_reason FROM runs WHERE id=?", f"v{i}-r1")["wait_reason"] == "NETWORK"
+
+
+def test_the_ways_a_dead_network_shows_in_agy_are_outages():
+    # S14: Go's resolver and dialer when the box has no network
+    for said in ('dial tcp: lookup cloudcode-pa.googleapis.com on 127.0.0.11:53: server misbehaving',
+                 'Post "https://cloudcode-pa.googleapis.com/v1": dial tcp 142.250.1.1:443: connect: network is unreachable',
+                 'dial tcp: lookup oauth2.googleapis.com: Temporary failure in name resolution',
+                 'dial tcp 142.250.1.1:443: connect: no route to host'):
+        assert classify_error(said) == "PROVIDER_TRANSIENT", said
+
+
+def test_an_outage_in_a_stage_that_may_fail_holds_the_run_instead_of_skipping_it(home, monkeypatch):
+    # S14: 选片 or 边界 meeting a dead network wait for it; going on without them delivers a part of the issue
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import ProviderError
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+
+    def select(ctx):
+        raise ProviderError("PROVIDER_TRANSIENT", "dial tcp: connect: network is unreachable")
+    monkeypatch.setattr(runner, "STAGES", [("SELECT", select, False)])
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT production, wait_reason FROM runs WHERE id='v-r1'") == {"production": "WAITING", "wait_reason": "NETWORK"}
+
+
+def test_a_download_that_runs_out_of_time_waits_instead_of_failing(home, monkeypatch):
+    # S45: a three-hour replay throttled past the download's six hours: not the video's fault, try again later
+    import subprocess
+    from assetizer import db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, url, duration, delivery, created_at, updated_at) VALUES ('v','v',10800,'NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+    monkeypatch.setattr(acquire, "_free_bytes", lambda p: 10**12)
+
+    def download(url, dest):
+        raise subprocess.TimeoutExpired("yt-dlp", 6 * 3600)
+    monkeypatch.setattr(youtube, "download", download)
+    monkeypatch.setattr(runner, "STAGES", [("ACQUIRE", acquire.acquire, True)])
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT wait_reason FROM runs WHERE id='v-r1'")["wait_reason"] == "NETWORK"
+
+
+def test_one_signed_out_answer_is_checked_against_agys_usage_before_it_pauses_production(home, monkeypatch):
+    # S16: right when a quota window resets one call can answer 401; agy's /usage (no turn, no quota) decides
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.providers import agy
+    from assetizer.providers.agy import ProviderError
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+
+    def knowledge(ctx):
+        raise ProviderError("AGY_AUTH_REQUIRED", "HTTP 401 UNAUTHENTICATED")
+    monkeypatch.setattr(runner, "STAGES", [("KNOWLEDGE", knowledge, True)])
+    monkeypatch.setattr(agy.AgyProvider, "usage", lambda self: {"ok": True, "checked_at": t, "groups": []})
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT wait_reason FROM runs WHERE id='v-r1'")["wait_reason"] == "NETWORK"
+    assert not db.setting("queue_paused") and not db.one("SELECT 1 FROM alerts WHERE key='AGY_AUTH_REQUIRED'")
+    # really signed out: /usage says so too
+    db.exec("UPDATE runs SET production='QUEUED' WHERE id='v-r1'")
+    monkeypatch.setattr(agy.AgyProvider, "usage", lambda self: {"ok": False, "error": "AGY_AUTH_REQUIRED", "checked_at": t})
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT wait_reason FROM runs WHERE id='v-r1'")["wait_reason"] == "AGY_AUTH_REQUIRED"
+    assert db.setting("queue_paused")["reason"] == "AGY_AUTH_REQUIRED"
+
+
+def test_the_weekly_limit_in_any_words_is_the_quota():
+    # S16: agy's own words for the weekly limit are no network outage
+    assert classify_error("You have hit your weekly limit for Gemini Pro. It refreshes in 2 days.") == "PROVIDER_QUOTA"
+    assert classify_error("Error 429 RESOURCE_EXHAUSTED: usage limit reached for this week") == "PROVIDER_QUOTA"
+
+
+def test_the_quota_alert_says_when_the_quota_comes_back(home):
+    # S16: the 刊 and Telegram should say when production goes on, not only that it probes every 10 minutes
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    db.set_setting("agy_quota", {"ok": True, "production_group": "Gemini Pro", "groups": [{"name": "Gemini Pro", "buckets": [
+        {"window": "5h", "remaining": 0.4, "reset_at": "2026-10-30T02:00:00+00:00", "disabled": False},
+        {"window": "weekly", "remaining": 0, "reset_at": "2026-10-30T23:34:00+00:00", "disabled": False}]}]})
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+    runner._wait("v-r1", "PROVIDER_QUOTA", "quota")
+    assert "周六 07:34" in db.one("SELECT body FROM alerts WHERE key='PROVIDER_QUOTA'")["body"]
+
+
+def test_a_retry_after_the_video_was_cleaned_up_fetches_it_again(home):
+    # S17: a failed issue's video goes with retention after 7 days; retrying then must not start from 理解 without it
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, media_state, media_path, created_at, updated_at) VALUES ('v','NOT_STARTED','PURGED','/gone/v.mkv',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, error_class, created_at) VALUES ('v-r1','v','FAILED','MODALITY_ROUTING_DEVIATION',?)", t)
+    for i, (name, status) in enumerate([("RESOLVE", "DONE"), ("PLAYBOOK", "DONE"), ("ACQUIRE", "DONE"), ("CHUNK", "DONE"), ("UNDERSTAND", "FAILED")]):
+        db.exec("INSERT INTO stages(run_id, name, ord, status) VALUES ('v-r1',?,?,?)", name, i, status)
+    assert TestClient(web.app).post("/api/runs/v-r1/retry", headers={"host": "127.0.0.1"}, json={}).json() == {"ok": True}
+    assert {r["name"]: r["status"] for r in db.q("SELECT name, status FROM stages WHERE run_id='v-r1'")} == \
+        {"RESOLVE": "DONE", "PLAYBOOK": "DONE", "ACQUIRE": "PENDING", "CHUNK": "PENDING", "UNDERSTAND": "PENDING"}
+
+
+def test_what_telegram_could_not_take_is_sent_once_it_answers_and_the_engine_shows_it(home, monkeypatch):
+    # S18: the box's way out to Telegram is down while the YouTube login runs out: nothing is lost, it comes later
+    from fastapi.testclient import TestClient
+    from assetizer import db, notify
+    from assetizer.web import app as web
+    secrets = home / "secrets"
+    secrets.mkdir(exist_ok=True)
+    (secrets / "telegram-bot-token").write_text("123:test")
+    (secrets / "telegram-chat-id").write_text("42")
+    sent, up = [], [False]
+
+    def api(token, method, **payload):
+        if not up[0]:
+            return {"ok": False, "description": "ConnectError"}
+        sent.append(payload["text"])
+        return {"ok": True}
+    monkeypatch.setattr(notify, "_api", api)
+    db.raise_alert("YOUTUBE_AUTH", "critical", "YouTube 需要登录或会员权限", "同步一次 CookieCloud")
+    notify.run_failed("x", "UNKNOWN", "boom")  # no such run: nothing to say
+    notify.send_digest()
+    assert not sent and not db.setting("digest_date")  # the digest is not marked sent while it was not
+    t = TestClient(web.app).get("/api/engine", headers={"host": "127.0.0.1"}).json()["telegram"]
+    assert t["token"] and t["chat"] and not t["ok"] and t["pending"] == 1
+    up[0] = True
+    notify.flush()
+    assert len(sent) == 1 and "YouTube 需要登录或会员权限" in sent[0] and "没发出去" in sent[0]
+    assert TestClient(web.app).get("/api/engine", headers={"host": "127.0.0.1"}).json()["telegram"]["pending"] == 0
+    notify.send_digest()
+    assert db.setting("digest_date")
+
+
+def test_two_trial_requests_that_overlap_queue_the_run_once(home, monkeypatch):
+    # S20: 「试跑」 clicked twice on a slow line: the second request checks before the first one's row is in
+    from assetizer import db, tuning
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("INSERT INTO sources(id, channel_id, created_at, updated_at) VALUES ('s1','w',?,?)", t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','s1',?)", t)
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('x',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('busy','x','QUEUED',?)", t)  # holds dispatch
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES ('w','s1',?,?)", v2, t)
+    real = db.one
+    monkeypatch.setattr(tuning.db, "one", lambda sql, *a: None if "FROM trial_queue q" in sql else real(sql, *a))
+    out = tuning.trial("w", v2, ["s1"])
+    monkeypatch.setattr(tuning.db, "one", real)
+    assert out == [{"source_id": "s1", "playbook_id": v2, "skipped": "已在排队"}]
+    assert db.one("SELECT COUNT(*) n FROM trial_queue WHERE status='PENDING'")["n"] == 1
+
+
+def test_two_dispatchers_at_once_send_a_queued_trial_once(home, monkeypatch):
+    # S20: the web (right after queueing) and the worker both dispatch: the second must not submit it again (was a 500)
+    from assetizer import db, tuning
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES ('w','s1',?,?)", v2, t)
+    stale = db.q("SELECT * FROM trial_queue WHERE status='PENDING' ORDER BY id")
+    db.exec("UPDATE trial_queue SET status='DISPATCHED'")  # the other dispatcher took it just now
+    real = db.q
+    monkeypatch.setattr(tuning.db, "q", lambda sql, *a: stale if "FROM trial_queue WHERE status='PENDING'" in sql else real(sql, *a))
+    monkeypatch.setattr(runner, "submit", lambda *a, **k: (_ for _ in ()).throw(AssertionError("submitted twice")))
+    assert tuning.dispatch_next() is None
+
+
+def test_two_trial_requests_at_the_same_moment_queue_a_pair_once(home, monkeypatch):
+    # S20: two 「试跑」 at the same moment (two tabs, or a click while the worker writes): the later one read the queue
+    # before the first one's row was in, and wrote after that row had been dispatched — no PENDING row to collide with
+    import threading
+    from assetizer import db, tuning
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    t, vid = now(), "SSSSSSSSSS1"
+    db.exec("INSERT INTO sources(id, channel_id, created_at, updated_at) VALUES (?,'w',?,?)", vid, t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w',?,?)", vid, t)
+    looked, first_done = threading.Event(), threading.Event()
+    real = db.one
+
+    def one(sql, *a):
+        r = real(sql, *a)
+        if threading.current_thread().name == "later" and "FROM trial_queue q" in sql and not looked.is_set():
+            looked.set()
+            first_done.wait(1.5)  # the first request goes through meanwhile — unless the later one holds the queue
+        return r
+    monkeypatch.setattr(tuning.db, "one", one)
+    later = threading.Thread(target=tuning.trial, args=("w", v2, [vid]), name="later")
+    later.start()
+    looked.wait(5)
+    tuning.trial("w", v2, [vid])
+    first_done.set()
+    later.join(10)
+    monkeypatch.setattr(tuning.db, "one", real)
+    assert db.one("SELECT COUNT(*) n FROM trial_queue WHERE status!='CANCELLED'")["n"] == 1
+    assert db.one("SELECT COUNT(*) n FROM runs WHERE source_id=?", vid)["n"] == 1
+
+
+def test_two_dispatchers_at_the_same_moment_start_a_sample_once(home, monkeypatch):
+    # S20: the web (right after queueing) and the worker dispatch at the same moment, each the next version of one
+    # sample: the later one must neither start the video again nor book its version on the other one's run
+    import threading
+    from assetizer import db, tuning
+    from assetizer.util import now
+    v1, v2 = _tuning_fixture()
+    t, vid = now(), "SSSSSSSSSS1"
+    db.exec("INSERT INTO sources(id, channel_id, created_at, updated_at) VALUES (?,'w',?,?)", vid, t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w',?,?)", vid, t)
+    for v in (v1, v2):
+        db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES ('w',?,?,?)", vid, v, t)
+    looked, first_done = threading.Event(), threading.Event()
+    real_one, real_q = db.one, db.q
+    later = lambda: threading.current_thread().name == "later"  # noqa: E731
+
+    def q(sql, *a):  # the later one read the line just after the first one took v1
+        rows = real_q(sql, *a)
+        return [r for r in rows if r["playbook_id"] == v2] if later() and "FROM trial_queue WHERE status='PENDING'" in sql else rows
+
+    def one(sql, *a):
+        r = real_one(sql, *a)
+        if later() and sql.startswith("SELECT 1 FROM runs WHERE source_id=?") and not looked.is_set():
+            looked.set()
+            first_done.wait(1.5)  # the first one dispatches meanwhile — unless the later one holds the queue
+        return r
+    monkeypatch.setattr(tuning.db, "q", q)
+    monkeypatch.setattr(tuning.db, "one", one)
+    th = threading.Thread(target=tuning.dispatch_next, name="later")
+    th.start()
+    looked.wait(5)
+    tuning.dispatch_next()
+    first_done.set()
+    th.join(10)
+    monkeypatch.setattr(tuning.db, "q", real_q)
+    monkeypatch.setattr(tuning.db, "one", real_one)
+    runs = db.q("SELECT id, playbook_id FROM runs WHERE source_id=?", vid)
+    assert len(runs) == 1
+    for row in db.q("SELECT playbook_id, run_id FROM trial_queue WHERE status='DISPATCHED'"):
+        assert {"id": row["run_id"], "playbook_id": row["playbook_id"]} in runs
+    assert db.one("SELECT COUNT(*) n FROM trial_queue WHERE status='PENDING'")["n"] == 1
+
+
+def test_saving_the_same_learning_goal_again_while_it_compiles_compiles_it_once(home, monkeypatch):
+    # S20: 「保存并编译」 twice (a double click, a second tab): one compile, one new draft
+    from fastapi.testclient import TestClient
+    from assetizer.web import app as web
+    _tuning_fixture()
+    started = []
+    monkeypatch.setattr(web, "_bg", lambda fn, *a, label=None: started.append(a))
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    text = "学习目标：" + "看懂主讲人对宏观与资产配置的判断，记下条件与依据。" * 3
+    for _ in range(2):
+        assert c.post("/api/channels/w/prompt", headers=h, json={"text": text, "note": None}).status_code == 200
+    assert len(started) == 1
+
+
+def test_retrying_a_run_twice_is_not_an_error(home):
+    # S20: the second click of 「重试」 finds the run queued already: fine, said in Chinese otherwise
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','FAILED',?)", t)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    assert c.post("/api/runs/v-r1/retry", headers=h, json={}).status_code == 200
+    assert c.post("/api/runs/v-r1/retry", headers=h, json={}).status_code == 200
+    db.exec("UPDATE runs SET production='COMPLETE' WHERE id='v-r1'")
+    r = c.post("/api/runs/v-r1/retry", headers=h, json={})
+    assert r.status_code == 409 and "重试" in r.json()["detail"]
+
+
+def test_a_database_locked_past_its_timeout_sends_the_run_back_to_the_queue(home, monkeypatch):
+    # S21: eight runs writing at once on a slow disk; a write waits out the busy timeout: not this issue's failure
+    import sqlite3
+    from assetizer import db, notify
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    t = now()
+    sent = []
+    monkeypatch.setattr(notify, "send", lambda text, keep=True: sent.append(text))
+    for sid in ("a", "b"):
+        db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES (?,'NOT_STARTED',?,?)", sid, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?,?,'QUEUED',?)", f"{sid}-r1", sid, t)
+
+    def locked(ctx):
+        raise sqlite3.OperationalError("database is locked")
+    for rid, blocking in (("a-r1", True), ("b-r1", False)):
+        monkeypatch.setattr(runner, "STAGES", [("CLIPS", locked, blocking)])
+        runner._execute(rid)
+        assert db.one("SELECT production, error_class FROM runs WHERE id=?", rid) == {"production": "QUEUED", "error_class": None}
+    assert not sent
+
+
+def test_a_crash_around_a_run_does_not_leave_it_marked_running(home, monkeypatch):
+    # S21: when even recording the failure hit the lock, the run stayed RUNNING with no thread on it until a restart
+    import time
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','RUNNING',?)", t)
+
+    def crash(run_id):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(runner, "execute", crash)
+    w = runner.Worker()
+    w.start("v-r1")
+    for _ in range(100):
+        if not w.active["v-r1"].is_alive():
+            break
+        time.sleep(0.01)
+    assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
+
+
+def test_resuming_a_delivery_keeps_what_you_added_or_changed_on_the_page(home, monkeypatch):
+    # S24: the page looked done (only the last write, the properties, failed); you added a note and changed a property
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    from assetizer.notion.client import NotionError
+    _run_fixture(home)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
+    db.exec("UPDATE sources SET current_run_id='r'")
+    blocks, props, calls, fail = [], {}, [], [True]
+
+    schema = M.schema_of(LIB)
+
+    def canon(key, v):  # a property as Notion answers it, by name, with its id along with the value
+        pid = key if key in schema else next(k for k, x in schema.items() if x["name"] == key)
+        return schema[pid]["name"], {"id": pid, **v}
+
+    class Fake:
+        def _req(self, method, path, **kw):
+            calls.append((method, path))
+            if path == "/databases/lib":
+                return LIB
+            if path.endswith("/query"):
+                return {"results": []}
+            if method == "POST" and path == "/pages":
+                props.update(canon(k, v) for k, v in kw["json"]["properties"].items())
+                return {"id": "pg", "url": "https://notion/pg", "properties": dict(props)}
+            if method == "PATCH" and path == "/pages/pg":
+                if fail[0]:
+                    raise NotionError(502, "Bad Gateway")
+                props.update(canon(k, v) for k, v in kw["json"]["properties"].items())
+                return {"id": "pg", "properties": dict(props)}
+            if method == "DELETE":
+                blocks[:] = [b for b in blocks if b["id"] != path.rsplit("/", 1)[1]]
+                return {}
+            raise AssertionError(f"unexpected {method} {path}")
+
+        def page(self, pid):
+            return {"id": pid, "archived": False, "icon": None, "properties": dict(props)}
+
+        def me(self):
+            return {"id": "bot"}
+
+        def upload(self, path, content_type):
+            return {"id": "up"}
+
+        def append(self, pid, children):
+            out = []
+            for c in children:
+                b = {**c, "id": f"b{len(blocks)}", "created_by": {"id": "bot"}}
+                if c["type"] in ("image", "video"):
+                    b[c["type"]] = {"type": "file"}
+                blocks.append(b)
+                out.append(b)
+            return {"results": out}
+
+        def children(self, pid):
+            return list(blocks)
+    monkeypatch.setattr(delivery, "client", lambda: Fake())
+    assert delivery.deliver("v")["status"] == "FAILED"
+    blocks.append({"id": "note", "type": "paragraph", "created_by": {"id": "you"},
+                   "paragraph": {"rich_text": [{"type": "text", "text": {"content": "我的笔记"}, "plain_text": "我的笔记"}]}})
+    props.update([canon("AI 摘要", {"type": "rich_text", "rich_text": [{"plain_text": "我改的摘要"}]})])
+    fail[0] = False
+    assert delivery.deliver("v")["status"] == "DELIVERED"
+    assert any(b["id"] == "note" for b in blocks) and ("DELETE", "/blocks/note") not in calls
+    assert props["AI 摘要"]["rich_text"] == [{"plain_text": "我改的摘要"}]
+
+
+def test_a_video_whose_length_is_not_known_yet_waits_instead_of_being_too_short(home, monkeypatch):
+    # S27: a live just over (or a premiere) has no duration yet; intake took it in — it is not "too short" for that
+    from datetime import datetime, timedelta, timezone
+    from assetizer import db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, stage, created_at, updated_at) VALUES ('t','Tom','UCt','TRACKED','LOCKED',?,?)", t, t)
+    db.set_setting("ingest:t", {"enabled": True, "since": t, "min_minutes": 10})
+    db.exec("INSERT INTO sources(id, url, channel_id, delivery, created_at, updated_at) VALUES ('v','v','t','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+    db.event("ingest", "收录：Tom · live", "v-r1")
+    monkeypatch.setattr(youtube, "metadata", lambda url: {"id": "v", "title": "live", "channel_id": "UCt", "channel": "Tom",
+                                                          "duration": None, "live_status": "post_live", "upload_date": "20261027"})
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", acquire.resolve, True)])
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT production, wait_reason FROM runs WHERE id='v-r1'") == {"production": "WAITING", "wait_reason": "LIVE_IN_PROGRESS"}
+    # a day on and still no length: it is taken as it is rather than waited for forever
+    day_ago = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(timespec="seconds")
+    db.exec("UPDATE runs SET production='QUEUED', created_at=? WHERE id='v-r1'", day_ago)
+    assert runner._execute("v-r1") == "COMPLETE"
+
+
+def test_a_video_cancelled_as_too_short_while_its_length_was_unknown_is_taken_again(home, monkeypatch):
+    # S27: until now a video whose length could not be read yet was taken for 0 and cancelled as too short, and every
+    # scan after counted it as 已在; listed again with a length long enough, it is judged again
+    from datetime import datetime, timedelta, timezone
+    from assetizer import db, delivery, ingest
+    from assetizer.util import now
+    t = now()
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, mode, stage, created_at, updated_at) VALUES ('t','Tom','UCt','TRACKED','LOCKED',?,?)", t, t)
+    db.set_setting("ingest:t", {"enabled": True, "since": week_ago, "min_minutes": 10})
+    for vid, production, error_class in (("LiveEnded01", "CANCELLED", "SKIPPED_SHORT"), ("Produced001", "COMPLETE", None)):
+        db.exec("INSERT INTO sources(id, url, channel_id, created_at, updated_at) VALUES (?,?,'t',?,?)", vid, vid, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, error_class, created_at) VALUES (?,?,?,?,?)", f"{vid}-r1", vid, production, error_class, t)
+    entries = [{"id": v, "title": v, "published": t, "duration": 5400, "approx": True, "tab": "streams"} for v in ("LiveEnded01", "Produced001")]
+    monkeypatch.setattr(ingest, "look", lambda cid, limit=15, shorts=False: (entries, None, {"videos", "streams"}))
+    monkeypatch.setattr(delivery, "registered_in_target", lambda src: None)
+    out = ingest.scan(db.one("SELECT * FROM channels WHERE id='t'"), db.setting("ingest:t"))
+    assert (out["queued"], out["have"], out["ids"]) == (1, 1, ["LiveEnded01"])
+    assert db.one("SELECT production FROM runs WHERE id='LiveEnded01-r2'") == {"production": "QUEUED"}
+    assert db.one("SELECT 1 FROM events WHERE run_id='LiveEnded01-r2' AND kind='ingest'")  # held to the minimum again
+
+
+def test_relocking_while_the_library_cannot_be_checked_keeps_the_page_already_written(home, monkeypatch):
+    # S33: 回到调试期 → 再定稿 with Notion not answering: the sample whose page Assetizer wrote keeps it by default
+    from fastapi.testclient import TestClient
+    from assetizer import db, delivery
+    from assetizer.util import now
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("""INSERT INTO sources(id, channel_id, title, delivery, notion_page_id, notion_url, notion_synced_run, current_run_id,
+               created_at, updated_at) VALUES ('s1','w','样片','STALE','pg','https://notion/pg','r1','r2',?,?)""", t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','s1',?)", t)
+    for rid in ("r1", "r2"):
+        db.exec("INSERT INTO runs(id, source_id, production, playbook_id, created_at, finished_at) VALUES (?,'s1','COMPLETE',?,?,?)", rid, v2, t, t)
+
+    def down(src, ids):
+        raise RuntimeError("Notion 502")
+    monkeypatch.setattr(delivery, "registered_many", down)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    lp = c.get(f"/api/channels/w/lock-preview?playbook_id={v2}", headers=h).json()
+    s = next(x for x in lp["samples"] if x["source_id"] == "s1")
+    assert lp["library_checked"] is False and s["library"] and s["library"]["owned"]  # the sheet then defaults to 保留
+    assert c.post("/api/channels/w/lock", headers=h, json={"playbook_id": v2, "samples": [{"source_id": "s1", "action": "write"}]}).status_code == 200
+    assert db.one("SELECT delivery FROM sources WHERE id='s1'")["delivery"] != "STALE"  # its page is not archived for a new one
+
+
+def test_moving_to_a_library_where_a_property_holds_one_option_or_many_carries_the_value_over():
+    # S38 (0.4.21): 换库 to a library whose same-named property is a multi-select, or a select — no 500, no ['复', '盘']
+    from assetizer.notion import mapping as M
+    cfg = {"database_id": "a", "properties": {
+        "k": {"name": "类型", "type": "select", "source": "fixed", "value": "复盘"},
+        "m": {"name": "标签", "type": "multi_select", "source": "fixed", "value": ["美股", "期权"]},
+        "n": {"name": "主题", "type": "multi_select", "source": "fixed", "value": ["宏观"]}}}
+    schema = {"k2": {"name": "类型", "type": "multi_select", "options": ["复盘"], "option_ids": {"o1": "复盘"}},
+              "m2": {"name": "标签", "type": "select", "options": ["美股", "期权"], "option_ids": {"o2": "美股", "o3": "期权"}},
+              "n2": {"name": "主题", "type": "status", "options": ["宏观"], "option_ids": {"o4": "宏观"}}}
+    out, repick, dropped = M.remap(cfg, schema)
+    assert out["properties"]["k2"]["value"] == ["复盘"] and out["properties"]["n2"]["value"] == "宏观"
+    assert out["properties"]["m2"].get("value") is None and repick == ["标签"]  # two options where one goes: pick again
+
+
+OUTDATED = ["ERROR: [youtube] x: Unable to extract initial player response; please report this issue on https://github.com/yt-dlp/yt-dlp/issues",
+            "ERROR: [youtube] x: Failed to extract any player response",
+            "WARNING: [youtube] x: Signature extraction failed: Some formats may be missing\nERROR: [youtube] x: Requested format is not available",
+            "WARNING: [youtube] x: n challenge solving failed: Some formats may be missing\nERROR: unable to download video data: HTTP Error 403: Forbidden",
+            "WARNING: [youtube] x: Only images are available for download. use --list-formats to see them",
+            "ERROR: [youtube:tab] UCt: The page needs to be reloaded."]
+
+
+def test_youtube_changing_under_yt_dlp_is_said_once_as_the_tool_being_out_of_date(home, monkeypatch):
+    # S43: every video failing on its own as 未知错误 hides the one thing to do — update yt-dlp
+    from assetizer import db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now
+    assert {youtube.classify(s) for s in OUTDATED} == {"TOOL_OUTDATED"}
+    t = now()
+    db.exec("INSERT INTO sources(id, url, delivery, created_at, updated_at) VALUES ('v','v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+
+    def metadata(url):
+        raise youtube.AcquireError(youtube.classify(OUTDATED[0]), OUTDATED[0])
+    monkeypatch.setattr(youtube, "metadata", metadata)
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", acquire.resolve, True)])
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT wait_reason FROM runs WHERE id='v-r1'")["wait_reason"] == "YTDLP_OUTDATED"
+    assert "下载工具" in db.one("SELECT title FROM alerts WHERE key='YTDLP_OUTDATED' AND resolved_at IS NULL")["title"]
+    assert "YTDLP_OUTDATED" in runner.RETRIED_WAITS  # tried again every 30 minutes: a passing hiccup heals by itself
+
+
+def test_a_channel_listing_that_fails_because_yt_dlp_is_out_of_date_raises_the_same_alert(home, monkeypatch):
+    # S43: intake reading the channel meets the same thing before any video does
+    from assetizer import db, ingest
+    _board_fixture(home, monkeypatch)
+
+    def look(cid, limit=15, shorts=False):
+        raise RuntimeError(f"频道列表与 RSS 都读不到：{OUTDATED[-1]}")
+    monkeypatch.setattr(ingest, "look", look)
+    ingest.scan(db.one("SELECT * FROM channels WHERE id='t'"), db.setting("ingest:t"))
+    assert db.one("SELECT 1 FROM alerts WHERE key='YTDLP_OUTDATED' AND resolved_at IS NULL")
+
+
+def test_runs_held_for_agy_reading_video_go_on_once_its_self_test_passes_after_a_manual_resume(home, monkeypatch):
+    # S46: 「恢复队列」 clicked while agy could not read video left these runs waiting, and the alert up, for good
+    import time
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, wait_reason, created_at) VALUES ('v-r1','v','WAITING','AGY_MEDIA_READ',?)", t)
+    db.raise_alert("AGY_MEDIA_READ", "critical", "agy 读不了视频，生产已暂停", "…")
+    db.set_setting("agy_media_version", "1.4.8")  # agy itself did not change since
+    monkeypatch.setattr(runner, "media_self_test", lambda: {"ok": True, "version": "1.4.8"})
+    monkeypatch.setattr(runner.providers, "get", lambda: type("P", (), {"version": lambda self: "1.4.8", "name": "agy"})())
+    w = runner.Worker()
+    m = time.monotonic()
+    w.last.update({k: m for k in w.last}, media=m - runner.MEDIA_CHECK_EVERY - 1)
+    w.housekeeping()
+    assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
+    assert not db.one("SELECT 1 FROM alerts WHERE key='AGY_MEDIA_READ' AND resolved_at IS NULL")
+
+
+def test_a_notion_error_page_reads_as_one_plain_sentence():
+    # S49: Cloudflare's 502 page used to land in the log, the issue's reason and the channel page as raw HTML
+    from assetizer.notion.client import NotionError
+    page = "<!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<html><head><title>502</title>"
+    e = NotionError(502, page)
+    assert str(e) == "Notion 暂时不可用（502）" and e.body == page and e.status == 502
+    j = NotionError(400, '{"object":"error","status":400,"code":"validation_error","message":"body.properties.Name is invalid"}')
+    assert str(j) == "Notion 400: body.properties.Name is invalid"
+
+
+def test_several_links_pasted_at_once_are_all_queued(home):
+    # S55: three links from notes, one per line (or run together by a one-line field): every one is queued, once
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    for n, sep in enumerate(("\n", " ", "")):
+        ids = [f"{x * 10}{n}" for x in "ABC"]
+        links = [f"https://youtu.be/{ids[0]}?si=AbCdEfGhIjKl", f"https://www.youtube.com/watch?v={ids[1]}&t=60s",
+                 f"https://www.youtube.com/live/{ids[2]}"]
+        r = c.post("/api/submit", headers=h, json={"url": sep.join(links + links[:1])}).json()
+        assert [i["source_id"] for i in r["items"]] == ids, repr(sep)
+        assert r["source_id"] == ids[0]  # the one-link answer stays as it was
+        assert db.one("SELECT COUNT(*) n FROM runs WHERE source_id IN (?,?,?)", *ids)["n"] == 3
+    one = c.post("/api/submit", headers=h, json={"url": "https://youtu.be/BBBBBBBBBB0"}).json()
+    assert "items" not in one and one["existing"]
+
+def test_the_shortest_length_to_take_in_is_kept_within_bounds(home, monkeypatch):
+    # S57: -5, 999, "abc" — or the string "30" through 定稿 — no longer go in as they are (999 took in nothing at all,
+    # "30" failed every run at RESOLVE); a refusal is one sentence, not a list the page shows as [object Object]
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    _board_fixture(home, monkeypatch)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    for bad in (-5, 999, "abc", 2.5, ""):
+        r = c.post("/api/channels/t/ingest", headers=h, json={"enabled": True, "min_minutes": bad})
+        assert r.status_code == 400 and isinstance(r.json()["detail"], str) and "0–240" in r.json()["detail"], bad
+    assert db.setting("ingest:t")["min_minutes"] == 10
+    assert c.post("/api/channels/t/ingest", headers=h, json={"enabled": True, "min_minutes": 30}).status_code == 200
+    v1, v2 = _tuning_fixture()
+    t = db.one("SELECT created_at FROM channels WHERE id='t'")["created_at"]
+    db.exec("INSERT INTO sources(id, channel_id, created_at, updated_at) VALUES ('s1','w',?,?)", t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','s1',?)", t)
+    db.exec("INSERT INTO runs(id, source_id, production, playbook_id, created_at) VALUES ('s1-r1','s1','COMPLETE',?,?)", v2, t)
+    r = c.post("/api/channels/w/lock", headers=h, json={"playbook_id": v2, "samples": [], "ingest": {"enabled": True, "min_minutes": 999}})
+    assert r.status_code == 400 and "0–240" in r.json()["detail"]
+
+
+def test_a_page_left_open_on_another_device_after_lock_cannot_trial_or_adopt(home):
+    # S62: locked on the desktop; the phone still shows 调试中 — 试跑 says the channel is locked (409: the page reloads),
+    # and 采用 no longer swaps the version already in Notion (it marked the page for replacement)
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("INSERT INTO sources(id, channel_id, delivery, current_run_id, notion_page_id, created_at, updated_at) VALUES ('s1','w','DELIVERED','s1-r2','pg',?,?)", t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','s1',?)", t)
+    for rid, pb in (("s1-r1", v1), ("s1-r2", v2)):
+        db.exec("INSERT INTO runs(id, source_id, production, playbook_id, created_at, finished_at) VALUES (?,'s1','COMPLETE',?,?,?)", rid, pb, t, t)
+    db.exec("UPDATE channels SET stage='LOCKED' WHERE id='w'")
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    r = c.post("/api/channels/w/trial", headers=h, json={"playbook_ids": [v1], "source_ids": None})
+    assert r.status_code == 409 and "定稿" in r.json()["detail"]
+    r = c.post("/api/sources/s1/adopt", headers=h, json={"run_id": "s1-r1", "pinned": True})
+    assert r.status_code == 409
+    assert db.one("SELECT current_run_id, delivery FROM sources WHERE id='s1'") == {"current_run_id": "s1-r2", "delivery": "DELIVERED"}
+
+
+def test_an_empty_headline_leaves_the_title_without_a_dangling_separator(home):
+    # S63: no 题眼 → 「交易员汤姆-20261027」, not 「交易员汤姆-20261027-」 nor the video's own title in its place
+    from assetizer import db
+    from assetizer import preview as PV
+    from assetizer.notion import mapping as M
+    _run_fixture(home)
+    db.exec("UPDATE sources SET headline=NULL")
+    ctx = M.context(db.one("SELECT * FROM sources WHERE id='v'"), "r", {"name": "交易员汤姆"})
+    assert ctx["headline"] == ""
+    assert M.fill("{channel}-{date8}-{headline}", ctx) == "交易员汤姆-20260908"
+    assert M.fill("{headline} · {channel}", ctx) == "交易员汤姆"
+    assert "".join(p["text"] for p in PV.parts("{channel}-{date8}-{headline}", ctx)) == "交易员汤姆-20260908"
+    assert M.value({"source": "template", "value": "{headline}"}, ctx) == ctx["video_title"]  # never an empty title
+
+
+def test_a_runs_sections_and_events_are_found_by_index(home):
+    # S64: a year in (2000 issues), the 调试台 matrix took 0.8–1.3 s scanning every section for each run; 36 ms indexed
+    from assetizer import db
+    plan = lambda sql: " ".join(r["detail"] for r in db.q("EXPLAIN QUERY PLAN " + sql, "r"))  # noqa: E731
+    assert "USING INDEX sections_run" in plan("SELECT kind, COUNT(*) FROM sections WHERE run_id=? GROUP BY kind")
+    assert "USING INDEX events_run" in plan("SELECT * FROM events WHERE run_id=? ORDER BY id")
+
+
+# ---------------------------------------------------------------- the decisions on the edge review (a01–a19, 2026-10-28)
+def test_a_trial_that_fails_is_seen_on_the_bench_not_pushed(sent):
+    # S04 (a04): a trial failing while its channel is tuned is on the 调试台 already; only a real issue's failure is pushed
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO channels(id, name, mode, stage, created_at, updated_at) VALUES ('w','王','TRACKED','TUNING',?,?), ('t','汤姆','TRACKED','LOCKED',?,?)",
+            t, t, t, t)
+    for sid, cid, origin in (("W1", "w", "trial"), ("W2", "w", "manual"), ("T1", "t", "ingest")):
+        db.exec("INSERT INTO sources(id, channel_id, title, delivery, created_at, updated_at) VALUES (?,?,?,'NOT_STARTED',?,?)", sid, cid, sid, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, origin, created_at) VALUES (?,?,'RUNNING',?,?)", f"{sid}-r1", sid, origin, t)
+        runner._fail(f"{sid}-r1", RuntimeError("UNKNOWN: boom"))
+    assert len(sent) == 1 and "T1" in sent[0] and "❌" in sent[0]
+    assert {r["production"] for r in db.q("SELECT production FROM runs")} == {"FAILED"}
+
+
+def test_a_partial_issue_waits_for_a_retry_that_completes_it(home, monkeypatch):
+    # S09 (a08): an issue missing what a non-blocking stage did not finish (clips, stills, checks) is not written, by
+    # whatever way it comes to Notion (定稿 pins it, 重新交付); once a retry of that version completes, it is
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    from assetizer.pipeline import runner
+    _run_fixture(home)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
+    db.exec("UPDATE runs SET production='COMPLETE_PARTIAL'")
+    db.exec("UPDATE sources SET current_run_id='r', adopt_pinned=1, delivery='NOT_STARTED'")  # as 定稿 leaves a sample
+
+    class Fake:
+        def _req(self, method, path, **kw):
+            pytest.fail(f"nothing is written: {method} {path}")
+    monkeypatch.setattr(delivery, "client", lambda: Fake())
+    delivery.deliver_pending()
+    assert db.one("SELECT delivery, delivery_reason FROM sources") == {"delivery": "HELD", "delivery_reason": "PARTIAL"}
+    assert delivery.deliver_pending() is False and delivery.deliver("v")["status"] == "HELD"
+    db.exec("UPDATE runs SET production='COMPLETE'")  # 重试 filled in what was missing
+    runner.adopt_completed(db.one("SELECT * FROM sources"), "r")
+    assert db.one("SELECT delivery, delivery_reason FROM sources") == {"delivery": "NOT_STARTED", "delivery_reason": None}
+
+
+def test_youtube_refusing_the_download_waits_for_either_fix(home, monkeypatch):
+    # S12 S43 (a09): HTTP 403 alone does not say whether the login or yt-dlp is at fault: the issue waits (retried every
+    # 30 minutes) under an alert naming both, instead of failing as 未知错误
+    from assetizer import db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now
+    refused = "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+    assert youtube.classify(refused) == "YOUTUBE_REFUSED"
+    assert youtube.classify("WARNING: [youtube] The provided YouTube account cookies are no longer valid.\n" + refused) == "YOUTUBE_REFUSED"
+    assert youtube.classify(OUTDATED[3]) == "TOOL_OUTDATED"  # n challenge said: that one is known
+    t = now()
+    db.exec("INSERT INTO sources(id, url, delivery, duration, youtube_channel_id, created_at, updated_at) VALUES ('v','v','NOT_STARTED',600,'UC',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+
+    def download(url, dest):
+        raise youtube.AcquireError(youtube.classify(refused), refused)
+    monkeypatch.setattr(youtube, "download", download)
+    monkeypatch.setattr(acquire, "_free_bytes", lambda p: 10 ** 12)
+    monkeypatch.setattr(runner, "STAGES", [("ACQUIRE", acquire.acquire, True)])
+    assert runner._execute("v-r1") == "WAITING"
+    assert db.one("SELECT wait_reason FROM runs WHERE id='v-r1'")["wait_reason"] == "YOUTUBE_REFUSED"
+    a = db.one("SELECT severity, title, body FROM alerts WHERE key='YOUTUBE_REFUSED' AND resolved_at IS NULL")
+    assert a["severity"] == "critical" and "拒绝" in a["title"] and "登录" in a["body"] and "yt-dlp" in a["body"]
+    assert "YOUTUBE_REFUSED" in runner.RETRIED_WAITS
+
+
+def test_an_alert_that_clears_within_ten_minutes_is_not_pushed(sent, monkeypatch):
+    # S50 (a17): a hiccup that heals itself sends nothing; one still there after 10 minutes is pushed then, its recovery
+    # after it; the urgent ones (sign-ins, quota, agy reading video, yt-dlp, the Notion token) still go at once
+    import datetime as dt
+    from assetizer import db, notify
+    ago = lambda m: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=m)).isoformat(timespec="seconds")  # noqa: E731
+    db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态", "x")
+    notify.send_due_alerts()
+    db.resolve_alert("cookiecloud")
+    assert sent == []
+    db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态", "x")  # back again: a new occurrence
+    assert db.one("SELECT resolved_at FROM alerts WHERE key='cookiecloud'")["resolved_at"] is None
+    notify.send_due_alerts()
+    assert sent == []
+    db.exec("UPDATE alerts SET created_at=? WHERE key='cookiecloud'", ago(11))
+    notify.send_due_alerts()
+    notify.send_due_alerts()
+    assert len(sent) == 1 and "读不到 CookieCloud" in sent[0]
+    db.resolve_alert("cookiecloud")
+    assert len(sent) == 2 and sent[1].startswith("✅ 已恢复")
+    db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态", "x")  # a third time: counted afresh
+    notify.send_due_alerts()
+    assert len(sent) == 2
+    for key in ("YOUTUBE_AUTH", "PROVIDER_QUOTA", "notion-auth"):
+        db.raise_alert(key, "warning", f"{key} 告警", "x")
+    assert len(sent) == 5
+
+
+def test_a_property_deleted_and_made_again_alike_is_taken_up():
+    # S38 (a13): 内容所属 deleted in Notion and a select of that name made again: to the user the same property — taken
+    # up; not when its type changed, nor when another mapping is on it already (those still stop for a pick)
+    import copy
+    from assetizer.notion import mapping as M
+    cfg = M.preset("trader-tom", "lib", M.schema_of(LIB), None)
+
+    def remade(kind="select"):
+        lib = copy.deepcopy(LIB)
+        lib["properties"].pop("内容所属")
+        lib["properties"]["内容所属"] = {"id": "own2", "type": kind, kind: {"options": [{"id": "n1", "name": "@交易员汤姆"}]}}
+        return M.schema_of(lib)
+    s = remade()
+    out = M.sync(cfg, s)
+    assert "own" not in out["properties"] and M.problems(out, s) == {}
+    assert out["properties"]["own2"] == {**cfg["properties"]["own"], "option_ids": {"@交易员汤姆": "n1"}}
+    s = remade("multi_select")
+    assert "own" in M.problems(M.sync(cfg, s), s)
+    s = remade()
+    taken = {**cfg, "properties": {**cfg["properties"], "own2": {"name": "内容所属", "type": "select", "source": "fixed", "value": "@交易员汤姆"}}}
+    assert "own" in M.problems(M.sync(taken, s), s)
+
+
+def _shut_out(monkeypatch, stderr, signed_in=True):
+    """yt-dlp refusing with ``stderr`` under a CookieCloud login that carries (or not) a YouTube sign-in."""
+    import contextlib
+    import subprocess
+    from assetizer import youtube
+
+    @contextlib.contextmanager
+    def login():
+        yield ["--cookies", "/dev/null"], {"source": "cookiecloud", "signed_in": signed_in, "code": None}
+    monkeypatch.setattr(youtube, "ytdlp_login", login)
+    monkeypatch.setattr(youtube.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", stderr))
+
+
+PRIVATE = "ERROR: [youtube] v: Private video. Sign in if you've been granted access to this video"
+MEMBERS = "ERROR: [youtube] v: Join this channel to get access to members-only content like this video, and other exclusive perks."
+REMOVED = "ERROR: [youtube] v: Video unavailable. This video has been removed by the uploader"
+
+
+def test_a_video_no_login_can_open_is_said_unavailable_and_can_be_put_away(home, monkeypatch):
+    # S44 (a15): signed in and still refused as private or members-only, or removed: 视频不可用 with why — no login to
+    # wait for; 忽略 puts it away (only such a failure)
+    from fastapi.testclient import TestClient
+    from assetizer import db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now
+    from assetizer.web import app as web
+    rotated = "WARNING: [youtube] The provided YouTube account cookies are no longer valid.\n"
+    assert youtube.classify(PRIVATE, signed_in=True) == "VIDEO_PRIVATE" and youtube.classify(PRIVATE) == "AUTH_REQUIRED"
+    assert youtube.classify(MEMBERS, signed_in=True) == "VIDEO_MEMBERS" and youtube.classify(rotated + MEMBERS, signed_in=True) == "AUTH_REQUIRED"
+    assert youtube.classify(REMOVED) == "VIDEO_REMOVED"
+    assert youtube.classify("ERROR: [youtube] v: Video unavailable. The uploader has not made this video available in your country") == "SOURCE_UNAVAILABLE"
+    t = now()
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", acquire.resolve, True)])
+    for vid, said, signed_in in (("p", PRIVATE, True), ("q", PRIVATE, False), ("f", "ERROR: boom", True)):
+        db.exec("INSERT INTO sources(id, url, title, delivery, created_at, updated_at) VALUES (?,?,?,'NOT_STARTED',?,?)", vid, vid, vid, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?,?,'QUEUED',?)", f"{vid}-r1", vid, t)
+        _shut_out(monkeypatch, said, signed_in)
+        runner._execute(f"{vid}-r1")
+    assert {r["id"]: (r["production"], r["wait_reason"] or r["error_class"]) for r in db.q("SELECT * FROM runs")} == {
+        "p-r1": ("FAILED", "VIDEO_PRIVATE"), "q-r1": ("WAITING", "YOUTUBE_AUTH"), "f-r1": ("FAILED", "UNKNOWN")}
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    issues = {i["id"]: i for i in c.get("/api/overview", headers=h).json()["issues"]}
+    assert issues["p"]["error_class"] == "VIDEO_PRIVATE"
+    assert c.post("/api/runs/f-r1/ignore", headers=h, json={}).status_code == 409  # a failure to fix is not put away
+    assert c.post("/api/runs/p-r1/ignore", headers=h, json={}).status_code == 200
+    assert db.one("SELECT production, error_class FROM runs WHERE id='p-r1'") == {"production": "CANCELLED", "error_class": "VIDEO_PRIVATE"}
+
+
+def test_a_video_taken_down_after_its_download_is_made_from_the_copy_here(home, monkeypatch):
+    # S44 (a15 note): YouTube no longer shows it, but the video is downloaded already: the run does not ask YouTube again
+    from assetizer import config, db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now, sha256_file
+    media = config.get().media_dir / "v" / "source.mkv"
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"video")
+    t = now()
+    db.exec("""INSERT INTO sources(id, url, delivery, duration, youtube_channel_id, media_state, media_path, media_sha256, media_bytes,
+               created_at, updated_at) VALUES ('v','v','NOT_STARTED',600,'UC','CACHED',?,?,5,?,?)""", str(media), sha256_file(media), t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+    _shut_out(monkeypatch, REMOVED)
+    monkeypatch.setattr(youtube.subprocess, "run", lambda *a, **kw: pytest.fail("YouTube is not asked again"))
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", acquire.resolve, True), ("ACQUIRE", acquire.acquire, True)])
+    assert runner._execute("v-r1") == "COMPLETE"
+
+
+class _Lib:
+    """The library as the a05/a07 tests need it: the schema, what a query finds (a link lookup finds nothing; the
+    channel's pages with no link are ``hand``), the old page of ours (``blocks``, ``comments``; None: no right to read
+    them), writes recorded. Making a new page is refused, which ends a delivery there."""
+
+    def __init__(self, hand=(), blocks=(), comments=()):
+        from assetizer.notion.client import NotionError
+        self.err, self.hand, self.blocks, self.comments, self.calls = NotionError, list(hand), list(blocks), comments, []
+
+    def _req(self, method, path, idempotent=None, **kw):
+        self.calls.append((method, path))
+        if method == "GET" and path == "/databases/lib":
+            return LIB
+        if method == "GET" and path == "/users/me":
+            return {"id": "bot"}
+        if path.endswith("/query"):
+            return {"results": self.hand if "and" in kw["json"]["filter"] else [], "has_more": False}
+        if method == "GET" and path.startswith("/blocks/"):
+            return {"results": self.blocks, "has_more": False}
+        if method == "GET" and path.startswith("/comments"):
+            if self.comments is None:
+                raise self.err(403, "Insufficient permissions for this endpoint.")
+            return {"results": list(self.comments), "has_more": False}
+        if method == "GET" and path.startswith("/pages/"):
+            return {"id": path.split("/")[2], "archived": False, "properties": {}}
+        if method == "PATCH" and path.startswith("/pages/"):
+            return {"archived": True}
+        if method == "POST" and path == "/pages":
+            raise self.err(418, "stop: a page would be made here")
+        raise AssertionError(f"unexpected Notion call {method} {path}")
+
+    def page(self, pid):
+        return self._req("GET", f"/pages/{pid}")
+
+    def archive_page(self, pid):
+        return self._req("PATCH", f"/pages/{pid}")
+
+    def children(self, pid):
+        return self._req("GET", f"/blocks/{pid}/children")["results"]
+
+    def me(self):
+        return self._req("GET", "/users/me")
+
+
+def test_an_issue_a_hand_written_page_may_be_waits_for_a_word(home, monkeypatch):
+    # S05 (a05): the library has 汤姆's page of that day with no video link (written by hand): a 补录 issue is not written
+    # beside it — the 刊 asks 照写 or 算已有. By the day for a channel titled by date (YouTube's, the US Eastern one, the
+    # MM/DD its title names), by the title for one titled with the video's own
+    import datetime as dt
+    from fastapi.testclient import TestClient
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    from assetizer.web import app as web
+    at = dt.datetime(2026, 10, 20, 0, 30, tzinfo=dt.timezone.utc).timestamp()  # 10/19 20:30 in New York
+    src = {"title": "Tom 盘后复盘", "published_at": "20261020", "info": json.dumps({"timestamp": at})}
+    assert delivery.days_of(src) == {"2026-10-20", "2026-10-19"}
+    assert delivery.days_of({"title": "12/31 年终复盘", "published_at": "20270102", "info": "{}"}) == {"2027-01-02", "2026-12-31"}
+    pages = [{"id": "p", "url": "u", "title": "王海滨：美联储的下一步！", "date": "2026-10-19"}]
+    assert delivery.maybe_written(pages, delivery.days_of(src), src["title"], by_title=False)["id"] == "p"
+    assert delivery.maybe_written(pages, {"2026-10-18"}, src["title"], by_title=False) is None
+    assert delivery.maybe_written(pages, set(), "王海滨 美联储的下一步", by_title=True)["id"] == "p"
+    _run_fixture(home)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
+    db.exec("UPDATE runs SET origin='backfill'")
+    db.exec("UPDATE sources SET current_run_id='r', delivery='NOT_STARTED'")
+    hand = {"id": "hand", "url": "https://notion/hand", "properties": {
+        "Name": {"type": "title", "title": [{"plain_text": "汤姆 9月8日复盘"}]}, "内容发布日期": {"type": "date", "date": {"start": "2026-09-08"}}}}
+    lib = _Lib(hand=[hand])
+    monkeypatch.setattr(delivery, "client", lambda: lib)
+    assert delivery.deliver("v")["status"] == "HELD" and not any(p == "/pages" for _, p in lib.calls)
+    assert db.one("SELECT delivery, delivery_reason FROM sources") == {"delivery": "HELD", "delivery_reason": "MAYBE_HAVE"}
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    it = next(i for i in c.get("/api/overview", headers=h).json()["issues"] if i["id"] == "v")
+    assert it["maybe"] == {"id": "hand", "url": "https://notion/hand", "title": "汤姆 9月8日复盘", "date": "2026-09-08"}
+    assert c.post("/api/sources/v/maybe", headers=h, json={"write": True}).status_code == 200
+    assert delivery.deliver("v")["status"] == "FAILED" and ("POST", "/pages") in lib.calls  # 照写: on to a page of its own
+    db.exec("UPDATE sources SET delivery='NOT_STARTED'")
+    db.set_setting("write_anyway:v", None)
+    assert delivery.deliver("v")["status"] == "HELD"
+    assert c.post("/api/sources/v/maybe", headers=h, json={"write": False}).status_code == 200
+    assert db.one("SELECT delivery, notion_url FROM sources") == {"delivery": "REGISTERED", "notion_url": "https://notion/hand"}
+    assert c.post("/api/sources/v/maybe", headers=h, json={"write": True}).status_code == 409  # nothing waits on a word now
+    # an issue that did not come in by 补录 is written as before
+    db.exec("UPDATE runs SET origin='ingest'")
+    db.exec("UPDATE sources SET delivery='NOT_STARTED', notion_url=NULL")
+    lib.calls.clear()
+    assert delivery.deliver("v")["status"] == "FAILED" and ("POST", "/pages") in lib.calls
+
+
+def test_the_backfill_list_marks_what_a_hand_written_page_may_be(home, monkeypatch):
+    # S05 (a05): 可能已有 in the list, left unticked: the list's dates are YouTube's rough ones, the title's MM/DD is not
+    from fastapi.testclient import TestClient
+    from assetizer import delivery
+    from assetizer.web import app as web
+    entries = _board_fixture(home, monkeypatch)
+    entries[2]["title"] = "10/22 盘后复盘"
+    seen = []
+
+    def maybe_many(src, es):
+        seen.append([e["id"] for e in es])
+        return {"CCCCCCCCCCC": {"id": "hand", "url": "https://notion/hand", "title": "汤姆 10/22", "date": "2026-10-22"}}
+    monkeypatch.setattr(delivery, "registered_many", lambda src, ids: {})
+    monkeypatch.setattr(delivery, "maybe_many", maybe_many)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    r = _listed(c, "/api/channels/t/backfill/candidates", h).json()
+    marks = {x["id"]: x["maybe"] for x in r["candidates"]}
+    assert marks["CCCCCCCCCCC"]["url"] == "https://notion/hand" and marks["DDDDDDDDDDD"] is None and seen
+
+
+def test_pasting_an_issue_already_in_notion_finds_its_page_rather_than_printing_it_again(home):
+    # S06 (a06): pasted again, a video Assetizer wrote to Notion answers with its page; printing it again is asked for
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    t = now()
+    db.exec("""INSERT INTO sources(id, url, delivery, notion_url, current_run_id, created_at, updated_at) VALUES
+               ('AAAAAAAAAAA','u','DELIVERED','https://notion/a','AAAAAAAAAAA-r1',?,?), ('BBBBBBBBBBB','u','REGISTERED','https://notion/hand',NULL,?,?)""",
+            t, t, t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('AAAAAAAAAAA-r1','AAAAAAAAAAA','COMPLETE',?)", t)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    r = c.post("/api/submit", headers=h, json={"url": "https://youtu.be/AAAAAAAAAAA?si=x"}).json()
+    assert (r["kept"], r["notion_url"]) == ("DELIVERED", "https://notion/a")
+    r = c.post("/api/submit", headers=h, json={"url": "AAAAAAAAAAA BBBBBBBBBBB CCCCCCCCCCC"}).json()
+    assert [i.get("kept") for i in r["items"]] == ["DELIVERED", "REGISTERED", None]
+    assert {x["id"] for x in db.q("SELECT id FROM runs")} == {"AAAAAAAAAAA-r1", "CCCCCCCCCCC-r1"}
+    r = c.post("/api/submit", headers=h, json={"url": "https://youtu.be/AAAAAAAAAAA", "reprint": True}).json()
+    assert r["run_id"] == "AAAAAAAAAAA-r2" and not r["existing"] and "kept" not in r
+
+
+def test_a_page_someone_wrote_on_is_not_replaced_without_asking(home, monkeypatch):
+    # S24 (a07): before an old page goes (重印, 换成新版本), what someone else did on it — a paragraph added, one of ours
+    # edited, a property, a comment — stops it: the page stays and the 刊 asks; nothing of theirs, and it goes as before
+    from fastapi.testclient import TestClient
+    from assetizer import db, delivery
+    from assetizer.notion import mapping as M
+    from assetizer.web import app as web
+    _run_fixture(home)
+    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
+    stale = "UPDATE sources SET current_run_id='r', notion_page_id='old', notion_synced_run='r0', notion_database_id='lib', delivery='STALE'"
+    db.exec(stale)
+    mine = {"id": "b1", "type": "paragraph", "created_by": {"id": "bot"}, "last_edited_by": {"id": "bot"}}
+    lib = _Lib(blocks=[mine], comments=None)  # comments not readable: taken as none
+    monkeypatch.setattr(delivery, "client", lambda: lib)
+    assert delivery.deliver("v")["status"] == "FAILED" and ("PATCH", "/pages/old") in lib.calls  # on to the new page
+    db.exec(stale)
+    lib = _Lib(blocks=[{**mine, "last_edited_by": {"id": "me"}}, {"id": "b2", "type": "paragraph", "created_by": {"id": "me"},
+                                                                    "last_edited_by": {"id": "me"}}],
+               comments=[{"id": "c1", "created_by": {"id": "me"}}])
+    monkeypatch.setattr(delivery, "client", lambda: lib)
+    assert delivery.deliver("v")["status"] == "HELD"
+    assert ("PATCH", "/pages/old") not in lib.calls and not any(p == "/pages" for _, p in lib.calls)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    it = next(i for i in c.get("/api/overview", headers=h).json()["issues"] if i["id"] == "v")
+    assert it["delivery_reason"] == "YOURS_ON_PAGE" and it["yours"] == ["加了段落", "改了段落", "加了评论"]
+    assert c.post("/api/sources/v/replace", headers=h, json={"replace": False}).status_code == 200
+    assert db.one("SELECT delivery, notion_page_id FROM sources") == {"delivery": "DELIVERED", "notion_page_id": "old"}
+    db.exec("UPDATE sources SET delivery='STALE'")  # asked for again later: it asks again
+    assert delivery.deliver("v")["status"] == "HELD"
+    assert c.post("/api/sources/v/replace", headers=h, json={"replace": True}).status_code == 200
+    assert delivery.deliver("v")["status"] == "FAILED" and ("PATCH", "/pages/old") in lib.calls
+
+
+def test_clearing_the_trial_queue_stops_the_trials_under_way_too(home, monkeypatch):
+    # S19 (a10): 清空 means stop spending: what waits in line is dropped; what waits or runs stops — a running one's model
+    # call is killed — keeping the stages done for 重试, and adopted by nothing
+    import threading
+    from fastapi.testclient import TestClient
+    from assetizer import db, tuning
+    from assetizer.pipeline import runner
+    from assetizer.providers import agy
+    from assetizer.providers.agy import ProviderError
+    from assetizer.util import now
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    t = now()
+    for sid in ("AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC"):
+        db.exec("INSERT INTO sources(id, url, channel_id, delivery, created_at, updated_at) VALUES (?,?, 'w','NOT_STARTED',?,?)", sid, sid, t, t)
+        db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w',?,?)", sid, t)
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, origin, created_at) VALUES ('AAAAAAAAAAA-r1','AAAAAAAAAAA',?,'RUNNING','trial',?)", v1, t)
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, wait_reason, origin, created_at) VALUES ('BBBBBBBBBBB-r1','BBBBBBBBBBB',?,'WAITING','NETWORK','trial',?)", v1, t)
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES ('w','CCCCCCCCCCC',?,?)", v1, t)
+    for i, name in enumerate(("RESOLVE", "UNDERSTAND")):
+        db.exec("INSERT INTO stages(run_id, name, ord, status) VALUES ('AAAAAAAAAAA-r1',?,?,?)", name, i, "DONE" if i == 0 else "PENDING")
+    db.set_setting("trial_batch", 2)
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    r = c.post("/api/channels/w/trial-queue/clear", headers=h, json={}).json()
+    assert (r["cancelled"], r["stopped"]) == (1, 2) and db.setting("trial_batch") is None  # no 「试跑全部跑完」 for this
+    assert db.one("SELECT production, error_class FROM runs WHERE id='BBBBBBBBBBB-r1'") == {"production": "CANCELLED", "error_class": "STOPPED"}
+    assert runner._execute("BBBBBBBBBBB-r1") == "CANCELLED"  # the worker took it up a moment too late: not started
+    # the worker kills the running one's model call...
+    killed = []
+    monkeypatch.setattr(agy, "LIVE_RUNS", {4242: "AAAAAAAAAAA-r1", 4343: "x-r1"})
+    monkeypatch.setattr(runner.os, "killpg", lambda pg, sig: killed.append(pg))
+    w = runner.Worker()
+    w.active["AAAAAAAAAAA-r1"] = threading.current_thread()
+    w.halt()
+    assert killed == [4242]
+
+    def cut_off(ctx):  # ...so the call under way fails: 清空 came while it ran
+        db.exec("UPDATE runs SET stop_at=? WHERE id='AAAAAAAAAAA-r1'", now())
+        raise ProviderError("PROVIDER_FAILURE", "agy exited -9")
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", lambda ctx: {}, True), ("UNDERSTAND", cut_off, True)])
+    db.exec("UPDATE runs SET stop_at=NULL WHERE id='AAAAAAAAAAA-r1'")
+    assert runner._execute("AAAAAAAAAAA-r1") == "CANCELLED"
+    assert db.one("SELECT production, error_class FROM runs WHERE id='AAAAAAAAAAA-r1'") == {"production": "CANCELLED", "error_class": "STOPPED"}
+    assert db.one("SELECT status FROM stages WHERE run_id='AAAAAAAAAAA-r1' AND name='RESOLVE'")["status"] == "DONE"
+    assert db.one("SELECT current_run_id FROM sources WHERE id='AAAAAAAAAAA'")["current_run_id"] is None
+    assert c.post("/api/runs/AAAAAAAAAAA-r1/retry", headers=h, json={}).status_code == 200  # goes on from where it stopped
+    assert db.one("SELECT production, stop_at FROM runs WHERE id='AAAAAAAAAAA-r1'") == {"production": "QUEUED", "stop_at": None}
+    assert tuning.clear_queue("w") == 0
+
+
+def test_relocking_offers_what_the_channel_posted_while_tuned_for_backfill(home, monkeypatch):
+    # S25 (a11): back in 调试期 intake stopped; at 定稿 again the videos posted meanwhile are in the 定稿单 (ticked) and go
+    # into the 补录 line — not lost, nor put ahead of new ones
+    from fastapi.testclient import TestClient
+    from assetizer import db, delivery, ingest, tuning
+    from assetizer.util import now
+    from assetizer.web import app as web
+    v1, v2 = _tuning_fixture()
+    t = now()
+    db.exec("UPDATE channels SET youtube_channel_id='UCw'")
+    db.exec("INSERT INTO sources(id, channel_id, delivery, current_run_id, created_at, updated_at) VALUES ('SSSSSSSSSSS','w','DELIVERED','SSSSSSSSSSS-r1',?,?)", t, t)
+    db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w','SSSSSSSSSSS',?)", t)
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at, finished_at) VALUES ('SSSSSSSSSSS-r1','SSSSSSSSSSS',?,'COMPLETE',?,?)", v2, t, t)
+    tuning.confirm(v2)  # locked, intake on
+    db.exec("UPDATE playbooks SET status='NEEDS_CONFIRMATION' WHERE id=?", v2)
+    tuning.retune("w")
+    paused = db.setting("ingest:w")["paused_at"]
+    entries = [{"id": "NNNNNNNNNNN", "title": "调试期间发的", "published": paused[:10] + "T12:00:00+00:00", "duration": 3000, "approx": True},
+               {"id": "SSSSSSSSSSS", "title": "样片", "published": paused[:10] + "T12:00:00+00:00", "duration": 3000, "approx": True},
+               {"id": "OOOOOOOOOOO", "title": "调试之前的", "published": "2026-01-01T00:00:00+00:00", "duration": 3000, "approx": True}]
+    monkeypatch.setattr(ingest, "look", lambda cid, limit=15, shorts=False: (entries, None, {"videos"}))
+    monkeypatch.setattr(delivery, "registered_many", lambda src, ids: {})
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    lp = c.get(f"/api/channels/w/lock-preview?playbook_id={v2}", headers=h).json()
+    assert [m["id"] for m in lp["missed"]] == ["NNNNNNNNNNN"]
+    r = c.post("/api/channels/w/lock", headers=h, json={"playbook_id": v2, "samples": [], "backfill": [lp["missed"][0]]})
+    assert r.status_code == 200 and r.json()["backfill"] == 1
+    assert [q["source_id"] for q in db.q("SELECT source_id FROM backfill_queue WHERE status='PENDING'")] == ["NNNNNNNNNNN"]
+    assert "paused_at" not in db.setting("ingest:w") and db.setting("ingest:w")["enabled"]
+
+
+def test_saving_notion_settings_another_device_changed_meanwhile_asks_first(home, monkeypatch):
+    # S30 (a12): the page read the settings at one revision and another device saved since: this save is refused (412),
+    # not let undo the other one unseen; 用我的覆盖 sends it again with force. Renames Notion made are not a change
+    from fastapi.testclient import TestClient
+    from assetizer.notion import mapping as M
+    from assetizer.web import app as web
+    _preview_fixture(home)
+    monkeypatch.setattr(web, "_notion", lambda: FakeNotion())
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    rev = c.get("/api/channels/trader-tom/notion", headers=h).json()["rev"]
+    assert c.get("/api/channels/trader-tom/notion", headers=h).json()["rev"] == rev
+    draft = {"properties": M.get("trader-tom")["properties"], "template": "reading-guide", "heading": "手机上改的", "icon": "none"}
+    assert c.post("/api/channels/trader-tom/notion", headers=h, json={**draft, "rev": rev}).status_code == 200
+    r = c.post("/api/channels/trader-tom/notion", headers=h, json={**draft, "heading": "电脑上改的", "rev": rev})
+    assert r.status_code == 412 and "别处" in r.json()["detail"] and M.get("trader-tom")["heading"] == "手机上改的"
+    assert c.post("/api/channels/trader-tom/notion", headers=h, json={**draft, "heading": "电脑上改的", "rev": rev, "force": True}).status_code == 200
+    assert M.get("trader-tom")["heading"] == "电脑上改的"
+
+
+def test_the_journal_and_a_board_ask_the_database_as_often_however_many_issues(home):
+    # S64 (a19): 2000 issues took 13,923 queries for one look at the 刊, a round of several per issue: a few batched now
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    t = now()
+    db.exec("INSERT INTO channels(id, name, mode, stage, created_at, updated_at) VALUES ('t','Tom','TRACKED','LOCKED',?,?)", t, t)
+
+    def add(k):
+        for _ in range(k):
+            sid = f"S{db.one('SELECT COUNT(*) n FROM sources')['n']:010d}"
+            db.exec("INSERT INTO sources(id, channel_id, title, delivery, current_run_id, created_at, updated_at) VALUES (?,?,?,'DELIVERED',?,?,?)",
+                    sid, "t", sid, sid + "-r1", t, t)
+            db.exec("INSERT INTO runs(id, source_id, production, summary, created_at, finished_at) VALUES (?,?,'COMPLETE',?,?,?)",
+                    sid + "-r1", sid, json.dumps({"units": 2, "assets": {"clip:GENERATED": 1}}), t, t)
+            for u, pri in (("a", 3), ("b", 1)):
+                db.exec("""INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, learning_priority, data)
+                           VALUES (?,?,?,?,0,?,10,20,?,'{}')""", sid + u, sid + "-r1", sid, u, f"单元{u}", pri)
+            db.exec("INSERT INTO flags(source_id, run_id, target_kind, kind, severity, title, origin, created_at) VALUES (?,?,'RUN','x','REVIEW','校注','MACHINE_QA',?)",
+                    sid, sid + "-r1", t)
+            db.exec("INSERT INTO assets(run_id, source_id, unit_id, kind, status, path, created_at) VALUES (?,?,?,'screenshot','GENERATED','/x.jpg',?)",
+                    sid + "-r1", sid, sid + "a", t)
+
+    def asked(fn, *args):
+        n = [0]
+        db.connect().set_trace_callback(lambda sql: n.__setitem__(0, n[0] + 1))
+        try:
+            return n, json.loads(fn(*args).body)
+        finally:
+            db.connect().set_trace_callback(None)
+    add(3)
+    few, _ = asked(web.overview)
+    board, _ = asked(web.channel_board, "t")
+    add(12)
+    same, out = asked(web.overview)
+    assert same[0] == few[0] and len(out["issues"]) == 15
+    assert asked(web.channel_board, "t")[0][0] == board[0]
+    it = out["issues"][0]
+    assert (it["no"], it["units"], it["must"], it["clips"], it["notes"], [m["title"] for m in it["musts"]]) == (15, 2, 1, 1, 1, ["单元a"])
+    assert it["cover"] and it["latest_run"] == it["id"] + "-r1" and it["production"] == "COMPLETE"
+
+
+# ---------------------------------------------------------------- logs to iterate on (agy, yt-dlp change under us)
+def _ago(days: float) -> str:
+    import datetime as dt
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
+
+
+def test_logs_are_kept_thirty_days(home):
+    # what iterating reads — yt-dlp's words, each model call's log, the events — goes after 30 days; a call's receipt and
+    # answer stay (a retry reuses them), and so does an event of a run still under way (intake tells its videos by one)
+    import os
+    import time
+    from assetizer import config, db, logs
+    s = config.get()
+    old, new = time.time() - 31 * 86400, time.time() - 86400
+    call = s.runs_dir / "r" / "calls" / "understand-CH01" / "attempt-1"
+    call.mkdir(parents=True)
+    for name in ("stderr.log", "raw-output.jsonl", "prompt.md", "invocation.json", "response.txt"):
+        (call / name).write_text("x")
+        os.utime(call / name, (old, old))
+    yt = s.logs_dir / "yt-dlp"
+    yt.mkdir(parents=True)
+    for name, at in (("a.log", old), ("b.log", new)):
+        (yt / name).write_text("x")
+        os.utime(yt / name, (at, at))
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('w','NOT_STARTED',?,?)", _ago(40), _ago(40))
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('w-r1','w','WAITING',?)", _ago(40))
+    for at, rid, msg in ((31, None, "old"), (31, "w-r1", "taken"), (1, None, "new")):
+        db.exec("INSERT INTO events(ts, run_id, level, kind, message) VALUES (?,?,'info','x',?)", _ago(at), rid, msg)
+    out = logs.prune()
+    assert sorted(p.name for p in call.iterdir()) == ["invocation.json", "response.txt"]
+    assert [p.name for p in yt.iterdir()] == ["b.log"]
+    assert [e["message"] for e in db.q("SELECT message FROM events ORDER BY id")] == ["taken", "new"]
+    assert out == {"files": 4, "events": 1}
+
+
+def test_the_week_s_logs_say_when_a_scan_is_worth_it_and_go_out_without_secrets(home, monkeypatch, sent):
+    # the Monday digest reads the week: failures, waits and model calls that went wrong, of the kinds iterating is about
+    # (not a network hiccup, a live not over, a video gone); any kind not seen before, or enough of them, asks for a scan.
+    # The export a developer's agent reads carries no token or cookie
+    import datetime as dt
+    from assetizer import config, db, logs, notify
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, title, delivery, created_at, updated_at) VALUES ('v','v','NOT_STARTED',?,?)", t, t)
+    for i, (prod, cls, days) in enumerate((("FAILED", "YOUTUBE_REFUSED", 2), ("FAILED", "UNKNOWN", 3), ("FAILED", "UNKNOWN", 20),
+                                           ("FAILED", "VIDEO_PRIVATE", 1), ("COMPLETE_PARTIAL", None, 1))):
+        db.exec("INSERT INTO runs(id, source_id, production, error_class, error, created_at, finished_at) VALUES (?,?,?,?,?,?,?)",
+                f"v-r{i}", "v", prod, cls, f"{cls}: bot123456789:{'A' * 35} said no", _ago(days), _ago(days))
+    for reason, days in (("NETWORK", 1), ("YTDLP_OUTDATED", 2)):
+        db.exec("INSERT INTO events(ts, run_id, level, kind, message) VALUES (?,'v-r1','warn','run',?)", _ago(days), f"等待：{reason}")
+    db.exec("""INSERT INTO model_calls(run_id, stage, attempt, model, agy_version, status, error_class, created_at)
+               VALUES ('v-r1','understand-CH01','attempt-1','gemini','1.4.9','FAILED','MEDIA_READ_FAILED',?)""", _ago(1))
+    stderr = config.get().runs_dir / "v-r1" / "calls" / "understand-CH01" / "attempt-1" / "stderr.log"
+    stderr.parent.mkdir(parents=True)
+    stderr.write_text("Authorization: Bearer ya29.abcdefghijklmnopqrstuvwxyz\nview_file refused: too large")
+    w = logs.summary()
+    assert w["failed"] == {"YOUTUBE_REFUSED": 1, "UNKNOWN": 1} and w["waited"] == {"YTDLP_OUTDATED": 1}
+    assert w["calls"] == {"MEDIA_READ_FAILED": 1} and w["partial"] == 1 and w["agy"] == ["1.4.9"]
+    assert w["new"] == ["MEDIA_READ_FAILED", "YOUTUBE_REFUSED", "YTDLP_OUTDATED"] and w["many"]  # UNKNOWN came 20 days ago too
+    lines = logs.digest_lines()
+    assert lines[0].startswith("🔧 迭代") and any("扫一遍" in x for x in lines)
+    out = json.dumps(logs.export(), ensure_ascii=False)
+    assert "view_file refused" in out and "ya29" not in out and "A" * 35 not in out
+    db.exec("DELETE FROM runs WHERE error_class IN ('YOUTUBE_REFUSED','UNKNOWN')")
+    db.exec("DELETE FROM events")
+    db.exec("DELETE FROM model_calls")
+    assert not logs.summary()["many"]
+
+    class Monday(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2026, 11, 2, 9, 30, tzinfo=tz)
+    monkeypatch.setattr(notify.dt, "datetime", Monday)
+    assert "🔧 迭代" in notify.digest()  # Mondays only
+
+
 # ---------------------------------------------------------------- 机房的盒子设置 (knobs.py)
 def test_knobs_are_checked_whole_then_written_and_read_clamped(cc_api, home):
     from assetizer import db, knobs
@@ -3739,7 +5159,7 @@ def test_telegram_token_is_write_only_and_a_new_bot_forgets_the_chat(cc_api, hom
     token = "123456:" + "A" * 35
     r = cc_api.post("/api/telegram", json={"token": token})
     assert r.status_code == 200 and token not in r.text
-    assert r.json() == {"token": True, "chat": False, "linked": None, "digest_hour": 9}
+    assert r.json() == {"token": True, "chat": False, "linked": None, "digest_hour": 9, "ok": None, "pending": 0}
     assert (home / "secrets" / "telegram-bot-token").read_text() == token
     assert cc_api.post("/api/telegram", json={"clear": ["token"]}).json()["token"] is False
 

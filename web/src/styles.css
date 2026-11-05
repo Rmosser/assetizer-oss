@@ -250,6 +250,7 @@ h1, h2, h3, h4, h5, .yaomu-row .t, .musts a, .dek, .toc-title h3, .run-title { t
   animation: rise 0.25s var(--ease);
 }
 .paste .hint.leaving { animation: sink 0.2s var(--ease) both; }
+.paste .hint a, .paste .hint .link { margin-left: 10px; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 .paste-btn { display: none !important; }
 .iconbtn {
   width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; flex: none;
@@ -368,8 +369,9 @@ details[open] > summary .plus { transform: rotate(45deg); }
 .attn-t p { margin: 2px 0 0; max-width: 44em; color: var(--ink-2); font: 14px/1.7 var(--sans); }
 .attn-t code { font: 12.5px var(--mono); background: var(--paper-2); padding: 1px 6px; border-radius: 3px; color: var(--ink); }
 .attn-list { list-style: none; margin: var(--s2) 0 0; padding: 0; display: grid; gap: 4px; }
-.attn-list li { display: flex; align-items: center; gap: var(--s3); font: 400 14.5px/1.5 var(--serif); }
+.attn-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s3); font: 400 14.5px/1.5 var(--serif); }
 .attn-list a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attn-acts { display: inline-flex; gap: var(--s2); }  /* a choice's two answers wrap together */
 .attn-list a:hover { text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
 
 /* 付印: every run in production, then what waits */
@@ -809,7 +811,8 @@ dialog { color: var(--ink); }
 .sheet-form input { height: 48px; font: 16px var(--sans); }
 .sheet-row { display: flex; gap: var(--s2); margin-top: var(--s3); }
 .sheet-row .btn { flex: 1; height: 48px; font-size: 15px; }
-.sheet-msg { margin: var(--s3) 0 0; font: 14px var(--sans); color: var(--zhu); }
+.sheet-msg { margin: var(--s3) 0 0; font: 14px var(--sans); color: var(--ink-2); display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); align-items: baseline; }
+.sheet-msg.err { color: var(--zhu); }
 .sheet-ctl { display: grid; gap: var(--s4); justify-items: start; }
 .sheet .yaomu { margin-top: 0; border-top: 0; }
 .sheet .yaomu-head { display: none; }

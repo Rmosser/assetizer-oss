@@ -64,7 +64,28 @@ export function Manuscript({ ch, mode, pbId, setPbId, view, setView, focus, seed
   const prevText = prev?.prompt_id ? ch.prompts.find((p) => p.id === prev.prompt_id)?.text ?? null : null;
   const latestPrompt = ch.prompts[0]?.text || "";
   const [diff, setDiff] = useState(true);
-  const [edit, setEdit] = useState<{ text: string; note: string } | null>(initialText ? { text: initialText, note: "" } : null);
+  // an edit is kept in this browser as it is typed: a reload, a closed tab or a phone that dropped the page
+  // brings it back here, in edit mode, until it is saved or 放弃
+  const stash = `az-goal-draft:${ch.id}`;
+  const [edit, setEdit] = useState<{ text: string; note: string } | null>(() => {
+    if (initialText) return { text: initialText, note: "" };
+    try {
+      const d = JSON.parse(localStorage.getItem(stash) || "null");
+      return d && typeof d.text === "string" && d.text !== (ch.prompts[0]?.text || "") ? { text: d.text, note: d.note || "" } : null;
+    } catch { return null; }
+  });
+  useEffect(() => {
+    try {
+      if (edit) localStorage.setItem(stash, JSON.stringify(edit));
+      else localStorage.removeItem(stash);
+    } catch { /* private mode: the reminder below still asks */ }
+  }, [edit, stash]);
+  useEffect(() => {  // and leaving the page while editing asks first, where the browser lets it
+    if (!edit) return;
+    const on = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    addEventListener("beforeunload", on);
+    return () => removeEventListener("beforeunload", on);
+  }, [edit]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const body = useRef<HTMLDivElement>(null);

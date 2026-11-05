@@ -88,16 +88,8 @@ def draft_config(saved: dict, draft: dict | None) -> dict:
 
 # ------------------------------------------------------------------ text
 def parts(template: str, ctx: dict) -> list[dict]:
-    """"{channel}-{date8}-{headline}" → the pieces of the filled-in text, each variable marked."""
-    out, pos = [], 0
-    for m in re.finditer(r"\{(\w+)\}", template or ""):
-        if m.start() > pos:
-            out.append({"text": template[pos:m.start()]})
-        out.append({"text": str(ctx.get(m[1], "") or ""), "var": m[1]})
-        pos = m.end()
-    if pos < len(template or ""):
-        out.append({"text": template[pos:]})
-    return out
+    """"{channel}-{date8}-{headline}" → the pieces of the filled-in text, each variable marked (as delivery fills it)."""
+    return M.pieces(template, ctx)
 
 
 def title_parts(cfg: dict, schema: dict, ctx: dict) -> list[dict]:

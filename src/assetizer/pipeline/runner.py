@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -48,6 +49,7 @@ STAGES: list[tuple[str, object, bool]] = [
 STAGE_NAMES = [s[0] for s in STAGES]
 ALWAYS_RERUN = {"PLAYBOOK"}
 PAUSE_KINDS = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"}
+RETRIED_WAITS = ("YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "LIVE_IN_PROGRESS", "NETWORK", "YTDLP_OUTDATED")  # put back every 30 minutes
 MEDIA_CHECK_EVERY = 600      # seconds: while idle, look this often whether agy updated itself
 MEDIA_RECHECK_PAUSED = 3600  # seconds: while paused for AGY_MEDIA_READ, repeat the media self-test this often
 QUOTA_EVERY = 900            # seconds between two reads of agy's quota while it is in use (no turn, no quota spent)
@@ -58,8 +60,14 @@ ALERT_TEXT = {
     "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
     "YOUTUBE_AUTH": ("YouTube 需要登录或会员权限",
                      "确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次；还没配置 CookieCloud 时，"
-                     "在「机房」→「YouTube 会话」里配置。系统每 30 分钟自动重试。"),
+                     "在「机房」→「YouTube 会话」里配置。修好后在那里做一次视频测试，通过就立刻继续；否则系统每 30 分钟自动重试。"),
+    "YOUTUBE_REFUSED": ("YouTube 拒绝下载",
+                        "YouTube 拒绝了下载（HTTP 403），要下载的期都在等。先让 Chrome 里的 CookieCloud 插件同步一次登录态，再到"
+                        "「机房」→「YouTube 会话」做一次视频测试，通过就立刻继续；测试能读到、下载仍被拒，多半是 yt-dlp 跟不上 YouTube："
+                        "更新 docker/requirements.lock 里的 yt-dlp 后重新打包安装。系统每 30 分钟重试一次。"),
     "DISK_LOW": ("磁盘空间不足，暂停下载", "系统会先清理过期原始媒体；仍不足时请在「机房」查看占用。"),
+    "YTDLP_OUTDATED": ("下载工具需要更新", "YouTube 改版后 yt-dlp 读不出视频了，要下载的期都在等。更新 docker/requirements.lock 里的 "
+                       "yt-dlp 后重新打包安装，装好就继续；系统每 30 分钟重试一次，偶发的读不出会自己恢复。"),
 }
 
 
@@ -116,6 +124,40 @@ def kill_orphans() -> int:
 
 
 # ---------------------------------------------------------------- execution
+class Stopped(Exception):
+    """清空 asked this trial to stop (a10)."""
+
+
+def _stop_asked(run_id: str) -> bool:
+    r = db.one("SELECT stop_at FROM runs WHERE id=?", run_id)
+    return bool(r and r["stop_at"])
+
+
+def _stop(run_id: str) -> str:
+    """Stopped on request: the stages done stay done for 重试, the one under way starts over; nothing is adopted."""
+    db.exec("UPDATE runs SET production='CANCELLED', error_class='STOPPED', error='清空时停下', stage=NULL, finished_at=? WHERE id=?",
+            now(), run_id)
+    db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status='RUNNING'", run_id)
+    db.event("run", "清空时停下，已完成的工序保留，可以重试接着跑", run_id, "warn")
+    from ..tuning import release_hold
+    release_hold(run_id)
+    return "CANCELLED"
+
+
+def kill_run(run_id: str) -> int:
+    """Kill the model calls (agy, whisper) under way for one run; its stage then fails and the run stops."""
+    from ..providers.agy import LIVE_RUNS
+    n = 0
+    for pg, rid in list(LIVE_RUNS.items()):
+        if rid == run_id:
+            try:
+                os.killpg(pg, signal.SIGKILL)
+                n += 1
+            except ProcessLookupError:
+                pass
+    return n
+
+
 def _set_stage(run_id: str, name: str, **kw) -> None:
     sets = ", ".join(f"{k}=?" for k in kw)
     db.exec(f"UPDATE stages SET {sets} WHERE run_id=? AND name=?", *kw.values(), run_id, name)
@@ -169,8 +211,11 @@ def _execute(run_id: str) -> str:
     run = db.one("SELECT * FROM runs WHERE id=?", run_id)
     source = db.one("SELECT * FROM sources WHERE id=?", run["source_id"])
     ctx = RunContext(run=run, source=source)
-    db.exec("UPDATE runs SET production='RUNNING', wait_reason=NULL, error=NULL, error_class=NULL, attempts=attempts+1, "
-            "started_at=COALESCE(started_at, ?) WHERE id=?", now(), run_id)
+    # rowcount, not db.exec() (that returns the last insert id): 清空 may have stopped it a moment before (a10)
+    if not db.connect().execute("UPDATE runs SET production='RUNNING', wait_reason=NULL, error=NULL, error_class=NULL, "
+                                "attempts=attempts+1, started_at=COALESCE(started_at, ?) WHERE id=? AND production!='CANCELLED'",
+                                (now(), run_id)).rowcount:
+        return "CANCELLED"
     done = {r["name"]: r["status"] for r in db.q("SELECT name, status FROM stages WHERE run_id=?", run_id)}
     bg: threading.Thread | None = None
     bg_err: list = []
@@ -187,6 +232,8 @@ def _execute(run_id: str) -> str:
         for name, fn, blocking in STAGES:
             if name == "TRANSCRIBE":
                 continue
+            if _stop_asked(run_id):
+                raise Stopped()
             if name == "MERGE" and done.get("TRANSCRIBE") not in ("DONE", "WARN"):
                 bg = threading.Thread(target=run_bg, daemon=True)
                 bg.start()
@@ -198,22 +245,25 @@ def _execute(run_id: str) -> str:
                 warned |= done.get(name) == "WARN"
                 continue
             try:
-                st, _ = _exec_stage(ctx, name, fn)
+                st, detail = _exec_stage(ctx, name, fn)
                 warned |= st == "WARN"
                 if name in ("RESOLVE", "ACQUIRE") and st == "DONE":
-                    db.resolve_alert("YOUTUBE_AUTH")
+                    # YouTube answered (not the cache), and no other video still waits on it
+                    for key in () if detail.get("cached") else ("YOUTUBE_AUTH", "YOUTUBE_REFUSED", "YTDLP_OUTDATED"):
+                        if not db.one("SELECT 1 FROM runs WHERE production IN ('WAITING','QUEUED') AND wait_reason=?", key):
+                            db.resolve_alert(key)
                     if name == "ACQUIRE":
                         db.resolve_alert("DISK_LOW")
             except (Waiting, ProviderError) as e:
                 if isinstance(e, ProviderError) and e.kind not in PAUSE_KINDS:
-                    if blocking:
+                    if blocking or e.transient:  # an outage: wait for it rather than deliver the issue without this stage
                         raise
                     _set_stage(run_id, name, status="WARN", detail=db.j({"warning": str(e)[:500]}))
                     warned = True
                     continue
                 raise
             except Exception as e:  # noqa: BLE001
-                if blocking:
+                if blocking or _locked(e):  # a database held too long is not this stage's failure: the run goes back
                     raise
                 _set_stage(run_id, name, status="WARN", detail=db.j({"warning": f"{_classify(e)}: {str(e)[:400]}"}))
                 ctx.event(f"{name} 非阻塞失败：{e}", "warn")
@@ -223,10 +273,19 @@ def _execute(run_id: str) -> str:
             bg = None
         if bg_err:
             warned = True
+    except Stopped:
+        return _stop(run_id)
     except Waiting as w:
+        if _stop_asked(run_id):
+            return _stop(run_id)
         _wait(run_id, w.reason, str(w))
         return "WAITING"
     except ProviderError as e:
+        if _stop_asked(run_id):  # the call killed for 清空 (a10), not a failure of its own
+            return _stop(run_id)
+        if e.kind == "AGY_AUTH_REQUIRED" and not signed_out(provider_of(e)):
+            _wait(run_id, "NETWORK", str(e))  # agy answers /usage: a passing 401, not a sign-out to pause for
+            return "WAITING"
         if e.kind in PAUSE_KINDS:
             _wait(run_id, e.kind, str(e), provider=provider_of(e))
             pause_queue(e.kind)
@@ -239,6 +298,14 @@ def _execute(run_id: str) -> str:
         _fail(run_id, e)
         return "FAILED"
     except Exception as e:  # noqa: BLE001
+        if _stop_asked(run_id):
+            return _stop(run_id)
+        if _locked(e):
+            return _requeue(run_id, f"数据库忙，稍后从断点继续：{e}")
+        if run.get("wait_reason") in RETRIED_WAITS and _classify(e) == "UNKNOWN":
+            # it was waiting already (the login, the network…) and this retry met an error nobody knows: keep waiting
+            _wait(run_id, run["wait_reason"], str(e))
+            return "WAITING"
         _fail(run_id, e)
         return "FAILED"
     finally:
@@ -264,6 +331,9 @@ def adopt_completed(source: dict, run_id: str) -> None:
                WHERE id=? AND (adopt_pinned=0 OR current_run_id IS NULL)""",
             run_id, run_headline(run_id), delivery, None if delivery != "BLOCKED" else "NOTION_NOT_CONFIGURED", now(), source["id"])
     db.exec("UPDATE sources SET deliver_after_run=NULL WHERE id=? AND deliver_after_run=?", source["id"], run_id)
+    # the version held for being partial ran again (a pinned one too): delivery decides anew (a08)
+    db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL,
+               updated_at=? WHERE id=? AND current_run_id=? AND delivery='HELD' AND delivery_reason='PARTIAL'""", now(), source["id"], run_id)
 
 
 def _summary(run_id: str) -> dict:
@@ -316,13 +386,66 @@ def agy_answers() -> bool:
     return True
 
 
+def signed_out(provider: str | None = None) -> bool:
+    """agy said it is signed out: believe it only when its own `/usage` (no turn, no quota) says so too — one 401 can
+    be the network, or the moment a quota window resets (2026-10-27: a sign-in alert that was gone a minute later).
+    The keyed providers have no such check: their key is missing or it is not."""
+    if (provider or "agy") != "agy":
+        return True
+    from ..providers.agy import AgyProvider, record_usage
+    try:
+        return record_usage(AgyProvider().usage()).get("error") == "AGY_AUTH_REQUIRED"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def alert_text(reason: str) -> tuple[str, str]:
+    """An alert's title and body; the quota's says when it comes back, from the latest reading of it."""
+    title, body = ALERT_TEXT[reason]
+    if reason == "PROVIDER_QUOTA":
+        import datetime as dt
+        q = db.setting("agy_quota") or {}
+        g = next((g for g in q.get("groups") or [] if g.get("name") == q.get("production_group")), None)
+        back = max((b["reset_at"] for b in (g or {}).get("buckets", [])
+                    if b.get("remaining") == 0 and b.get("reset_at") and not b.get("disabled")), default=None)
+        try:
+            d = dt.datetime.fromisoformat(back).astimezone(notify.TZ) if back else None
+        except ValueError:
+            d = None
+        if d:
+            body = f"按最近一次读到的额度，约周{'一二三四五六日'[d.weekday()]} {d:%H:%M} 恢复。" + body
+    return title, body
+
+
+def _locked(e: BaseException) -> bool:
+    """SQLite stayed locked past its busy timeout (a write behind the disk's fsyncs while eight runs encode media)."""
+    return isinstance(e, sqlite3.OperationalError) and ("locked" in str(e) or "busy" in str(e))
+
+
+def _requeue(run_id: str, why: str) -> str:
+    """Back to the queue, to go on from the last stage done — like a worker restart, given up after five tries in a
+    row (attempts); the write itself is tried again while the lock lasts."""
+    for i in range(3):
+        try:
+            db.exec("""UPDATE runs SET production=CASE WHEN attempts>=5 THEN 'FAILED' ELSE 'QUEUED' END,
+                       error_class=CASE WHEN attempts>=5 THEN 'TOO_MANY_RESTARTS' ELSE error_class END,
+                       error=CASE WHEN attempts>=5 THEN ? ELSE error END WHERE id=? AND production='RUNNING'""",
+                    "多次中断后停止自动续跑；请在机房重试。", run_id)
+            db.event("run", why, run_id, "warn")
+            return "QUEUED"
+        except sqlite3.OperationalError:
+            time.sleep(2 ** i)
+    return "QUEUED"  # still locked: recover() puts a RUNNING run back on the next start
+
+
 def _wait(run_id: str, reason: str, message: str, provider: str | None = None) -> None:
-    db.exec("UPDATE runs SET production='WAITING', wait_reason=?, error=? WHERE id=?", reason, message[:1000], run_id)
-    title, body = ALERT_TEXT.get(reason, (f"生产等待：{reason}", message))
+    # attempts counts restarts in the middle of production (recover() gives up after 5); a wait ends an attempt cleanly
+    db.exec("UPDATE runs SET production='WAITING', wait_reason=?, error=?, attempts=0 WHERE id=?", reason, message[:1000], run_id)
+    title, body = alert_text(reason) if reason in ALERT_TEXT else (f"生产等待：{reason}", message)
     if reason == "AGY_AUTH_REQUIRED":
         auth_alert(provider or "agy")
     elif reason in ALERT_TEXT:
-        db.raise_alert(reason, "critical" if reason == "YOUTUBE_AUTH" else "warning", title, body)
+        db.raise_alert(reason, "critical" if reason in ("YOUTUBE_AUTH", "YOUTUBE_REFUSED", "YTDLP_OUTDATED") else "warning", title, body)
     db.event("run", f"等待：{reason}", run_id, "warn")
 
 
@@ -360,7 +483,7 @@ def media_alert(h: dict) -> None:
         if h["error"] == "AGY_AUTH_REQUIRED":
             auth_alert(providers.get().name)
         else:
-            db.raise_alert(h["error"], "warning", *ALERT_TEXT[h["error"]])
+            db.raise_alert(h["error"], "warning", *alert_text(h["error"]))
         pause_queue(h["error"])
         return
     if h.get("error") in ("PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT"):
@@ -391,9 +514,10 @@ def _hold_if_agy_cannot_read_media(run_id: str, e: ProviderError) -> bool:
     h = media_self_test()
     if h.get("ok"):
         return False
-    if h.get("error") in ("PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT"):
-        # the self-test itself hit the network (2026-10-25 prodbox: a flaky uplink, not an agy change):
-        # hold this run like any outage instead of pausing all production for an hour
+    if h.get("error") in ("PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT") or (
+            h.get("error") == "AGY_AUTH_REQUIRED" and not signed_out(providers.get().name)):
+        # the self-test itself hit the network (2026-10-25 prodbox: a flaky uplink, not an agy change), or one
+        # passing 401: hold this run like any outage instead of pausing all production for an hour
         _wait(run_id, "NETWORK", str(e))
         return True
     _wait(run_id, h["error"] if h.get("error") in PAUSE_KINDS else "AGY_MEDIA_READ", str(e))
@@ -494,7 +618,7 @@ class Worker:
         self.poll = poll
         self.stop = False
         self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
-                     "memory": 0.0, "digest": 0.0, "playback": 0.0, "quota": 0.0}
+                     "memory": 0.0, "digest": 0.0, "playback": 0.0, "quota": 0.0, "alerts": 0.0}
         self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it
         self.finished: dict[str, str] = {}             # run id → final state, until reap() picks it up
         self.signed_out = 0                            # quota reads in a row that found agy signed out
@@ -526,8 +650,15 @@ class Worker:
                 notify.worker_recovered(container_exit_reason(), interrupted)
             clean.unlink(missing_ok=True)
 
+    def halt(self) -> None:
+        """Runs 清空 asked to stop (a10): kill their model calls; each thread then stops at its failed stage."""
+        for r in db.q("SELECT id FROM runs WHERE production='RUNNING' AND stop_at IS NOT NULL"):
+            if r["id"] in self.active:
+                kill_run(r["id"])
+
     def housekeeping(self) -> None:
         t = time.monotonic()
+        self.halt()
         paused = db.setting("queue_paused")
         if paused and paused.get("reason") == "AGY_MEDIA_READ":
             # a text-only health probe would pass and resume into the same failure: only the media self-test decides
@@ -543,10 +674,15 @@ class Worker:
                     media_alert(h)
         elif not paused and t - self.last["media"] > MEDIA_CHECK_EVERY and not db.one("SELECT 1 FROM runs WHERE production='RUNNING'"):
             self.last["media"] = t
-            if providers.get().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
+            # runs still held for it (the queue was resumed by hand meanwhile) are tested for as well as an agy update
+            held = db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason='AGY_MEDIA_READ'")
+            if held or providers.get().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
                 h = media_self_test()
                 db.event("worker", f"agy {h.get('version')} 读视频自检{'通过' if h.get('ok') else '没通过'}",
                          level="info" if h.get("ok") else "warn")
+                if h.get("ok") and held:
+                    db.resolve_alert("AGY_MEDIA_READ")
+                    db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason='AGY_MEDIA_READ'")
                 if not h.get("ok"):
                     media_alert(h)
                     paused = db.setting("queue_paused")
@@ -564,7 +700,7 @@ class Worker:
             self.last["probe"] = t  # idle-time login probe so the Engine lamp is current
             h = providers.get().health()
             db.set_setting("agy_health", h)
-            if not h.get("ok") and h.get("error") == "AGY_AUTH_REQUIRED":
+            if not h.get("ok") and h.get("error") == "AGY_AUTH_REQUIRED" and signed_out(providers.get().name):
                 auth_alert(providers.get().name)
         if t - self.last["quota"] > QUOTA_EVERY and any(p.name == "agy" for p in providers.in_use()):
             self.last["quota"] = t  # the 机房 page's quota bars and their week-long trend
@@ -577,8 +713,8 @@ class Worker:
                 agy_answers()
         if t - self.last["retry"] > 1800:
             self.last["retry"] = t
-            db.exec("UPDATE runs SET production='QUEUED' WHERE production='WAITING' "
-                    "AND wait_reason IN ('YOUTUBE_AUTH','DISK_LOW','LIVE_IN_PROGRESS','NETWORK')")
+            db.exec(f"UPDATE runs SET production='QUEUED' WHERE production='WAITING' "
+                    f"AND wait_reason IN ({','.join('?' * len(RETRIED_WAITS))})", *RETRIED_WAITS)
         if t - self.last["retention"] > 3600:
             self.last["retention"] = t
             retention()
@@ -600,18 +736,26 @@ class Worker:
         if t - self.last["memory"] > MEMORY_CHECK_EVERY:
             self.last["memory"] = t
             memory_alert()
+        if t - self.last["alerts"] > 60:
+            self.last["alerts"] = t
+            notify.send_due_alerts()  # what stayed past its wait
         if t - self.last["digest"] > 300:
             self.last["digest"] = t
-            if notify.configured() and notify.digest_due():
-                notify.send_digest()
+            if notify.configured():
+                notify.flush()  # what Telegram could not take before, if it answers now
+                if notify.digest_due():
+                    notify.send_digest()
 
     def start(self, run_id: str) -> None:
         def work():
             try:
                 self.finished[run_id] = execute(run_id)
             except Exception as e:  # noqa: BLE001 — execute records its own failures; this is a crash around it
-                self.finished[run_id] = "FAILED"
-                db.event("worker", f"Worker 异常：{e}", run_id, "error", {"tb": traceback.format_exc()[-1500:]})
+                self.finished[run_id] = _requeue(run_id, f"Worker 异常，稍后从断点继续：{e}")
+                try:
+                    db.event("worker", f"Worker 异常：{e}", run_id, "error", {"tb": traceback.format_exc()[-1500:]})
+                except sqlite3.OperationalError:
+                    pass
         t = threading.Thread(target=work, name=f"run-{run_id}", daemon=True)
         self.active[run_id] = t
         t.start()
@@ -711,6 +855,11 @@ def retention() -> dict:
             db.exec("UPDATE sources SET media_state='PURGED', purged_at=? WHERE id=?", now(), r["id"])
             purged += 1
     finish.sweep_agy_state()
+    today = dt.date.today().isoformat()
+    if db.setting("logs_pruned") != today:  # once a day: the logs past their month (logs.py)
+        from .. import logs
+        logs.prune()
+        db.set_setting("logs_pruned", today)
     return {"purged": purged}
 
 

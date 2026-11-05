@@ -17,10 +17,18 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import config, db
+from .util import now
 
 API = "https://api.telegram.org/bot{token}/{method}"
 TZ = ZoneInfo("Asia/Shanghai")
-LIMIT = 4000     # Telegram rejects messages over 4096 characters
+DIGEST_RETRY = 900  # seconds between two tries of a digest Telegram did not take
+# pushed the moment they are raised: each stops production or delivery until someone acts (a17); any other alert
+# waits ALERT_WAIT first, and one gone again by then (a network hiccup, CookieCloud's flapping) sends nothing at all
+URGENT = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "AGY_MEDIA_READ", "YOUTUBE_AUTH", "YOUTUBE_REFUSED", "YTDLP_OUTDATED",
+          "notion-auth"}
+ALERT_WAIT = 600  # seconds
+LIMIT = 4000        # Telegram rejects messages over 4096 characters
+OUTBOX_KEPT = 50    # messages kept while Telegram cannot be reached (the oldest go first)
 
 
 class SetupError(RuntimeError):
@@ -50,15 +58,45 @@ def _api(token: str, method: str, **payload) -> dict:
     return o if isinstance(o, dict) else {"ok": False, "description": f"HTTP {r.status_code}"}
 
 
-def send(text: str) -> bool:
+def send(text: str, keep: bool = True) -> bool:
+    """Send a message; one Telegram cannot take now is kept (`keep`) and goes out with the rest once it answers."""
     s = config.get()
     token, chat = s.secret("telegram-bot-token"), s.secret("telegram-chat-id")
     if not (token and chat):
         return False
     o = _api(token, "sendMessage", chat_id=chat, text=text[:LIMIT], disable_web_page_preview=True)
-    if not o.get("ok"):
+    ok = bool(o.get("ok"))
+    db.set_setting("telegram_state", {"ok": ok, "at": now(), "error": None if ok else str(o.get("description"))[:200]})
+    if not ok:
         db.event("notify", f"Telegram 通知没发出去：{str(o.get('description'))[:200]}", level="warn")
-    return bool(o.get("ok"))
+        if keep:
+            db.exec("INSERT INTO notify_outbox(at, text) VALUES (?,?)", now(), text)
+            db.exec("DELETE FROM notify_outbox WHERE id NOT IN (SELECT id FROM notify_outbox ORDER BY id DESC LIMIT ?)", OUTBOX_KEPT)
+    elif keep:
+        flush()
+    return ok
+
+
+def flush() -> bool:
+    """What Telegram could not take while it was out of reach, as one message once it answers again."""
+    rows = db.q("SELECT * FROM notify_outbox ORDER BY id")
+    if not rows or not configured():
+        return False
+    lines = [f"📮 这 {len(rows)} 条通知当时没发出去："]
+    for r in rows:
+        try:
+            at = dt.datetime.fromisoformat(r["at"]).astimezone(TZ).strftime("%m-%d %H:%M")
+        except ValueError:
+            at = ""
+        lines.append(f"• {at} {r['text'].splitlines()[0][:200]}")
+    if send("\n".join(lines)[:LIMIT], keep=False):
+        db.exec("DELETE FROM notify_outbox WHERE id <= ?", rows[-1]["id"])
+        return True
+    return False
+
+
+def pending() -> int:
+    return db.one("SELECT COUNT(*) n FROM notify_outbox")["n"]
 
 
 def setup() -> dict:
@@ -90,8 +128,16 @@ def _title(source_id: str) -> str:
 
 
 def run_failed(run_id: str, kind: str, error: str) -> None:
-    r = db.one("SELECT source_id, playbook_id FROM runs WHERE id=?", run_id)
+    r = db.one("SELECT source_id, playbook_id, origin FROM runs WHERE id=?", run_id)
     if not r:
+        return
+    # a trial, or any run of a sample (a channel still tuned, not in Notion): the 调试台 shows it fail (a04)
+    if r["origin"] == "trial" or db.one("""SELECT 1 FROM sources s JOIN channels c ON c.id=s.channel_id WHERE s.id=?
+                                           AND c.stage='TUNING' AND s.delivery NOT IN ('DELIVERED','REGISTERED')""", r["source_id"]):
+        return
+    from .youtube import UNAVAILABLE
+    if kind in UNAVAILABLE:  # nothing to fix: what YouTube did with it (a15)
+        send(f"🚫 视频不可用（{UNAVAILABLE[kind]}）：{_title(r['source_id'])}\n{link()}".strip())
         return
     pb = db.one("SELECT version FROM playbooks WHERE id=?", r["playbook_id"]) if r["playbook_id"] else None
     version = f"（规程 v{pb['version']}）" if pb else ""
@@ -101,6 +147,14 @@ def run_failed(run_id: str, kind: str, error: str) -> None:
 
 def alert_raised(severity: str, title: str, body: str) -> None:
     send(f"{'🔴' if severity == 'critical' else '🟠'} {title}\n{body[:1500]}\n{link()}".strip())
+
+
+def send_due_alerts() -> None:
+    """The non-urgent alerts open for ALERT_WAIT and not pushed yet: pushed now, and marked so."""
+    cut = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=ALERT_WAIT)).isoformat(timespec="seconds")
+    for a in db.q("SELECT * FROM alerts WHERE resolved_at IS NULL AND notified_at IS NULL AND created_at<=? ORDER BY created_at", cut):
+        alert_raised(a["severity"], a["title"], a["body"] or "")
+        db.exec("UPDATE alerts SET notified_at=? WHERE key=? AND notified_at IS NULL", now(), a["key"])
 
 
 def alert_resolved(title: str) -> None:
@@ -137,6 +191,9 @@ def digest() -> str:
         lines.append(f"磁盘剩余：{st.f_bavail * st.f_frsize / 1e9:.0f} GB")
     except OSError:
         pass
+    if dt.datetime.now(TZ).weekday() == 0:  # Mondays: the week's logs, for iterating (logs.py)
+        from . import logs
+        lines += logs.digest_lines()
     if link():
         lines.append(link())
     return "\n".join(lines)
@@ -145,10 +202,14 @@ def digest() -> str:
 def digest_due() -> bool:
     t = dt.datetime.now(TZ)
     from . import knobs
-    return t.hour >= knobs.get("digest_hour") and db.setting("digest_date") != t.date().isoformat()
+    tried = db.setting("digest_tried")  # a digest Telegram did not take is tried again, not every few seconds
+    return t.hour >= knobs.get("digest_hour") and db.setting("digest_date") != t.date().isoformat() and \
+        not (tried and (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(tried)).total_seconds() < DIGEST_RETRY)
 
 
 def send_digest() -> None:
-    db.set_setting("digest_date", dt.datetime.now(TZ).date().isoformat())
-    send(digest())
+    """Today's digest, marked sent once it was: one Telegram did not take is made again later, with the news then."""
+    db.set_setting("digest_tried", now())
+    if send(digest(), keep=False):
+        db.set_setting("digest_date", dt.datetime.now(TZ).date().isoformat())
 

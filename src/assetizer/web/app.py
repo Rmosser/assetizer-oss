@@ -20,7 +20,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .. import config, db, knobs, playback
+from .. import config, db, knobs, notify, playback
 from ..util import now
 
 app = FastAPI(title="Assetizer", docs_url="/api/docs")
@@ -111,35 +111,55 @@ def _run_view(r: dict | None) -> dict | None:
     return {**r, "summary": db.unj(r.get("summary"), {}), "pins": db.unj(r.get("pins"), {}), "stages": stages}
 
 
-def _cover(run_id: str | None) -> int | None:
-    if not run_id:
-        return None
-    r = db.one("""SELECT a.id FROM assets a JOIN units u ON u.id=a.unit_id WHERE a.run_id=? AND a.kind='screenshot'
-                  ORDER BY u.learning_priority DESC, a.start LIMIT 1""", run_id)
-    return r["id"] if r else None
+# a sample: a video of a channel still being tuned that is not in Notion — tried out, not an issue (it is not counted);
+# for queries over sources s joined to channels c
+NOT_SAMPLE = "NOT (COALESCE(c.stage, '') = 'TUNING' AND s.delivery NOT IN ('DELIVERED','REGISTERED'))"
 
 
-def _issue(s: dict, n: int) -> dict:
-    run = db.one("SELECT * FROM runs WHERE id=?", s["current_run_id"]) if s.get("current_run_id") else None
-    # experiment runs share the source but are not part of its production history
-    latest = db.one("SELECT * FROM runs WHERE source_id=? AND kind!='EXPERIMENT' ORDER BY created_at DESC LIMIT 1", s["id"])
-    summ = db.unj(run["summary"], {}) if run else {}
+def _issues(where: str = "1=1", *args) -> list[dict]:
+    """The issues (sources ``s``, oldest first) that match ``where``, for the caller to number: a few queries over all of
+    them rather than a round per issue (2000 issues took 13,923 queries for one look at the 刊, a19)."""
+    sources = db.q(f"SELECT s.* FROM sources s WHERE {where} ORDER BY s.created_at ASC", *args)
+    runs = {r["id"]: r for r in db.q(f"SELECT r.* FROM runs r JOIN sources s ON s.current_run_id=r.id WHERE {where}", *args)}
+    # the newest run (the first made of those made at once); experiment runs share the source but are not its production
+    latest = {r["source_id"]: r for r in db.q(f"""SELECT * FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY r.source_id
+                  ORDER BY r.created_at DESC, r.rowid) rn FROM runs r JOIN sources s ON s.id=r.source_id
+                  WHERE r.kind!='EXPERIMENT' AND {where}) WHERE rn=1""", *args)}
     # 校注: what the system doubts in this issue — information, not a to-do (design §R2-3)
-    notes = db.one("SELECT COUNT(*) n FROM flags WHERE source_id=? AND run_id IS ? AND severity!='INFO'",
-                   s["id"], s.get("current_run_id"))["n"]
-    ch = db.one("SELECT stage FROM channels WHERE id=?", s["channel_id"]) if s.get("channel_id") else None
-    must = db.one("SELECT COUNT(*) n FROM units WHERE run_id IS ? AND learning_priority=3", s.get("current_run_id"))["n"]
-    clips = sum(v for k, v in (summ.get("assets") or {}).items() if k == "clip:GENERATED")
-    musts = db.q("SELECT id, title FROM units WHERE run_id IS ? AND learning_priority=3 ORDER BY start LIMIT 3",
-                 s.get("current_run_id"))
-    return {"no": n, "id": s["id"], "title": s.get("title") or s["id"], "headline": s.get("headline"), "channel": s.get("channel_title"),
+    notes = {(r["source_id"], r["run_id"]): r["n"] for r in db.q(f"""SELECT f.source_id, f.run_id, COUNT(*) n FROM flags f
+                 JOIN sources s ON s.id=f.source_id WHERE f.severity!='INFO' AND {where} GROUP BY f.source_id, f.run_id""", *args)}
+    stage = {r["id"]: r["stage"] for r in db.q("SELECT id, stage FROM channels")}
+    musts: dict[str, list[dict]] = {}
+    for u in db.q(f"""SELECT u.run_id, u.id, u.title FROM units u JOIN sources s ON s.current_run_id=u.run_id
+                      WHERE u.learning_priority=3 AND {where} ORDER BY u.start, u.rowid""", *args):
+        musts.setdefault(u["run_id"], []).append({"id": u["id"], "title": u["title"]})
+    # the cover: a still of the most important unit, the earliest (one index lookup per issue, inside the one query)
+    covers = {r["run_id"]: r["id"] for r in db.q(f"""SELECT s.current_run_id run_id, (SELECT a.id FROM assets a
+                  JOIN units u ON u.id=a.unit_id WHERE a.run_id=s.current_run_id AND a.kind='screenshot'
+                  ORDER BY u.learning_priority DESC, a.start, a.id LIMIT 1) id FROM sources s
+                  WHERE s.current_run_id IS NOT NULL AND {where}""", *args)}
+    out = []
+    for s in sources:
+        rid = s.get("current_run_id")
+        run, last = runs.get(rid), latest.get(s["id"])
+        summ = db.unj(run["summary"], {}) if run else {}
+        tuning = stage.get(s.get("channel_id")) == "TUNING"
+        must = musts.get(rid) or []
+        out.append({
+            "no": None, "id": s["id"], "title": s.get("title") or s["id"], "headline": s.get("headline"), "channel": s.get("channel_title"),
             "channel_id": s.get("channel_id"), "published_at": s.get("published_at"), "duration": s.get("duration"),
             "delivery": s["delivery"], "delivery_reason": s.get("delivery_reason"), "notion_url": s.get("notion_url"),
-            "tuning": bool(ch and ch["stage"] == "TUNING"),
-            "units": summ.get("units"), "must": must, "clips": clips, "notes": notes, "cover": _cover(s.get("current_run_id")), "musts": musts,
-            "production": latest["production"] if latest else None, "stage": latest["stage"] if latest else None,
-            "latest_run": latest["id"] if latest else None, "updated_at": s["updated_at"],
-            "ready_at": run["finished_at"] if run else None}
+            "tuning": tuning, "sample": tuning and s["delivery"] not in ("DELIVERED", "REGISTERED"),  # NOT_SAMPLE
+            "units": summ.get("units"), "must": len(must), "notes": notes.get((s["id"], rid), 0), "cover": covers.get(rid),
+            "clips": sum(v for k, v in (summ.get("assets") or {}).items() if k == "clip:GENERATED"), "musts": must[:3],
+            "production": last["production"] if last else None, "stage": last["stage"] if last else None,
+            "error_class": last["error_class"] if last else None,
+            # 库里可能已有 (a05), 旧页上有你的改动 (a07): what the 刊 asks about
+            "maybe": db.setting(f"maybe_have:{s['id']}") if s.get("delivery_reason") == "MAYBE_HAVE" else None,
+            "yours": db.setting(f"yours_on_page:{s['id']}") if s.get("delivery_reason") == "YOURS_ON_PAGE" else None,
+            "latest_run": last["id"] if last else None, "updated_at": s["updated_at"],
+            "ready_at": run["finished_at"] if run else None})
+    return out
 
 
 # ------------------------------------------------------------------ reads
@@ -155,8 +175,12 @@ def status():
 @app.get("/api/overview")
 def overview():
     from ..pipeline.runner import worker_slots
-    sources = db.q("SELECT * FROM sources ORDER BY created_at ASC")
-    issues = [_issue(s, i + 1) for i, s in enumerate(sources)]
+    issues, n = [], 0
+    for it in _issues():  # samples take no issue number
+        if not it["sample"]:
+            n += 1
+            it["no"] = n
+        issues.append(it)
     queue = db.q("""SELECT r.id, r.source_id, r.production, r.wait_reason, s.title, s.url FROM runs r JOIN sources s ON s.id=r.source_id
                     WHERE r.production IN ('QUEUED','WAITING','INTERRUPTED') ORDER BY r.priority DESC, r.created_at""")
     running = []  # every run in production at once (setting worker_slots), the one furthest along first
@@ -170,14 +194,15 @@ def overview():
     for d in decisions:  # 定稿 opens the channel it is about
         pb = db.one("SELECT channel_id FROM playbooks WHERE id=?", d["ref"]) if d["kind"] == "CONFIRM_PLAYBOOK" and d["ref"] else None
         d["channel_id"] = pb["channel_id"] if pb else None
-    return {
+    # plain JSON already: sent as it is, not walked through FastAPI's encoder (55 of 237 ms for 2000 issues, a19)
+    return JSONResponse({
         "issues": list(reversed(issues)),
         "running": running, "slots": worker_slots(), "queue": queue, "drain_seconds": _drain(running),
         "alerts": db.q("SELECT * FROM alerts WHERE resolved_at IS NULL ORDER BY created_at DESC"),
         "decisions": decisions,
         "paused": db.setting("queue_paused"),
         "now": now(),
-    }
+    })
 
 
 # rough per-stage cost model (seconds per source-minute), refined from history later
@@ -650,15 +675,35 @@ def media(asset_id: int, w: int | None = None):
 class Submit(BaseModel):
     url: str
     priority: int = 0
+    reprint: bool = False  # an issue in Notion already is printed again only when asked for (a06)
+
+
+def _kept(vid: str | None) -> dict | None:
+    """A video in Notion already, with nothing under way for it: its page, not a reprint (a06). REGISTERED is a page
+    of the user's own, which a reprint would never replace."""
+    s = db.one("SELECT id, delivery, notion_url, current_run_id FROM sources WHERE id=?", vid) if vid else None
+    if not s or s["delivery"] not in ("DELIVERED", "REGISTERED") or \
+            db.one("SELECT 1 FROM runs WHERE source_id=? AND production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')", vid):
+        return None
+    return {"source_id": vid, "run_id": s["current_run_id"], "existing": False, "kept": s["delivery"], "notion_url": s["notion_url"]}
 
 
 @app.post("/api/submit")
 def submit(body: Submit):
+    """One link — or several pasted at once (one per line, by spaces, or run together by a one-line field): each video
+    is queued once, the answer for the first keeps the one-link shape, and `items` has them all."""
     from ..pipeline.runner import submit as do
+    from ..youtube import VIDEO_ID, video_id
+    text = body.url.strip()
+    ids = list(dict.fromkeys(VIDEO_ID.findall(text) + [w for w in text.split() if re.fullmatch(r"[A-Za-z0-9_-]{11}", w)]))
+    kept = (lambda v: None) if body.reprint else _kept
     try:
-        return do(body.url.strip(), priority=body.priority)
+        if len(ids) <= 1:
+            return kept(video_id(text)) or do(text, priority=body.priority)
+        items = [kept(v) or do(f"https://www.youtube.com/watch?v={v}", priority=body.priority) for v in ids]
     except ValueError as e:
         raise HTTPException(400, str(e))
+    return {**items[0], "items": items}
 
 
 class FlagUpdate(BaseModel):
@@ -733,13 +778,84 @@ def redeliver(sid: str):
 @app.post("/api/runs/{rid}/retry")
 def retry(rid: str):
     r = db.one("SELECT * FROM runs WHERE id=?", rid)
-    if not r or r["production"] not in ("FAILED", "WAITING", "INTERRUPTED", "COMPLETE_PARTIAL"):
-        raise HTTPException(400, "run not retryable")
+    if not r:
+        raise HTTPException(404)
+    if r["production"] in ("QUEUED", "RUNNING"):  # a second click, or retried elsewhere: under way already
+        return {"ok": True}
+    stopped = r["production"] == "CANCELLED" and r["error_class"] == "STOPPED"  # 清空 stopped it (a10)
+    if r["production"] not in ("FAILED", "WAITING", "INTERRUPTED", "COMPLETE_PARTIAL") and not stopped:
+        raise HTTPException(409, "这一期已经印完或取消了，不用重试")
     first = db.one("SELECT MIN(ord) o FROM stages WHERE run_id=? AND status IN ('FAILED','WARN','RUNNING')", rid)["o"]
     if first is not None:  # everything downstream of the first problem is rebuilt
         db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND ord>=? AND name NOT IN ('TRANSCRIBE')", rid, first)
         db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND name='TRANSCRIBE' AND status!='DONE'", rid)
-    db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL, error=NULL, error_class=NULL, attempts=0 WHERE id=?", rid)
+    src = db.one("SELECT media_state, media_path FROM sources WHERE id=?", r["source_id"])
+    if src and not (src["media_state"] == "CACHED" and src["media_path"] and Path(src["media_path"]).exists()):
+        # the video went with retention: fetch and cut it again; the stages done with it stay done
+        db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND name IN ('ACQUIRE','CHUNK')", rid)
+    db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL, error=NULL, error_class=NULL, attempts=0, stop_at=NULL WHERE id=?", rid)
+    return {"ok": True}
+
+
+@app.post("/api/runs/{rid}/ignore")
+def ignore(rid: str):
+    """A video no login opens (removed, private, members-only) is put away: nothing to fix, nothing to wait for (a15)."""
+    from ..youtube import UNAVAILABLE
+    r = db.one("SELECT production, error_class FROM runs WHERE id=?", rid)
+    if not r:
+        raise HTTPException(404)
+    if r["production"] == "CANCELLED":  # a second click
+        return {"ok": True}
+    if r["production"] != "FAILED" or r["error_class"] not in UNAVAILABLE:
+        raise HTTPException(409, "只有视频不可用的这一期能忽略")
+    db.exec("UPDATE runs SET production='CANCELLED' WHERE id=? AND production='FAILED'", rid)
+    db.event("run", f"视频不可用（{UNAVAILABLE[r['error_class']]}），已忽略", rid)
+    return {"ok": True}
+
+
+class MaybeAnswer(BaseModel):
+    write: bool  # 照写: a page of its own all the same; else 算已有: the page found is this issue's
+
+
+@app.post("/api/sources/{sid}/maybe")
+def maybe_have(sid: str, body: MaybeAnswer):
+    """库里可能已有 (a05): the answer to a hand-written page this 补录 issue may be."""
+    s = db.one("SELECT delivery, delivery_reason FROM sources WHERE id=?", sid)
+    if not s:
+        raise HTTPException(404)
+    page = db.setting(f"maybe_have:{sid}")
+    if s["delivery"] != "HELD" or s["delivery_reason"] != "MAYBE_HAVE" or not page:
+        raise HTTPException(409, "这一期没有在等你确认")
+    if body.write:
+        db.set_setting(f"write_anyway:{sid}", True)
+        db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END,
+                   delivery_reason=NULL, updated_at=? WHERE id=?""", now(), sid)
+    else:
+        db.exec("UPDATE sources SET delivery='REGISTERED', delivery_reason=?, notion_url=?, updated_at=? WHERE id=?",
+                f"库里已有：{page.get('title') or ''}"[:500], page.get("url"), now(), sid)
+    db.set_setting(f"maybe_have:{sid}", None)
+    db.event("delivery", "照写，另写一页" if body.write else f"算已有：「{page.get('title') or ''}」", None)
+    return {"ok": True}
+
+
+class ReplaceAnswer(BaseModel):
+    replace: bool  # 换新页: the old page goes with what is on it (Notion's trash keeps it 30 days); else it stays
+
+
+@app.post("/api/sources/{sid}/replace")
+def replace_page(sid: str, body: ReplaceAnswer):
+    """旧页上有你的改动 (a07): replace the page all the same, or leave it as it is."""
+    s = db.one("SELECT delivery, delivery_reason FROM sources WHERE id=?", sid)
+    if not s:
+        raise HTTPException(404)
+    if s["delivery"] != "HELD" or s["delivery_reason"] != "YOURS_ON_PAGE":
+        raise HTTPException(409, "这一期没有在等你决定换不换页")
+    if body.replace:
+        db.set_setting(f"replace_anyway:{sid}", True)
+        db.exec("UPDATE sources SET delivery='STALE', delivery_reason=NULL, updated_at=? WHERE id=?", now(), sid)
+    else:  # the page stays as it is: in Notion, the version it was written from
+        db.exec("UPDATE sources SET delivery='DELIVERED', delivery_reason='旧页上有你的改动，保留旧页', updated_at=? WHERE id=?", now(), sid)
+    db.set_setting(f"yours_on_page:{sid}", None)
     return {"ok": True}
 
 
@@ -853,7 +969,7 @@ def cookiecloud_test_video(body: VideoTest):
         out = youtube.probe_video(url)
         if out["ok"]:
             out["woken"] = db.connect().execute(
-                "UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason='YOUTUBE_AUTH'").rowcount
+                "UPDATE runs SET production='QUEUED' WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','YOUTUBE_REFUSED')").rowcount
         db.set_setting("youtube_video_test", out)
         title = (out["video"] or {}).get("title") or out["url"]
         db.event("config", (f"视频测试通过：{title}" + (f"；{out['woken']} 个等待登录的视频已重新排队" if out.get("woken") else ""))
@@ -865,7 +981,19 @@ def cookiecloud_test_video(body: VideoTest):
 
 class Ingest(BaseModel):
     enabled: bool
-    min_minutes: int | None = None
+    min_minutes: object = None  # checked by _minutes(): a refusal is said in a sentence, not pydantic's list
+
+
+MIN_MINUTES = (0, 240)  # the shortest video intake takes, in minutes (0: any length, Shorts too)
+
+
+def _minutes(v: object) -> int | None:
+    """The intake minimum from a request: a whole number of minutes within MIN_MINUTES, or None (unchanged)."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or not MIN_MINUTES[0] <= v <= MIN_MINUTES[1]:
+        raise HTTPException(400, f"最短时长要是 {MIN_MINUTES[0]}–{MIN_MINUTES[1]} 之间的整数分钟")
+    return v
 
 
 @app.post("/api/channels/{cid}/ingest")
@@ -873,7 +1001,7 @@ def channel_ingest(cid: str, body: Ingest):
     from ..ingest import set_enabled
     if not db.one("SELECT id FROM channels WHERE id=? AND mode='TRACKED'", cid):
         raise HTTPException(404)
-    return set_enabled(cid, body.enabled, body.min_minutes)
+    return set_enabled(cid, body.enabled, _minutes(body.min_minutes))
 
 
 # ------------------------------------------------------------------ 频道看板: stats, scans, 补录
@@ -886,10 +1014,10 @@ def _channel_stats(cid: str) -> dict:
     Only what was produced counts: a video intake found already in the library is 已登记 without a run, not an issue
     (`registered` is an issue whose page turned out to be there already)."""
     from datetime import datetime, timedelta
-    rows = db.q("""SELECT s.id, s.delivery, s.duration, r.finished_at, r.summary FROM sources s JOIN runs r ON r.id=s.current_run_id
-                   WHERE s.channel_id=?""", cid)
-    notes = db.one("""SELECT COUNT(*) n FROM flags f JOIN sources s ON s.id=f.source_id AND f.run_id=s.current_run_id
-                      WHERE s.channel_id=? AND f.severity!='INFO'""", cid)["n"]
+    rows = db.q(f"""SELECT s.id, s.delivery, s.duration, r.finished_at, r.summary FROM sources s JOIN runs r ON r.id=s.current_run_id
+                    LEFT JOIN channels c ON c.id=s.channel_id WHERE s.channel_id=? AND {NOT_SAMPLE}""", cid)
+    notes = db.one(f"""SELECT COUNT(*) n FROM flags f JOIN sources s ON s.id=f.source_id AND f.run_id=s.current_run_id
+                       LEFT JOIN channels c ON c.id=s.channel_id WHERE s.channel_id=? AND f.severity!='INFO' AND {NOT_SAMPLE}""", cid)["n"]
     tok = db.one("""SELECT SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(thinking_tokens,0)) n FROM model_calls m
                     JOIN runs r ON r.id=m.run_id JOIN sources s ON s.id=r.source_id WHERE s.channel_id=?""", cid)["n"] or 0
     active = db.one("""SELECT SUM(r.production='RUNNING') running, SUM(r.production IN ('QUEUED','WAITING','INTERRUPTED')) queued
@@ -922,8 +1050,9 @@ def _channel_stats(cid: str) -> dict:
                 weeks[WEEKS - 1 - ago] += 1
     out["weeks"] = weeks
     out["week_start"] = (monday - timedelta(weeks=WEEKS - 1)).isoformat()
-    last = db.one("""SELECT s.id, s.title, s.headline, s.published_at, s.delivery, r.finished_at FROM sources s
-                     JOIN runs r ON r.id=s.current_run_id WHERE s.channel_id=? ORDER BY r.finished_at DESC LIMIT 1""", cid)
+    last = db.one(f"""SELECT s.id, s.title, s.headline, s.published_at, s.delivery, r.finished_at FROM sources s
+                      JOIN runs r ON r.id=s.current_run_id LEFT JOIN channels c ON c.id=s.channel_id
+                      WHERE s.channel_id=? AND {NOT_SAMPLE} ORDER BY r.finished_at DESC LIMIT 1""", cid)
     out["last"] = last
     return out
 
@@ -947,20 +1076,21 @@ def channel_board(cid: str):
     from ..ingest import EVERY, backfill_held, next_round
     if not db.one("SELECT id FROM channels WHERE id=?", cid):
         raise HTTPException(404)
-    sources = db.q("SELECT * FROM sources WHERE channel_id=? ORDER BY created_at ASC", cid)
-    issues = [_issue(s, i + 1) for i, s in enumerate(sources)]
+    issues = _issues("s.channel_id=?", cid)
+    for i, it in enumerate(issues):
+        it["no"] = i + 1
     line = db.one("""SELECT COUNT(*) n, SUM(duration) seconds FROM backfill_queue WHERE channel_id=? AND status='PENDING'""", cid)
     now_run = db.one("""SELECT r.id, r.production, r.wait_reason, s.title FROM runs r JOIN sources s ON s.id=r.source_id
                         WHERE s.channel_id=? AND r.origin='backfill' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')""", cid)
     from ..tuning import minutes_per_video_minute
-    return {"stats": _channel_stats(cid), "issues": list(reversed(issues)),
+    return JSONResponse({"stats": _channel_stats(cid), "issues": list(reversed(issues)),
             "ingest": {**(db.setting(f"ingest:{cid}") or {"enabled": False}), "every_minutes": EVERY // 60, "next_at": next_round(),
                        "scanning": cid in _scanning},
             # held: the window ("weekly", "5h") that holds the waiting 补录 back
             "backfill": {"pending": line["n"], "seconds": line["seconds"] or 0, "running": now_run,
                          "held": backfill_held() if line["n"] else None},
             # for the 补录 sheet's estimate: minutes of production per minute of video here, and the weekly quota an issue takes
-            "pace": minutes_per_video_minute(cid), "runway": _runway()}
+            "pace": minutes_per_video_minute(cid), "runway": _runway()})  # plain JSON: as it is (a19)
 
 
 @app.post("/api/channels/{cid}/scan")
@@ -1062,7 +1192,8 @@ def _bg(fn, *args, label: str = "") -> None:
 
 # ------------------------------------------------------------------ 频道调试台
 def _tuning_error(e: ValueError):
-    raise HTTPException(400, str(e))
+    from ..tuning import StageMoved
+    raise HTTPException(409 if isinstance(e, StageMoved) else 400, str(e))
 
 
 @app.get("/api/channels/{cid}/workbench")
@@ -1080,8 +1211,8 @@ _feeds: dict[str, tuple[float, list]] = {}
 _listings: dict[tuple[str, int], dict] = {}
 
 
-def _marked(cid: str, entries: list[dict], lib: dict) -> list[dict]:
-    """Each video marked 已是样片 / 已在本刊 / 库里已有 / 补录排队中 / 太短."""
+def _marked(cid: str, entries: list[dict], lib: dict, maybe: dict | None = None) -> list[dict]:
+    """Each video marked 已是样片 / 已在本刊 / 库里已有 / 可能已有 / 补录排队中 / 太短."""
     samples = {r["source_id"] for r in db.q("SELECT source_id FROM samples WHERE channel_id=?", cid)}
     lined = {r["source_id"] for r in db.q("SELECT source_id FROM backfill_queue WHERE channel_id=? AND status='PENDING'", cid)}
     least = 60 * int((db.setting(f"ingest:{cid}") or {}).get("min_minutes") or 0)
@@ -1089,17 +1220,27 @@ def _marked(cid: str, entries: list[dict], lib: dict) -> list[dict]:
     for e in entries:
         s = db.one("SELECT current_run_id FROM sources WHERE id=?", e["id"])
         out.append({**e, "sample": e["id"] in samples, "produced": bool(s and s["current_run_id"]), "here": bool(s),
-                    "library": lib.get(e["id"]), "queued": e["id"] in lined,
+                    "library": lib.get(e["id"]), "maybe": (maybe or {}).get(e["id"]), "queued": e["id"] in lined,
                     "short": bool(least and e.get("duration") and e["duration"] < least)})
     return out
 
 
-def _library(cid: str, entries: list[dict]) -> dict:
+def _maybe(cid: str, entries: list[dict]) -> dict | None:
+    """video id → the hand-written page (no link) it may be (a05); None when the database could not be asked."""
+    from ..delivery import maybe_many
+    try:
+        return maybe_many({"channel_id": cid}, entries)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _library(cid: str, entries: list[dict]) -> dict | None:
+    """video id → its page in the channel's Notion database; None when the database could not be asked."""
     from ..delivery import registered_many
     try:
         return registered_many({"channel_id": cid}, [e["id"] for e in entries])
     except Exception:  # noqa: BLE001
-        return {}
+        return None
 
 
 @app.get("/api/channels/{cid}/candidates")
@@ -1122,7 +1263,7 @@ def channel_candidates(cid: str, limit: int = 15):
         _feeds[cid] = (time.monotonic(), entries)
     entries = entries[:max(1, min(limit, 15))]
     least = int((db.setting(f"ingest:{cid}") or {}).get("min_minutes") or 0)
-    return {"candidates": _marked(cid, entries, _library(cid, entries)), "min_minutes": least}
+    return {"candidates": _marked(cid, entries, _library(cid, entries) or {}), "min_minutes": least}
 
 
 def _listing(ch: dict, depth: int) -> dict:
@@ -1152,7 +1293,8 @@ def _listing(ch: dict, depth: int) -> dict:
             entries = listing(ch["youtube_channel_id"], depth)
             if not entries:  # the tabs were read but listed nothing
                 raise RuntimeError("yt-dlp 没有列出任何视频")
-            v = {"at": time.monotonic(), "entries": entries, "library": _library(cid, entries)}
+            lib = _library(cid, entries)
+            v = {"at": time.monotonic(), "entries": entries, "library": lib, "maybe": _maybe(cid, entries) if lib is not None else None}
         except Exception as e:  # noqa: BLE001
             v = {"error": f"读不到频道的视频：{e}"[:300]}
         with _board_lock:
@@ -1193,11 +1335,20 @@ def backfill_candidates(cid: str, since: str | None = Query(None, pattern=r"^\d{
     if r.get("error"):
         raise HTTPException(502, r["error"])
     entries = r["entries"]
+    lib, maybe = r["library"], r.get("maybe")
+    if lib is None or maybe is None:  # Notion could not be asked when the listing was read: ask again, and keep the answer
+        lib, maybe = lib if lib is not None else _library(cid, entries), maybe if maybe is not None else _maybe(cid, entries)
+        if lib is not None:
+            with _board_lock:
+                for (c, _), v in _listings.items():
+                    if c == cid and "entries" in v and (v.get("library") is None or v.get("maybe") is None):
+                        v.update(library=lib, maybe=maybe)
     inside = [e for e in entries if (not since or (e.get("published") or "")[:10] >= since)
               and (not until or (e.get("published") or "")[:10] <= until)]
     reached = len(entries) < depth or bool(since and oldest and oldest < since)
     least = int((db.setting(f"ingest:{cid}") or {}).get("min_minutes") or 0)
-    return {"candidates": _marked(cid, inside, r["library"]), "min_minutes": least, "listed": len(entries), "complete": reached}
+    return {"candidates": _marked(cid, inside, lib or {}, maybe), "min_minutes": least, "listed": len(entries), "complete": reached,
+            "library_checked": lib is not None}
 
 
 class SampleBody(BaseModel):
@@ -1255,7 +1406,7 @@ def channel_trial(cid: str, body: TrialBody):
 def channel_trial_clear(cid: str):
     from .. import tuning
     n = tuning.clear_queue(cid)
-    return {"cancelled": n, **tuning.workbench(cid)}
+    return {"cancelled": n, "stopped": tuning.stop_trials(cid), **tuning.workbench(cid)}
 
 
 @app.get("/api/compare")
@@ -1300,22 +1451,56 @@ def channel_lock_preview(cid: str, playbook_id: int):
     for s in out["samples"]:
         pg = lib.get(s["source_id"])
         own = s.pop("notion_page_id")
+        if not pg and own and not out["library_checked"]:  # Notion not answering: the page Assetizer wrote is still there
+            pg = {"id": own, "url": (db.one("SELECT notion_url FROM sources WHERE id=?", s["source_id"]) or {}).get("notion_url")}
         s["library"] = pg and {"url": pg.get("url"), "title": pg.get("title"), "owned": bool(own) and norm(own) == norm(pg.get("id"))}
         s["can_replace"] = bool(own) and (not out["library_checked"] or bool(s["library"] and s["library"]["owned"]))
+    out["missed"], out["missed_error"] = _missed(cid)
     return out
+
+
+def _missed(cid: str) -> tuple[list[dict], str | None]:
+    """What the channel posted while its intake stood still for tuning, for the 定稿单 to offer to 补录 (a11): not here,
+    not a sample, not lined up, not in the library, not too short. From the channel's listing, whose dates are rough —
+    so are the ends of the window."""
+    from .. import ingest
+    from ..delivery import registered_many
+    ch = db.one("SELECT * FROM channels WHERE id=?", cid)
+    cfg = db.setting(f"ingest:{cid}") or {}
+    since = cfg.get("paused_at")
+    if not since or ch["mode"] != "TRACKED" or not ch["youtube_channel_id"]:
+        return [], None
+    try:
+        entries = ingest.look(ch["youtube_channel_id"], 30)[0]
+    except Exception as e:  # noqa: BLE001
+        return [], f"读不到调试期间发的视频：{e}"[:200]
+    least = 60 * int(cfg.get("min_minutes") or 0)
+    samples = {r["source_id"] for r in db.q("SELECT source_id FROM samples WHERE channel_id=?", cid)}
+    new = [e for e in entries if (e.get("published") or "")[:10] >= since[:10] and e["id"] not in samples
+           and not db.one("SELECT 1 FROM sources WHERE id=?", e["id"])
+           and not db.one("SELECT 1 FROM backfill_queue WHERE source_id=? AND status='PENDING'", e["id"])
+           and not (least and e.get("duration") and e["duration"] < least)]
+    try:
+        lib = registered_many({"channel_id": cid}, [e["id"] for e in new]) if new else {}
+    except Exception:  # noqa: BLE001
+        lib = {}
+    return [{k: e.get(k) for k in ("id", "title", "published", "duration")} for e in new if e["id"] not in lib], None
 
 
 class LockBody(BaseModel):
     playbook_id: int
     samples: list[dict] = []
     ingest: dict | None = None
+    backfill: list[BackfillItem] = []  # posted while tuned: lined up for 补录 (a11)
 
 
 @app.post("/api/channels/{cid}/lock")
 def channel_lock(cid: str, body: LockBody):
     from .. import tuning
+    ing = body.ingest and {**body.ingest, "enabled": bool(body.ingest.get("enabled", True)),
+                           "min_minutes": _minutes(body.ingest.get("min_minutes"))}
     try:
-        return tuning.lock(cid, body.playbook_id, body.samples, body.ingest)
+        return tuning.lock(cid, body.playbook_id, body.samples, ing, [v.model_dump() for v in body.backfill])
     except tuning.LockRefused as e:
         raise HTTPException(409, str(e))
     except ValueError as e:
@@ -1377,6 +1562,7 @@ def _notion_view(cid: str, cfg: dict) -> dict:
                 except NotionError:
                     titles[pid] = None
     return {"database": {"id": dbo["id"], "url": dbo.get("url"), "title": "".join(t.get("plain_text", "") for t in dbo.get("title", []))},
+            "rev": (M.get(cid) or {}).get("rev") or 0,  # what a save is checked against (a12)
             "test_copy": M.test_copy(cfg, title),
             "config": {k: cfg.get(k) for k in ("template", "heading", "icon")}, **view, "page_titles": titles,
             "sample_source": s and {"id": s["id"], "title": s["title"]},
@@ -1407,6 +1593,8 @@ class NotionMapping(BaseModel):
     template: str = "default"
     heading: str = ""
     icon: str = "none"
+    rev: int | None = None  # the revision the page read: saved since by another device → 412, unless `force` (a12)
+    force: bool = False
 
 
 @app.post("/api/channels/{cid}/notion")
@@ -1416,11 +1604,14 @@ def channel_notion_save(cid: str, body: NotionMapping):
     cfg = M.get(cid)
     if not cfg or not cfg.get("database_id"):
         raise HTTPException(409, "这个频道还没有 Notion 目标")
+    rev = cfg.get("rev") or 0
+    if body.rev is not None and body.rev != rev and not body.force:
+        raise HTTPException(412, "这个频道的 Notion 设置刚在别处改过")
     try:
-        cfg = PV.draft_config(cfg, body.model_dump())
+        cfg = PV.draft_config(cfg, body.model_dump(exclude={"rev", "force"}))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    M.save(cid, cfg)
+    M.save(cid, {**cfg, "rev": rev + 1})
     # sources paused on the old mapping try again now
     db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL
                WHERE channel_id=? AND delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%'""", cid)
@@ -1534,7 +1725,7 @@ def channel_notion_target(cid: str, body: TargetBody):
     else:
         cfg, repick, dropped = M.preset(cid, dbid, schema, body.parent_page_id), [], []
     title = "".join(t.get("plain_text", "") for t in dbo.get("title", []))
-    cfg.update(database_id=dbid, database_title=title, is_test_copy=body.is_test_copy)
+    cfg.update(database_id=dbid, database_title=title, is_test_copy=body.is_test_copy, rev=((M.get(cid) or {}).get("rev") or 0) + 1)
     M.save(cid, cfg)
     PV.forget(f"db:{dbid}")
     db.exec("""UPDATE sources SET delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END, delivery_reason=NULL
@@ -1570,7 +1761,13 @@ def channel_prompt(cid: str, body: PromptBody):
         raise HTTPException(404)
     if len(body.text.strip()) < 30:
         raise HTTPException(400, "Prompt 太短")
+    from datetime import datetime, timedelta, timezone
+    from ..util import sha256_text
+    was = db.one("SELECT id, created_at FROM channel_prompts WHERE channel_id=? AND sha256=?", cid, sha256_text(body.text.strip()))
     pid = add_prompt_version(cid, body.text.strip(), "manual", body.note)
+    if was and datetime.fromisoformat(was["created_at"]) > datetime.now(timezone.utc) - timedelta(minutes=15) and \
+            (_compile_state(cid, was, db.q("SELECT id, prompt_id FROM playbooks WHERE channel_id=?", cid)) or {}).get("state") == "running":
+        return {"prompt_id": pid, "compiling": True}  # this very text is being compiled (a double click, another tab)
     _bg(compile_prompt, cid, pid, label=f"Playbook 编译（{cid}）")
     db.event("compile", f"{cid} 原始 Prompt 新版本已保存，开始编译")
     return {"prompt_id": pid, "compiling": True}
@@ -1809,7 +2006,8 @@ def asr_test():
 def _telegram_view() -> dict:
     s = config.get()
     return {"token": bool(s.secret("telegram-bot-token")), "chat": bool(s.secret("telegram-chat-id")),
-            "linked": db.setting("telegram_chat"), "digest_hour": knobs.get("digest_hour")}
+            "linked": db.setting("telegram_chat"), "digest_hour": knobs.get("digest_hour"),
+            **(db.setting("telegram_state") or {"ok": None}), "pending": notify.pending()}
 
 
 @app.post("/api/telegram")
@@ -1834,7 +2032,6 @@ async def telegram_save(request: Request):
 @app.post("/api/telegram/setup")
 def telegram_setup():
     """Find the chat that last messaged the bot, keep it, send a test message (notify.setup)."""
-    from .. import notify
     if busy := _throttled("telegram", 5.0):
         return busy
     try:

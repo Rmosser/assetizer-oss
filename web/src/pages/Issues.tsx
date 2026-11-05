@@ -7,7 +7,7 @@ import { Fold } from "../components/Fold";
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDate, cnDay, cnMonth, cnNum, parseDay, PRODUCTION, STOPS, WAIT } from "../util";
+import { cnDate, cnDay, cnMonth, cnNum, HELD, parseDay, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
 
 type Stage = { name: string; label: string; status: string; started_at?: string };
 
@@ -45,14 +45,17 @@ export function PressLine({ run }: { run: any }) {
 
 const headOf = (it: any) => issueHeadline(it.headline, it.musts?.[0]?.title, it.title);
 const producing = (it: any) => ["QUEUED", "RUNNING", "WAITING", "INTERRUPTED"].includes(it.production) && !it.units;
+/** nothing was made and nothing will be: too short to take, or a video no login opens, put away */
+const dropped = (it: any) => it.production === "CANCELLED" && it.units == null;
 const issueHref = (it: any, hash = "") => `/issue/${encodeURIComponent(it.id)}${hash}`;
 
 /** Quiet when all is well (the issue is in Notion); speaks only for samples, production and delivery trouble. */
 function State({ it }: { it: any }) {
   if (producing(it)) return <span className="st wip">{it.production === "WAITING" ? "等待中" : it.production === "RUNNING" ? "付印中" : "排队中"}</span>;
-  if (it.tuning) return <span className="st" title="调试中频道的样片，定稿后写入 Notion">样片</span>;
+  if (it.sample) return <span className="st" title="调试中频道的样片，定稿后写入 Notion">样片</span>;
   if (it.delivery === "FAILED") return <span className="st pi">交付失败</span>;
   if (it.delivery === "REGISTERED") return <span className="st" title="Notion 里已有这个视频的页面，没有重复写入">已登记</span>;
+  if (it.delivery === "HELD" && HELD[it.delivery_reason]) return <span className="st pi">{HELD[it.delivery_reason]}</span>;
   if (it.delivery !== "DELIVERED") return <span className="st">未入 Notion</span>;
   return null;
 }
@@ -84,7 +87,7 @@ function Feature({ it }: { it: any }) {
         <div className="feature-foot">
           {it.notion_url ? (
             <a className="go" href={it.notion_url} target="_blank" rel="noreferrer">在 Notion 阅读 <span className="arrow">↗</span></a>
-          ) : <span className="muted">{it.tuning ? "样片" : "未入 Notion"}</span>}
+          ) : <span className="muted">{it.sample ? "样片" : "未入 Notion"}</span>}
           <a className="go quiet" {...linkProps(issueHref(it))}>对照原视频 <span className="arrow">→</span></a>
         </div>
       </div>
@@ -102,7 +105,7 @@ export function Row({ it, own }: { it: any; own?: boolean }) {
   return (
     <li>
       <a className={`toc-row${compact ? " compact" : ""}`} {...linkProps(issueHref(it))}>
-        <div className="toc-no"><span className="num">{String(it.no).padStart(3, "0")}</span></div>
+        <div className="toc-no"><span className="num">{it.no == null ? "—" : String(it.no).padStart(3, "0")}</span></div>
         <div className="cover">
           {it.cover ? <img src={media(it.cover, 320)} srcSet={srcSet(it.cover, [320, 640])} sizes="120px" alt="" loading="lazy" /> : <span className="ph">刊</span>}
         </div>
@@ -162,7 +165,7 @@ function mockIssues(issues: any[]): any[] {
   const base = issues[0];
   return Array.from({ length: n }, (_, i) => {
     const d = new Date(2026, 8, 8 - i * 3);
-    return { ...base, id: `${base.id}`, no: n - i, tuning: i % 7 === 2, delivery: i % 9 === 4 ? "FAILED" : base.delivery,
+    return { ...base, id: `${base.id}`, no: n - i, tuning: i % 7 === 2, sample: i % 7 === 2, delivery: i % 9 === 4 ? "FAILED" : base.delivery,
       published_at: `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}` };
   });
 }
@@ -198,16 +201,23 @@ function Dateline({ ready }: { ready: any[] }) {
 /** What needs the reader: system alerts (with what fixes them), videos whose production failed, issues that did not
  *  reach Notion, decisions. */
 function Attention({ data, issues, reload }: { data: any; issues: any[]; reload: () => void }) {
-  const broke = issues.filter((i) => !i.tuning && i.production === "FAILED" && i.units == null && i.latest_run);
+  const failedRun = (i: any) => !i.tuning && i.production === "FAILED" && i.units == null && i.latest_run;
+  const gone = issues.filter((i) => failedRun(i) && UNAVAILABLE[i.error_class]);
+  const broke = issues.filter((i) => failedRun(i) && !UNAVAILABLE[i.error_class]);
   const failed = issues.filter((i) => !i.tuning && i.delivery === "FAILED");
   const mapping = issues.filter((i) => !i.tuning && i.delivery === "BLOCKED" && (i.delivery_reason || "").startsWith("NOTION_MAPPING"));
+  const held = (why: string) => issues.filter((i) => !i.tuning && i.delivery === "HELD" && i.delivery_reason === why);
+  const partial = held("PARTIAL");  // a08: missing what a stage did not finish; written once a retry completes it
+  const maybe = held("MAYBE_HAVE").filter((i) => i.maybe);  // a05: a page written by hand it may be
+  const yours = held("YOURS_ON_PAGE");  // a07: someone did something on the page it would replace
   const [busy, setBusy] = useState<string | null>(null);
-  const act = async (id: string, path: string) => {
+  const act = async (id: string, path: string, body?: unknown) => {
     setBusy(id);
-    try { await post(path); } finally { setBusy(null); reload(); }
+    try { await post(path, body); } finally { setBusy(null); reload(); }
   };
   const retry = (sid: string) => act(sid, `/api/sources/${encodeURIComponent(sid)}/deliver`);
-  if (!data.alerts.length && !broke.length && !failed.length && !mapping.length && !data.decisions.length) return null;
+  if (!data.alerts.length && !broke.length && !gone.length && !failed.length && !partial.length && !maybe.length && !yours.length
+    && !mapping.length && !data.decisions.length) return null;
   return (
     <section className="attn" aria-label="需要你">
       {data.alerts.map((a: any) => {
@@ -239,6 +249,23 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
           {broke.length > 3 && <a className="btn sm" {...linkProps("/engine")}>全部 {broke.length} 期</a>}
         </div>
       )}
+      {gone.length > 0 && (
+        <div className="attn-row">
+          <span className="mark" aria-hidden />
+          <div className="attn-t">
+            <h4>{gone.length} 期视频不可用</h4>
+            <ul className="attn-list">
+              {gone.slice(0, 3).map((i) => (
+                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+                  <span className="muted">{UNAVAILABLE[i.error_class]}</span>
+                  <button className="btn sm" disabled={busy === i.id}
+                    onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/ignore`)}>忽略</button></li>
+              ))}
+            </ul>
+          </div>
+          {gone.length > 3 && <a className="btn sm" {...linkProps("/engine")}>全部 {gone.length} 期</a>}
+        </div>
+      )}
       {failed.length > 0 && (
         <div className="attn-row bad">
           <span className="mark" aria-hidden />
@@ -248,6 +275,66 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
               {failed.slice(0, 3).map((i) => (
                 <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
                   <button className="btn sm" disabled={busy === i.id} onClick={() => retry(i.id)}>重试</button></li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+      {partial.length > 0 && (
+        <div className="attn-row bad">
+          <span className="mark" aria-hidden />
+          <div className="attn-t">
+            <h4>{partial.length} 期部分完成，补齐后写进 Notion</h4>
+            <ul className="attn-list">
+              {partial.slice(0, 3).map((i) => (
+                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+                  {i.production === "COMPLETE_PARTIAL" && (
+                    <button className="btn sm" disabled={busy === i.id}
+                      onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button>
+                  )}</li>
+              ))}
+            </ul>
+          </div>
+          {partial.length > 3 && <a className="btn sm" {...linkProps("/engine")}>全部 {partial.length} 期</a>}
+        </div>
+      )}
+      {maybe.length > 0 && (
+        <div className="attn-row">
+          <span className="mark" aria-hidden />
+          <div className="attn-t">
+            <h4>{maybe.length} 期库里可能已有</h4>
+            <ul className="attn-list">
+              {maybe.map((i) => (
+                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+                  <a className="muted" href={i.maybe.url} target="_blank" rel="noreferrer">{i.maybe.title || "库里那页"} ↗</a>
+                  <span className="attn-acts">
+                    <button className="btn sm" disabled={busy === i.id}
+                      onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/maybe`, { write: false })}>算已有</button>
+                    <button className="btn sm" disabled={busy === i.id}
+                      onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/maybe`, { write: true })}>照写</button>
+                  </span></li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+      {yours.length > 0 && (
+        <div className="attn-row">
+          <span className="mark" aria-hidden />
+          <div className="attn-t">
+            <h4>{yours.length} 期旧页上有你的改动</h4>
+            <ul className="attn-list">
+              {yours.map((i) => (
+                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+                  {i.notion_url
+                    ? <a className="muted" href={i.notion_url} target="_blank" rel="noreferrer">{(i.yours || []).join("、")} ↗</a>
+                    : <span className="muted">{(i.yours || []).join("、")}</span>}
+                  <span className="attn-acts">
+                    <button className="btn sm" disabled={busy === i.id}
+                      onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/replace`, { replace: false })}>留着旧页</button>
+                    <button className="btn sm" disabled={busy === i.id}
+                      onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/replace`, { replace: true })}>换新页</button>
+                  </span></li>
               ))}
             </ul>
           </div>
@@ -403,11 +490,12 @@ export default function Issues() {
   }, [reload]);
   if (!data) return <main className="page">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   const issues: any[] = mockIssues(data.issues);
-  const ready = issues.filter((i) => i.units != null);
+  // a sample (tried out while its channel is tuned, not in Notion) is not an issue: not counted, never 本期
+  const ready = issues.filter((i) => i.units != null && !i.sample);
   // newest by the video's own date: an older video taken in late (补录) neither becomes 本期 nor opens 往期
   const byDate = [...issues].sort((a, b) => when(b) - when(a));
-  const feature = byDate.find((i) => i.units != null) || byDate.find((i) => !producing(i));
-  const rest = byDate.filter((i) => i !== feature && !producing(i));  // what is still being made is under 付印
+  const feature = byDate.find((i) => i.units != null && !i.sample) || byDate.find((i) => !producing(i) && !i.sample && !dropped(i));
+  const rest = byDate.filter((i) => i !== feature && !producing(i) && !dropped(i));  // what is still being made is under 付印
 
   return (
     <main className="page home">

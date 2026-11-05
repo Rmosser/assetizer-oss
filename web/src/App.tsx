@@ -35,15 +35,55 @@ function ThemeToggle() {
   );
 }
 
-async function submitUrl(url: string): Promise<string> {
-  const r = await post("/api/submit", { url: url.trim() });
+/** What a paste came to; `kept`: the video is in Notion already — its page, and 重印 to print it again (a06). */
+type Said = { text: string; err?: boolean; kept?: { url: string; notion_url: string | null; again: boolean } };
+
+async function submitUrl(url: string, reprint = false): Promise<Said> {
+  const r = await post("/api/submit", { url: url.trim(), reprint });
   window.dispatchEvent(new Event("az:refresh"));
-  return r.existing ? "这一期已在队列里" : "已加入付印队列";
+  if (r.items) {  // several links at once
+    const had = r.items.filter((i: any) => i.existing).length;
+    const kept = r.items.filter((i: any) => i.kept).length;
+    const aside = [had && `${had} 期已在队列里`, kept && `${kept} 期已在刊`].filter(Boolean).join("，");
+    return { text: `已排上 ${r.items.length - had - kept} 期${aside ? `（${aside}）` : ""}` };
+  }
+  if (r.kept) {  // REGISTERED: the page is the user's own, which a reprint would never replace
+    return { text: r.kept === "REGISTERED" ? "库里已有这一期" : "这一期已在刊", kept: { url, notion_url: r.notion_url, again: r.kept === "DELIVERED" } };
+  }
+  return { text: r.existing ? "这一期已在队列里" : "已加入付印队列" };
 }
+
+/** A paste's answer; one already in Notion links its page and offers 重印. */
+function SaidLine({ said, onSaid }: { said: Said; onSaid: (s: Said) => void }) {
+  const [busy, setBusy] = useState(false);
+  const k = said.kept;
+  const again = async () => {
+    setBusy(true);
+    try { onSaid(await submitUrl(k!.url, true)); } catch (err) { onSaid({ text: String((err as Error).message || err), err: true }); }
+    setBusy(false);
+  };
+  return (
+    <>
+      {said.text}
+      {k?.notion_url && <a href={k.notion_url} target="_blank" rel="noreferrer">Notion ↗</a>}
+      {k?.again && <button type="button" className="link" disabled={busy} onClick={again}>重印</button>}
+    </>
+  );
+}
+
+/** A one-line field drops the line breaks of a pasted list of links: keep them apart with spaces. */
+const pasteLines = (set: (v: string) => void) => (e: React.ClipboardEvent<HTMLInputElement>) => {
+  const t = e.clipboardData.getData("text");
+  if (!/\n/.test(t)) return;
+  e.preventDefault();
+  const el = e.currentTarget;
+  set((el.value.slice(0, el.selectionStart ?? el.value.length) + " " + t.trim().split(/\s+/).join(" ") + " "
+    + el.value.slice(el.selectionEnd ?? el.value.length)).trim());
+};
 
 function Paste() {
   const [v, setV] = useState("");
-  const [hint, setHint] = useState<string | null>(null);
+  const [hint, setHint] = useState<Said | null>(null);
   const hintOut = useLeaving(hint);
   const hintT = useRef<number | undefined>(undefined);
   const ref = useRef<HTMLInputElement>(null);
@@ -56,49 +96,56 @@ function Paste() {
     addEventListener("az:focus-paste", focus);
     return () => { removeEventListener("keydown", on); removeEventListener("az:focus-paste", focus); };
   }, []);
+  const say = (s: Said) => {
+    setHint(s);
+    clearTimeout(hintT.current);
+    hintT.current = window.setTimeout(() => setHint(null), s.kept ? 8000 : 2600);  // time to open the page or 重印
+  };
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!v.trim()) return;
-    try { setHint(await submitUrl(v)); setV(""); }
-    catch (err) { setHint(String((err as Error).message || err)); }
-    clearTimeout(hintT.current);
-    hintT.current = window.setTimeout(() => setHint(null), 2600);
+    try { say(await submitUrl(v)); setV(""); }
+    catch (err) { say({ text: String((err as Error).message || err), err: true }); }
   };
   return (
     <form className="paste" onSubmit={submit}>
-      <input ref={ref} value={v} onChange={(e) => setV(e.target.value)} placeholder="粘贴 YouTube 链接" aria-label="提交视频链接" inputMode="url" />
+      <input ref={ref} value={v} onChange={(e) => setV(e.target.value)} onPaste={pasteLines(setV)} placeholder="粘贴 YouTube 链接" aria-label="提交视频链接" inputMode="url" />
       <kbd>⌘K</kbd>
-      {hintOut.shown && <span className={`hint${hintOut.leaving ? " leaving" : ""}`} role="status">{hintOut.shown}</span>}
+      {hintOut.shown && <span className={`hint${hintOut.leaving ? " leaving" : ""}`} role="status"><SaidLine said={hintOut.shown} onSaid={say} /></span>}
     </form>
   );
 }
 
 function PasteSheet({ onClose }: { onClose: () => void }) {
   const [v, setV] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<Said | null>(null);
   const [busy, setBusy] = useState(false);
   const sheet = useRef<SheetHandle>(null);
+  const said = (s: Said) => {  // one in Notion already stays open: its page, or 重印
+    setMsg(s);
+    if (!s.err && !s.kept) setTimeout(() => sheet.current?.close(), 1100);
+  };
   const go = async (url: string) => {
     if (!url.trim()) return;
     setBusy(true);
-    try { setMsg(await submitUrl(url)); setV(""); setTimeout(() => sheet.current?.close(), 1100); }
-    catch (err) { setMsg(String((err as Error).message || err)); }
+    try { said(await submitUrl(url)); setV(""); }
+    catch (err) { setMsg({ text: String((err as Error).message || err), err: true }); }
     setBusy(false);
   };
   const fromClipboard = async () => {
     try { const t = await navigator.clipboard.readText(); setV(t); if (/youtu/.test(t)) go(t); }
-    catch { setMsg("无法读取剪贴板，请手动粘贴"); }
+    catch { setMsg({ text: "无法读取剪贴板，请手动粘贴", err: true }); }
   };
   return (
     <Sheet ref={sheet} title="付印一期" onClose={onClose}>
       <form className="sheet-form" onSubmit={(e) => { e.preventDefault(); go(v); }}>
-        <input value={v} onChange={(e) => setV(e.target.value)} placeholder="https://youtu.be/…" aria-label="视频链接" inputMode="url" autoComplete="off" />
+        <input value={v} onChange={(e) => setV(e.target.value)} onPaste={pasteLines(setV)} placeholder="https://youtu.be/…" aria-label="视频链接" inputMode="url" autoComplete="off" />
         <div className="sheet-row">
           <button type="button" className="btn" onClick={fromClipboard}>从剪贴板粘贴</button>
           <button type="submit" className="btn solid" disabled={busy || !v.trim()}>付印</button>
         </div>
       </form>
-      {msg && <p className="sheet-msg" role="status">{msg}</p>}
+      {msg && <p className={`sheet-msg${msg.err ? " err" : ""}`} role="status"><SaidLine said={msg} onSaid={said} /></p>}
     </Sheet>
   );
 }
@@ -111,7 +158,7 @@ function Share() {
     const raw = q.get("url") || q.get("text") || "";
     const url = raw.match(/https?:\/\/\S+/)?.[0] || raw;
     if (!url) { navigate("/", { replace: true }); return; }
-    submitUrl(url).then((m) => { setMsg(m); setTimeout(() => navigate("/", { replace: true }), 900); })
+    submitUrl(url).then((m) => { setMsg(m.text); setTimeout(() => navigate("/", { replace: true }), 900); })
       .catch((e) => setMsg(String((e as Error).message || e)));
   }, []);
   return <main className="page"><div className="state-block"><h3>{msg}</h3></div></main>;

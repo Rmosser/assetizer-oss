@@ -175,6 +175,11 @@ def take(c: dict, en: dict, why: str, priority: int = 0, origin: str = "ingest",
     return "queued", r["run_id"]
 
 
+def _judged_short(vid: str) -> bool:
+    runs = db.q("SELECT production, error_class FROM runs WHERE source_id=?", vid)
+    return bool(runs) and all(r["production"] == "CANCELLED" and r["error_class"] == "SKIPPED_SHORT" for r in runs)
+
+
 def scan(c: dict, cfg: dict) -> dict:
     """One look at the channel's feed: what came out after intake was switched on (`since`) is queued, unless it is
     shorter than the channel's minimum or already here. The counts, and what keeps members-only videos from coming in
@@ -188,6 +193,10 @@ def scan(c: dict, cfg: dict) -> dict:
         db.event("ingest", f"{c['name']} 读不到频道的视频：{e}", level="warn")
         out["error"] = str(e)[:300]
         entries, read = [], set()
+        from .youtube import classify
+        if classify(str(e)) == "TOOL_OUTDATED":
+            from .pipeline.runner import ALERT_TEXT
+            db.raise_alert("YTDLP_OUTDATED", "critical", *ALERT_TEXT["YTDLP_OUTDATED"])
     since = cfg.get("since") or now()
     listed = [en["id"] for en in entries if en.get("tab") == "shorts"]
     seen = None if "shorts_seen" not in cfg else set(cfg["shorts_seen"])
@@ -205,7 +214,10 @@ def scan(c: dict, cfg: dict) -> dict:
             out["short"] += 1
             continue
         try:
-            state = None if db.one("SELECT id FROM sources WHERE id=?", en["id"]) else take(c, en, "自动收录")[0]
+            have = db.one("SELECT id FROM sources WHERE id=?", en["id"])
+            # listed long enough now, but so far only cancelled as too short (its length unread then, taken for 0; or a
+            # higher minimum): judged again
+            state = None if have and not (en.get("duration") and _judged_short(en["id"])) else take(c, en, "自动收录")[0]
         except sqlite3.IntegrityError:  # a 立即扫描 and the worker's round took the same video at once: the other has it
             state = None
         if state is None:
@@ -281,7 +293,7 @@ def dispatch_backfill() -> str | None:
         return None
     if db.one("SELECT 1 FROM runs WHERE origin='backfill' AND production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')"):
         return None
-    if db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','DISK_LOW')"):
+    if db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','YOUTUBE_REFUSED','DISK_LOW','YTDLP_OUTDATED')"):
         return None
     if not db.one("SELECT 1 FROM backfill_queue WHERE status='PENDING'") or backfill_held():
         return None
@@ -321,5 +333,9 @@ def set_enabled(channel_id: str, enabled: bool, min_minutes: int | None = None) 
     cfg.setdefault("min_minutes", 10)
     if enabled and (not was_on or not cfg.get("since")):
         cfg["since"] = now()
+    if was_on and not enabled:
+        cfg["paused_at"] = now()  # what comes out from now on is not taken: the 定稿单 offers it to 补录 (a11)
+    elif enabled:
+        cfg.pop("paused_at", None)
     db.set_setting(f"ingest:{channel_id}", cfg)
     return cfg

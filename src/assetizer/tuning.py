@@ -7,6 +7,8 @@ until 定稿 (delivery waits on the channel stage), so a draft cannot overwrite 
 """
 from __future__ import annotations
 
+import sqlite3
+
 from . import db
 from .util import now
 
@@ -16,6 +18,11 @@ LOCK_ACTIONS = ("write", "keep", "replace", "wait")
 STAGE_COST = {"RESOLVE": 0.1, "PLAYBOOK": 0, "ACQUIRE": 3, "CHUNK": 0.3, "UNDERSTAND": 12, "MERGE": 2, "KNOWLEDGE": 8,
               "ARTICLE": 8, "SELECT": 1, "SCREENSHOTS": 0.5, "BOUNDARY": 14, "CLIPS": 30, "SUBTITLES": 10, "MEDIA_QA": 2,
               "REVIEW_CHECK": 2, "COMPOSE": 0, "PACKAGE": 0.2, "CLEANUP": 0, "TRANSCRIBE": 0}
+
+
+class StageMoved(ValueError):
+    """The channel is no longer in the stage the request was made in (locked or retuned from another device): the
+    page that asked is out of date (409)."""
 
 
 class LockRefused(ValueError):
@@ -48,8 +55,10 @@ def trial(channel_id: str, playbook_ids: int | list[int], source_ids: list[str] 
     (a version's 试跑 N 期) only the pairs that have no run yet are queued; a listed sample is run again on purpose.
     The queue is worked through one run at a time by the worker (dispatch_next)."""
     ch = db.one("SELECT * FROM channels WHERE id=?", channel_id)
-    if not ch or ch["stage"] != "TUNING":
-        raise ValueError("只有调试中的频道可以试跑；已定稿的频道请先「回到调试期」")
+    if not ch:
+        raise ValueError("找不到这个频道")
+    if ch["stage"] != "TUNING":
+        raise StageMoved("这个频道已经定稿了，不能再试跑；要试跑请先「回到调试期」")
     pids = [playbook_ids] if isinstance(playbook_ids, int) else list(playbook_ids)
     pbs = {p["id"]: p for p in db.q(f"SELECT id, version FROM playbooks WHERE channel_id=? AND id IN ({','.join('?' * len(pids))})",
                                     channel_id, *pids)} if pids else {}
@@ -57,21 +66,26 @@ def trial(channel_id: str, playbook_ids: int | list[int], source_ids: list[str] 
         raise ValueError("规程版本不属于这个频道")
     ids = source_ids or [r["source_id"] for r in db.q("SELECT source_id FROM samples WHERE channel_id=? ORDER BY added_at", channel_id)]
     out = []
-    for sid in ids:
-        if not db.one("SELECT 1 FROM samples WHERE channel_id=? AND source_id=?", channel_id, sid):
-            continue
-        for pid in pids:
-            if source_ids is None and db.one("SELECT 1 FROM runs WHERE source_id=? AND playbook_id=?", sid, pid):
-                out.append({"source_id": sid, "playbook_id": pid, "skipped": "已跑过"})
+    with db.tx():  # what is checked stays so until it is in: two requests at the same moment queue a pair once
+        for sid in ids:
+            if not db.one("SELECT 1 FROM samples WHERE channel_id=? AND source_id=?", channel_id, sid):
                 continue
-            dup = db.one("""SELECT 1 FROM trial_queue q LEFT JOIN runs r ON r.id=q.run_id WHERE q.source_id=? AND q.playbook_id=?
-                            AND (q.status='PENDING' OR (q.status='DISPATCHED' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')))""",
-                         sid, pid)
-            if dup:
-                out.append({"source_id": sid, "playbook_id": pid, "skipped": "已在排队"})
-                continue
-            db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES (?,?,?,?)", channel_id, sid, pid, now())
-            out.append({"source_id": sid, "playbook_id": pid, "queued": True})
+            for pid in pids:
+                if source_ids is None and db.one("SELECT 1 FROM runs WHERE source_id=? AND playbook_id=?", sid, pid):
+                    out.append({"source_id": sid, "playbook_id": pid, "skipped": "已跑过"})
+                    continue
+                dup = db.one("""SELECT 1 FROM trial_queue q LEFT JOIN runs r ON r.id=q.run_id WHERE q.source_id=? AND q.playbook_id=?
+                                AND (q.status='PENDING' OR (q.status='DISPATCHED' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')))""",
+                             sid, pid)
+                if dup:
+                    out.append({"source_id": sid, "playbook_id": pid, "skipped": "已在排队"})
+                    continue
+                try:
+                    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES (?,?,?,?)", channel_id, sid, pid, now())
+                except sqlite3.IntegrityError:  # queued already (index trial_queue_pending)
+                    out.append({"source_id": sid, "playbook_id": pid, "skipped": "已在排队"})
+                    continue
+                out.append({"source_id": sid, "playbook_id": pid, "queued": True})
     n = sum(1 for x in out if x.get("queued"))
     if n:
         db.event("tuning", f"{ch['name']} 排入 {n} 次试跑（规程 {'、'.join(f'v{pbs[p]['version']}' for p in pids)}）")
@@ -85,26 +99,56 @@ def dispatch_next() -> str | None:
     from .pipeline.runner import submit
     if db.one("SELECT 1 FROM runs WHERE production='QUEUED'"):
         return None
-    # a login or disk problem stops every video alike: wait for it instead of sending the whole queue into it
-    if db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','DISK_LOW')"):
+    # a login, disk or yt-dlp problem stops every video alike: wait for it instead of sending the whole queue into it
+    if db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','YOUTUBE_REFUSED','DISK_LOW','YTDLP_OUTDATED')"):
         return None
-    for e in db.q("SELECT * FROM trial_queue WHERE status='PENDING' ORDER BY id"):
-        ch = db.one("SELECT stage FROM channels WHERE id=?", e["channel_id"])
-        if not ch or ch["stage"] != "TUNING":
-            db.exec("UPDATE trial_queue SET status='CANCELLED' WHERE id=?", e["id"])
-            continue
-        if db.one(f"SELECT 1 FROM runs WHERE source_id=? AND production IN {ACTIVE_RUN}", e["source_id"]):
-            continue  # this video is waiting on something of its own (e.g. a live not yet over): the next one goes first
-        r = submit(f"https://www.youtube.com/watch?v={e['source_id']}", playbook_id=e["playbook_id"], origin="trial")
-        db.exec("UPDATE trial_queue SET status='DISPATCHED', run_id=?, dispatched_at=? WHERE id=?", r["run_id"], now(), e["id"])
-        db.set_setting("trial_batch", (db.setting("trial_batch") or 0) + 1)  # the worker says when the batch is done
-        return r["run_id"]
+    if not db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'"):
+        return None
+    # one dispatcher at a time — the web right after queueing, the worker with a free slot: what it reads stays so until
+    # its run is in and the row points to it (else both start the same video, or one version lands on the other's run)
+    with db.tx():
+        for e in db.q("SELECT * FROM trial_queue WHERE status='PENDING' ORDER BY id"):
+            ch = db.one("SELECT stage FROM channels WHERE id=?", e["channel_id"])
+            if not ch or ch["stage"] != "TUNING":
+                db.exec("UPDATE trial_queue SET status='CANCELLED' WHERE id=?", e["id"])
+                continue
+            if db.one(f"SELECT 1 FROM runs WHERE source_id=? AND production IN {ACTIVE_RUN}", e["source_id"]):
+                continue  # this video is waiting on something of its own (e.g. a live not yet over): the next one goes first
+            if not db.connect().execute("UPDATE trial_queue SET status='DISPATCHED', dispatched_at=? WHERE id=? AND status='PENDING'",
+                                        (now(), e["id"])).rowcount:
+                return None
+            r = submit(f"https://www.youtube.com/watch?v={e['source_id']}", playbook_id=e["playbook_id"], origin="trial")
+            db.exec("UPDATE trial_queue SET run_id=? WHERE id=?", r["run_id"], e["id"])
+            db.set_setting("trial_batch", (db.setting("trial_batch") or 0) + 1)  # the worker says when the batch is done
+            return r["run_id"]
     return None
 
 
 def clear_queue(channel_id: str) -> int:
     # rowcount, not db.exec(): that returns the connection's last insert id for an UPDATE too
     return db.connect().execute("UPDATE trial_queue SET status='CANCELLED' WHERE channel_id=? AND status='PENDING'", (channel_id,)).rowcount
+
+
+def stop_trials(channel_id: str) -> int:
+    """清空 stops the spending too (a10): every run of the channel's samples that waits or runs. One not on a worker stops
+    now; a running one at its next step (the worker kills its model call). The stages done are kept for 重试."""
+    ch = db.one("SELECT stage FROM channels WHERE id=?", channel_id)
+    if not ch or ch["stage"] != "TUNING":
+        return 0
+    n, c = 0, db.connect()
+    for r in db.q(f"""SELECT r.id FROM runs r JOIN samples sm ON sm.source_id=r.source_id AND sm.channel_id=?
+                     WHERE r.production IN {ACTIVE_RUN}""", channel_id):
+        if c.execute("""UPDATE runs SET production='CANCELLED', error_class='STOPPED', error='清空时停下', stop_at=?, finished_at=?
+                        WHERE id=? AND production IN ('QUEUED','WAITING','INTERRUPTED')""", (now(), now(), r["id"])).rowcount:
+            release_hold(r["id"])
+            n += 1
+        elif c.execute("UPDATE runs SET stop_at=? WHERE id=? AND production='RUNNING'", (now(), r["id"])).rowcount:
+            n += 1
+    if not db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'") and not db.one(
+            f"""SELECT 1 FROM trial_queue t JOIN runs r ON r.id=t.run_id WHERE t.status='DISPATCHED'
+               AND r.production IN {ACTIVE_RUN} AND r.stop_at IS NULL"""):
+        db.set_setting("trial_batch", None)  # what was stopped is no 「试跑全部跑完」
+    return n
 
 
 def vote(run_id: str, liked: bool, note: str | None) -> dict:
@@ -291,9 +335,11 @@ def compare(run_a: str, run_b: str) -> dict:
 
 def adopt(source_id: str, run_id: str | None = None, pinned: bool = True) -> dict:
     """Pin a finished run as the issue's version, or (pinned=False) follow the newest finished run again."""
-    s = db.one("SELECT current_run_id FROM sources WHERE id=?", source_id)
+    s = db.one("SELECT s.current_run_id, c.stage FROM sources s LEFT JOIN channels c ON c.id=s.channel_id WHERE s.id=?", source_id)
     if not s:
         raise ValueError("找不到这一期")
+    if s["stage"] == "LOCKED":  # what goes to Notion was settled by the 定稿单: a page out of date must not swap it
+        raise StageMoved("这个频道已经定稿了，样片写进 Notion 的版本不能在这里换；要换请先「回到调试期」")
     if pinned:
         r = db.one("SELECT * FROM runs WHERE id=? AND source_id=?", run_id, source_id)
         if not r or not r["production"].startswith("COMPLETE"):
@@ -378,14 +424,17 @@ def lock_preview(channel_id: str, playbook_id: int) -> dict:
     }
 
 
-def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None, intake: dict | None = None) -> dict:
+def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None, intake: dict | None = None,
+         backfill: list[dict] | None = None) -> dict:
     """定稿单: lock the channel on one playbook and decide, sample by sample, what goes to Notion. All or nothing.
 
     write   → delivered after 定稿 (a leftover trial run no longer replaces it)
     keep    → the library already has it: 已登记, nothing written
     replace → rewrite the page Assetizer wrote before (pages the user made themselves are never replaced)
-    wait    → hold delivery until the run still in progress ends; if it fails, deliver the adopted version"""
-    from .ingest import set_enabled
+    wait    → hold delivery until the run still in progress ends; if it fails, deliver the adopted version
+
+    ``backfill``: videos the channel posted while intake was paused for tuning, lined up for 补录 (a11)."""
+    from .ingest import enqueue_backfill, set_enabled
     ch = db.one("SELECT * FROM channels WHERE id=?", channel_id)
     if not ch or ch["stage"] != "TUNING":
         raise ValueError("频道不在调试中")
@@ -428,17 +477,19 @@ def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None,
                            WHERE id=?""", now(), sid)
             elif d["action"] == "replace":
                 db.exec("UPDATE sources SET delivery='STALE', delivery_reason=NULL, adopt_pinned=1, updated_at=? WHERE id=?", now(), sid)
-            else:
-                db.exec("UPDATE sources SET adopt_pinned=1 WHERE id=?", sid)
+            else:  # 写入: only where nothing is written yet; a page already there is replaced only when chosen (replace)
+                db.exec("""UPDATE sources SET adopt_pinned=1, delivery=CASE WHEN delivery='STALE' AND notion_page_id IS NOT NULL
+                           THEN 'DELIVERED' ELSE delivery END WHERE id=?""", sid)
         ing = None
         if ch["mode"] == "TRACKED" and ch["youtube_channel_id"]:
             on = True if intake is None else bool(intake.get("enabled", True))
             ing = set_enabled(channel_id, on, (intake or {}).get("min_minutes"))
+    back = enqueue_backfill(channel_id, backfill)["queued"] if backfill else 0
     v = db.one("SELECT version FROM playbooks WHERE id=?", playbook_id)["version"]
     db.event("tuning", f"{ch['name']} 定稿 v{v}：写入 {counts['write'] + counts['replace']} 期，保留 {counts['keep']} 期，"
-             f"等待 {counts['wait']} 期")
+             f"等待 {counts['wait']} 期" + (f"，补录调试期间发的 {back} 期" if back else ""))
     return {"stage": "LOCKED", "version": v, "write": counts["write"] + counts["replace"], "keep": counts["keep"],
-            "wait": counts["wait"], "ingest": ing}
+            "wait": counts["wait"], "ingest": ing, "backfill": back}
 
 
 def release_hold(run_id: str) -> None:
