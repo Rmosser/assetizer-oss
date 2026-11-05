@@ -55,6 +55,24 @@ def render_clip(src: Path, start: float, end: float, out: Path, crf: int = 22) -
     return out
 
 
+def render_pieces(src: Path, pieces: list[list[float]], out: Path, crf: int = 22) -> Path:
+    """Several ranges of the source joined into one clip, with the same encode as render_clip."""
+    if len(pieces) == 1:
+        return render_clip(src, pieces[0][0], pieces[0][1], out, crf)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    inputs: list[str] = []
+    graph = ""
+    for i, (a, b) in enumerate(pieces):
+        inputs += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(src)]
+        graph += f"[{i}:v:0]fps=30,setpts=PTS-STARTPTS[v{i}];[{i}:a:0]asetpts=PTS-STARTPTS[a{i}];"
+    graph += "".join(f"[v{i}][a{i}]" for i in range(len(pieces))) + f"concat=n={len(pieces)}:v=1:a=1[v][a]"
+    run([*inputs, "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
+         "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf), "-pix_fmt", "yuv420p",
+         "-profile:v", "high", "-g", "60",
+         "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart", str(out)])
+    return out
+
+
 def playback_copy(src: Path, out: Path, height: int = 360) -> Path:
     """The whole video, small enough to keep for in-page playback: 360p, 25 fps, mono AAC, index first so the
     browser can start and seek before it has the file. It runs beside production, so at low priority and on two

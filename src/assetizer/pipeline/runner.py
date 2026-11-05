@@ -21,7 +21,7 @@ from ..llm import ContractError
 from .. import providers
 from ..providers.agy import ProviderError
 from ..util import now
-from . import acquire, finish, media_stages, semantic
+from . import acquire, fidelity, finish, media_stages, semantic
 from .context import RunContext, StageWarning, Waiting
 
 # name, fn, blocking
@@ -237,7 +237,7 @@ def _execute(run_id: str) -> str:
             if name == "MERGE" and done.get("TRANSCRIBE") not in ("DONE", "WARN"):
                 bg = threading.Thread(target=run_bg, daemon=True)
                 bg.start()
-            if name == "BOUNDARY" and bg is not None:
+            if bg is not None and (name == "BOUNDARY" or name == "KNOWLEDGE" and fidelity.enabled(ctx.playbook)):
                 db.exec("UPDATE runs SET stage='TRANSCRIBE' WHERE id=?", run_id)
                 bg.join()
                 bg = None
@@ -873,6 +873,7 @@ def apply_nudges() -> bool:
     for r in rows:
         meta = db.unj(r["meta"], {})
         req = meta.pop("pending_nudge")
+        meta.pop("keep", None)  # a nudged clip is the one range the reviewer chose
         run = db.one("SELECT * FROM runs WHERE id=?", r["run_id"])
         src = db.one("SELECT * FROM sources WHERE id=?", r["source_id"])
         ctx = RunContext(run=run, source=src)

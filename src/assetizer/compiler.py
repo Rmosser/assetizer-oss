@@ -186,6 +186,9 @@ def compile_prompt(channel_id: str, prompt_id: int, again: bool = False) -> int:
                    for f in o["facets"] if f["key"] not in RESERVED_FACETS],
         "article_style": o["article_style"],
     }
+    # 原话模式 is opted into per channel and bound to the playbook: the versions already compiled keep running as they did
+    if fidelity := db.setting(f"fidelity:{channel_id}"):
+        data["fidelity"] = fidelity
     audit = {
         "source": f"compiler v1 · {now()}",
         "clauses": clauses,

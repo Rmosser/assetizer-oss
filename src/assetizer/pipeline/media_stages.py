@@ -15,6 +15,7 @@ from ..llm import ContractError
 from ..media import ffmpeg, subtitles
 from ..providers.agy import ProviderError
 from ..util import fmt_tc, now, parse_tc, read_json, sha256_file, write_json, write_text
+from . import fidelity
 from .context import RunContext, StageWarning
 
 
@@ -209,7 +210,41 @@ def main_span(u: dict, gap: float = 60.0) -> tuple[float, float]:
     return a, b
 
 
+def _boundaries_from_spans(ctx: RunContext, units: list[dict], sel: list[dict]) -> dict:
+    """原话模式：单元的时间段就是文字用到的原话，片段照它剪，文字和视频对得上，不用再问模型。
+    每个 TOPIC 都有片段；归总的问答和杂谈不成片。"""
+    verdicts = {s["unit_id"]: s for s in sel}
+    results = {}
+    for u in units:
+        if u.get("role", "TOPIC") != "TOPIC":
+            continue
+        sl = verdicts.get(u["id"]) or {}
+        verdict = sl.get("verdict") or "SELECT"
+        if verdict == "REJECT":
+            verdict = "CONTEXT_DEPENDENT"
+        spans, left = [], float(MAX_CLIP)
+        for sg in sorted(u["segments"], key=lambda x: x["start"]):
+            a, b = max(0.0, sg["start"] - 0.15), min(ctx.duration, sg["end"] + 0.3)
+            if spans and a <= spans[-1][1]:
+                left -= max(0.0, b - spans[-1][1])
+                spans[-1][1] = max(spans[-1][1], b)
+            else:
+                left -= b - a
+                spans.append([a, b])
+            if left <= 0:
+                spans[-1][1] += left
+                ctx.flag("UNIT", u["id"], "CLIP_TOO_LONG", "REVIEW", f"「{u['title']}」超过 {MAX_CLIP // 60} 分钟，片段截取前 {MAX_CLIP // 60} 分钟")
+                break
+        results[u["id"]] = {"label": u["label"], "model": {}, "source": "transcript", "model_start": spans[0][0], "model_end": spans[-1][1],
+                            "start": spans[0][0], "end": spans[-1][1], "start_snapped": False, "end_snapped": False, "spans": spans,
+                            "selection": verdict, "publication_priority": sl.get("publication_priority") or "P3", "context_missing": False}
+    ctx.save("machine/boundaries.json", results)
+    return {"model": 0, "fallback": 0, "snapped": 0, "from_spans": len(results)}
+
+
 def boundary(ctx: RunContext) -> dict:
+    if fidelity.enabled(ctx.playbook) and _transcript(ctx):
+        return _boundaries_from_spans(ctx, _units(ctx), ctx.load("machine/selection.json", {"selections": []})["selections"])
     s = config.get()
     units = {u["id"]: u for u in _units(ctx)}
     ordered = sorted(units.values(), key=lambda u: u["start"])
@@ -309,13 +344,25 @@ def dedupe_clips(bnd: dict, units: dict, iou_min: float = 0.85) -> dict[str, str
             kept.append(k)
     return shared
 
+def _silences(ctx: RunContext) -> list[tuple[float, float]]:
+    """Long silences in the source audio, measured once per run."""
+    p = ctx.dir / "machine" / "silences.json"
+    if p.exists():
+        return [tuple(x) for x in read_json(p)]
+    found = ffmpeg.silences(ctx.media, min_dur=fidelity.SILENCE_MIN)
+    write_json(p, found)
+    return found
+
+
 def clips(ctx: RunContext) -> dict:
     bnd = ctx.load("machine/boundaries.json", {})
     units = {u["id"]: u for u in _units(ctx)}
     tr = _transcript(ctx)
     words = tr["words"] if tr else []
     ok = failed = 0
-    shared = dedupe_clips(bnd, units)
+    from_spans = any(b.get("spans") for b in bnd.values())
+    shared = {} if from_spans else dedupe_clips(bnd, units)
+    quiet = _silences(ctx) if from_spans else []
     for uid, primary in shared.items():
         u, pu = units[uid], units[primary]
         b = bnd[uid]
@@ -327,7 +374,10 @@ def clips(ctx: RunContext) -> dict:
             continue
         u = units[uid]
         a, e = b["start"], b["end"]
-        if words:  # trim only real leading/trailing dead air (>1.5 s before first / after last word)
+        keep = fidelity.cut_silences(b["spans"], quiet) if b.get("spans") else None
+        if keep:
+            a, e = keep[0][0], keep[-1][1]
+        elif words:  # trim only real leading/trailing dead air (>1.5 s before first / after last word)
             inside = [w for w in words if w["start"] >= a and w["end"] <= e]
             if inside:
                 if inside[0]["start"] - a > 1.5:
@@ -338,25 +388,30 @@ def clips(ctx: RunContext) -> dict:
         clean = d / "clip-clean.mp4"
         meta = {"model_start": b["model_start"], "model_end": b["model_end"], "boundary_source": b["source"],
                 "start_snapped": b.get("start_snapped"), "end_snapped": b.get("end_snapped")}
+        if keep:
+            meta["keep"] = keep
+        length = sum(y - x for x, y in keep) if keep else e - a
         standalone = 0 if b["selection"] == "CONTEXT_DEPENDENT" or b.get("context_missing") else 1
         try:
             params = d / "clip-params.json"
             want = {"start": round(a, 3), "end": round(e, 3)}
+            if keep:
+                want["keep"] = [[round(x, 3), round(y, 3)] for x, y in keep]
             if not clean.exists() or not params.exists() or read_json(params) != want:
                 for stale in ("clip-subtitled.mp4", "subtitle.srt", "subtitle.ass"):
                     (d / stale).unlink(missing_ok=True)
-                ffmpeg.render_clip(ctx.media, a, e, clean)
+                ffmpeg.render_pieces(ctx.media, keep or [[a, e]], clean)
                 write_json(params, want)
             _asset(ctx, uid, "clip", "GENERATED", clean, a, e, meta, selection=b["selection"],
                    publication_priority=b["publication_priority"], standalone=standalone)
             try:
-                ffmpeg.frame(clean, min(3.0, (e - a) / 2), d / "poster.jpg", width=1280)
+                ffmpeg.frame(clean, min(3.0, length / 2), d / "poster.jpg", width=1280)
                 _asset(ctx, uid, "poster", "GENERATED", d / "poster.jpg", a, a)
             except ffmpeg.MediaError:
                 pass  # a poster failure never fails a good clip
             ok += 1
-            if e - a < 8:
-                ctx.flag("ASSET", uid, "CLIP_TOO_SHORT", "REVIEW", f"「{u['title']}」片段只有 {e - a:.0f} 秒")
+            if length < 8:
+                ctx.flag("ASSET", uid, "CLIP_TOO_SHORT", "REVIEW", f"「{u['title']}」片段只有 {length:.0f} 秒")
         except ffmpeg.MediaError as err:
             failed += 1
             _asset(ctx, uid, "clip", "FAILED", None, a, e, {**meta, "error": str(err)[:500]}, selection=b["selection"],
@@ -383,20 +438,22 @@ def subtitle_stage(ctx: RunContext, only_unit: str | None = None) -> dict:
         clip = Path(c["path"])
         d = clip.parent
         a, e = c["start"], c["end"]
+        keep = db.unj(c["meta"], {}).get("keep") or [[a, e]]  # the ranges the clip is made of; it runs on their joined time
+        length = sum(y - x for x, y in keep)
         try:
-            words = [{**w, "start": max(0.0, w["start"] - a), "end": min(e - a, w["end"] - a)}
-                     for w in tr["words"] if w["start"] >= a - 0.05 and w["end"] <= e + 0.05]
-            segs = [{"text": sg["text"], "start": max(0.0, sg["start"] - a), "end": min(e - a, sg["end"] - a)}
-                    for sg in tr["segments"] if sg["end"] > a and sg["start"] < e]
+            words = [{**w, "start": fidelity.to_local(w["start"], keep), "end": fidelity.to_local(w["end"], keep)}
+                     for w in tr["words"] if fidelity.inside(w["start"], w["end"], keep)]
+            segs = [{"text": sg["text"], "start": fidelity.to_local(sg["start"], keep), "end": fidelity.to_local(sg["end"], keep)}
+                    for sg in tr["segments"] if any(sg["end"] > x and sg["start"] < y for x, y in keep)]
             if not words:
                 raise ValueError("no speech in clip")
             # rebuild segment text from in-range words so lexical content matches exactly
             text_words = "".join(w["word"] for w in words)
-            frozen = [{"text": text_words, "start": 0.0, "end": e - a}] if not segs else \
+            frozen = [{"text": text_words, "start": 0.0, "end": length}] if not segs else \
                 [{"text": "".join(w["word"] for w in words if w["start"] >= sg["start"] - 0.05 and w["end"] <= sg["end"] + 0.05),
                   "start": sg["start"], "end": sg["end"]} for sg in segs]
             frozen = [f for f in frozen if f["text"].strip()]
-            cues, _, _ = subtitles.segment(frozen, words, u.get("tickers", []), e - a, u["label"])
+            cues, _, _ = subtitles.segment(frozen, words, u.get("tickers", []), length, u["label"])
             write_text(d / "subtitle.srt", subtitles.to_srt(cues))
             write_text(d / "subtitle.ass", subtitles.to_ass(cues))
             out = d / "clip-subtitled.mp4"

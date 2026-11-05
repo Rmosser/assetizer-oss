@@ -7,16 +7,30 @@ from .. import db
 from ..contracts import prompts as P
 from ..llm import ContractError
 from ..util import fmt_tc, parse_tc, ulid
+from . import fidelity
 from .context import RunContext, StageWarning
-from .media_stages import main_span
+from .media_stages import _transcript, main_span
 
 BATCH = 6
+SOURCE_BATCH = 4000  # 原话模式：一批最多这么多字的原话，写正文的输出才不至于太长
 FORBIDDEN = ["振聋发聩", "醍醐灌顶", "集大成", "深刻揭示", "极高价值", "极强价值", "极佳示范", "精准洞察", "重磅",
              "史诗级", "顶级", "毫无疑问", "严密闭环", "完美诠释", "教科书级别", "speaker_"]
 
 
 def _clamp(t: float, dur: float) -> float:
     return max(0.0, min(dur, t))
+
+
+def clean_time_scope(o):
+    """A claim's time_scope outside the enum (2026-11-05: 'PLAN' failed a whole 71-minute run) only loses that hint."""
+    allowed = P.CLAIM["properties"]["time_scope"]["enum"]
+    if isinstance(o, dict):
+        for items in (o.get("topics"), o.get("units")):
+            for t in items if isinstance(items, list) else []:
+                for c in (t.get("claims") or []) if isinstance(t, dict) else []:
+                    if isinstance(c, dict) and c.get("time_scope") not in allowed:
+                        c["time_scope"] = None
+    return o
 
 
 # ------------------------------------------------------------------ understand
@@ -38,7 +52,7 @@ def understand(ctx: RunContext) -> dict:
 
         rec = llm.structured(ctx.calls, f"understand-{ch['part_id']}",
                              P.understand_prompt(ctx.playbook, ch["path"], ch, ch["length"]),
-                             P.UNDERSTAND_SCHEMA, media=[ch["path"]], check=check)
+                             P.UNDERSTAND_SCHEMA, media=[ch["path"]], check=check, normalize=clean_time_scope)
         topics = []
         for t in rec["topics"]:
             try:
@@ -189,10 +203,37 @@ def fit_labels(o: dict) -> dict:
     return o
 
 
+def _source_segments(ctx: RunContext) -> list[dict] | None:
+    """The transcript lines to write from, in 原话模式; None in the summary path or when transcription failed."""
+    if not fidelity.enabled(ctx.playbook):
+        return None
+    tr = _transcript(ctx)
+    if tr and tr.get("segments"):
+        return tr["segments"]
+    ctx.flag("RUN", None, "TRANSCRIPT_MISSING", "REVIEW", "这一期没有转写，正文只能按理解摘要写，会有压缩")
+    return None
+
+
+def _batches(units: list[dict], size) -> list[list[dict]]:
+    """At most BATCH units and about SOURCE_BATCH characters of source each; a long unit goes alone."""
+    out: list[list[dict]] = []
+    used = 0
+    for u in units:
+        n = size(u)
+        if out and len(out[-1]) < BATCH and used + n <= SOURCE_BATCH:
+            out[-1].append(u)
+            used += n
+        else:
+            out.append([u])
+            used = n
+    return out
+
+
 def knowledge(ctx: RunContext) -> dict:
     merged, by_id = _topic_records(ctx)
     mtopics = {t["id"]: t for t in merged["topics"]}
     llm = ctx.llm()
+    source = _source_segments(ctx)
     skel_input = [{**_strip(t), "records": [_strip(by_id[r]) for r in t["chunk_topic_refs"]]} for t in merged["topics"]]
 
     def check_skel(o):
@@ -202,13 +243,29 @@ def knowledge(ctx: RunContext) -> dict:
         bad = [r for u in o["units"] for r in u["topic_refs"] if r not in mtopics]
         if bad:
             raise ContractError("SCHEMA_VIOLATION", f"unknown topic refs {bad[:5]}")
+        if source:
+            fidelity.check_partition(o["units"], source)
 
-    skel = llm.structured(ctx.calls, "knowledge-skeleton", P.skeleton_prompt(ctx.playbook, skel_input),
-                          P.SKELETON_SCHEMA, check=check_skel, normalize=fit_labels)
+    if source:
+        skel = llm.structured(ctx.calls, "knowledge-skeleton",
+                              P.transcript_skeleton_prompt(ctx.playbook, skel_input, fidelity.numbered(source)),
+                              P.TRANSCRIPT_SKELETON_SCHEMA, check=check_skel, normalize=fit_labels)
+        owned, info = fidelity.partition(skel["units"], source)
+        for label in info["dropped_units"]:
+            ctx.flag("RUN", None, "UNIT_WITHOUT_SOURCE", "INFO", f"知识单元 {label} 没有分到原话，已去掉")
+        if info["missed_lines"]:
+            ctx.flag("RUN", None, "TRANSCRIPT_UNASSIGNED", "INFO", f"{info['missed_lines']} 行原话模型没有划分，已并入相邻单元")
+    else:
+        skel = llm.structured(ctx.calls, "knowledge-skeleton", P.skeleton_prompt(ctx.playbook, skel_input),
+                              P.SKELETON_SCHEMA, check=check_skel, normalize=fit_labels)
+        owned = None
     units = []
     for u in skel["units"]:
+        if owned is not None and u["label"] not in owned:
+            continue
         refs = [mtopics[r] for r in u["topic_refs"]]
-        segs = sorted(({"start": r["start_s"], "end": r["end_s"]} for r in refs), key=lambda x: x["start"])
+        segs = owned[u["label"]] if owned is not None else \
+            sorted(({"start": r["start_s"], "end": r["end_s"]} for r in refs), key=lambda x: x["start"])
         a, b = main_span({"segments": segs, "start": segs[0]["start"], "end": segs[-1]["end"]})
         units.append({**u, "start": a, "end": b, "segments": segs,
                       "chunk_topic_refs": [c for r in refs for c in r["chunk_topic_refs"]]})
@@ -216,27 +273,30 @@ def knowledge(ctx: RunContext) -> dict:
 
     schema = P.detail_schema(ctx.playbook)
     details: dict[str, dict] = {}
-    for bi in range(0, len(units), BATCH):
-        batch = units[bi:bi + BATCH]
+    if source:
+        batches = _batches(units, lambda u: fidelity.cjk(fidelity.text_of(source, u["segments"])))
+    else:
+        batches = [units[bi:bi + BATCH] for bi in range(0, len(units), BATCH)]
+    for bn, batch in enumerate(batches, 1):
         labels = {u["label"] for u in batch}
         recs = {c: _strip(by_id[c]) for u in batch for c in u["chunk_topic_refs"]}
         brief = [{k: u[k] for k in ("label", "title", "knowledge_type", "learning_priority", "tickers", "why")}
-                 | {"start": fmt_tc(u["start"]), "end": fmt_tc(u["end"]), "topic_ids": u["chunk_topic_refs"]} for u in batch]
+                 | {"start": fmt_tc(u["start"]), "end": fmt_tc(u["end"]), "topic_ids": u["chunk_topic_refs"]}
+                 | ({"source_text": fidelity.text_of(source, u["segments"])} if source else {}) for u in batch]
 
         def check_detail(o, labels=labels):
             got = {u["label"] for u in o["units"]}
             if not labels <= got:
                 raise ContractError("MISSING_UNITS", ",".join(sorted(labels - got)))
 
-        name = f"knowledge-detail-{bi // BATCH + 1:02}"
+        name = f"knowledge-detail-{bn:02}"
+        prompt = P.detail_prompt(ctx.playbook, brief, list(recs.values()), transcript=bool(source))
         try:
-            o = llm.structured(ctx.calls, name, P.detail_prompt(ctx.playbook, brief, list(recs.values())), schema,
-                               check=check_detail)
+            o = llm.structured(ctx.calls, name, prompt, schema, check=check_detail, normalize=clean_time_scope)
         except ContractError as e:
             if e.kind != "MISSING_UNITS":
                 raise
-            o = llm.structured(ctx.calls, name + "-retry", P.detail_prompt(ctx.playbook, brief, list(recs.values())),
-                               schema)
+            o = llm.structured(ctx.calls, name + "-retry", prompt, schema, normalize=clean_time_scope)
         for d in o["units"]:
             if d["label"] in labels:
                 details[d["label"]] = d
@@ -273,6 +333,8 @@ def knowledge(ctx: RunContext) -> dict:
             "required_context": d.get("required_context", ""), "claims": d.get("claims", []),
             "facets": d.get("facets", {}), "uncertainties": d.get("uncertainties", []),
         }
+        if source:
+            ku["role"] = u.get("role") or "TOPIC"
         final.append(ku)
         db.exec("""INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, learning_priority, knowledge_type, data)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""", ku["id"], ctx.id, ctx.source["id"], ku["label"], i, ku["title"],
@@ -295,25 +357,75 @@ def _brief(u: dict) -> dict:
 
 
 # ------------------------------------------------------------------ article
+def _source_brief(u: dict, source: list[dict]) -> dict:
+    return {k: u.get(k) for k in ("label", "title", "role", "knowledge_type", "tickers", "visual_evidence", "facets")} \
+        | {"source_text": fidelity.text_of(source, u["segments"])}
+
+
+def _write_from_source(ctx: RunContext, units: list[dict], by_id: dict, source: list[dict]) -> dict[str, str]:
+    """原话模式写正文：逐段改写；被压缩、漏数字或混进整理用语的单元退回重写一次，还不过关就留给人看。"""
+    llm = ctx.llm()
+    sections: dict[str, str] = {}
+
+    def recs(batch: list[dict]) -> list[dict]:
+        return list({c: _strip(by_id[c]) for u in batch for c in u["provenance"]["chunk_topic_refs"] if c in by_id}.values())
+
+    for bn, batch in enumerate(_batches(units, lambda u: fidelity.cjk(fidelity.text_of(source, u["segments"]))), 1):
+        o = llm.structured(ctx.calls, f"article-sections-{bn:02}",
+                           P.transcript_sections_prompt(ctx.playbook, [_source_brief(u, source) for u in batch], recs(batch)),
+                           P.SECTIONS_SCHEMA)
+        for s in o["sections"]:
+            sections.setdefault(s["label"], s["markdown"])
+    for u in units:
+        md = sections.get(u["label"])
+        if not md:
+            continue
+        text = fidelity.text_of(source, u["segments"])
+        problems = fidelity.section_problems(u.get("role") or "TOPIC", text, md)
+        if not problems:
+            continue
+        note = "\n【这一节上一次没有通过检查，请重写】" + "；".join(problems) + "。\n"
+        o = llm.structured(ctx.calls, f"article-rewrite-{u['label']}",
+                           P.transcript_sections_prompt(ctx.playbook, [_source_brief(u, source)], recs([u]), feedback=note),
+                           P.SECTIONS_SCHEMA)
+        again = next((s["markdown"] for s in o["sections"] if s["label"] == u["label"]), "")
+        left = fidelity.section_problems(u.get("role") or "TOPIC", text, again) if again else problems
+        if again and len(left) <= len(problems) and fidelity.cjk(again) >= fidelity.cjk(md) * 0.9:
+            sections[u["label"]] = again
+        else:
+            left = problems
+        for p in left:
+            ctx.flag("UNIT", u["id"], "SECTION_NOT_FAITHFUL", "REVIEW", f"「{u['title']}」{p[:40]}", p)
+    return sections
+
+
 def article(ctx: RunContext) -> dict:
     units = _units(ctx)
     _, by_id = _topic_records(ctx)
     llm = ctx.llm()
     meta = {"title": ctx.source.get("title"), "channel": ctx.source.get("channel_title"),
             "published": ctx.source.get("published_at"), "duration": fmt_tc(ctx.duration)}
-    outline = llm.structured(ctx.calls, "article-outline",
-                             P.outline_prompt(ctx.playbook, meta, [{k: u[k] for k in ("label", "title", "learning_priority", "why", "tickers")}
-                                                                   | {"start": fmt_tc(u["start"])} for u in units]),
-                             P.OUTLINE_SCHEMA)
+    brief = [{k: u[k] for k in ("label", "title", "learning_priority", "why", "tickers")} | {"start": fmt_tc(u["start"])} for u in units]
+    source = _source_segments(ctx)
+    if not all("from" in sg for u in units for sg in u["segments"]):
+        source = None  # the units were planned without the transcript
     sections: dict[str, str] = {}
-    for bi in range(0, len(units), BATCH):
-        batch = units[bi:bi + BATCH]
-        recs = {c: _strip(by_id[c]) for u in batch for c in u["provenance"]["chunk_topic_refs"] if c in by_id}
-        o = llm.structured(ctx.calls, f"article-sections-{bi // BATCH + 1:02}",
-                           P.sections_prompt(ctx.playbook, [_brief(u) for u in batch], list(recs.values())),
-                           P.SECTIONS_SCHEMA)
-        for s in o["sections"]:
-            sections.setdefault(s["label"], s["markdown"])
+    if source:
+        # the opening and the closing lists are written last, from the text itself: from titles alone they drift
+        sections = _write_from_source(ctx, units, by_id, source)
+        outline = llm.structured(ctx.calls, "article-outline",
+                                 P.outline_prompt(ctx.playbook, meta, [b | {"markdown": sections.get(b["label"], "")} for b in brief], written=True),
+                                 P.OUTLINE_SCHEMA)
+    else:
+        outline = llm.structured(ctx.calls, "article-outline", P.outline_prompt(ctx.playbook, meta, brief), P.OUTLINE_SCHEMA)
+        for bi in range(0, len(units), BATCH):
+            batch = units[bi:bi + BATCH]
+            recs = {c: _strip(by_id[c]) for u in batch for c in u["provenance"]["chunk_topic_refs"] if c in by_id}
+            o = llm.structured(ctx.calls, f"article-sections-{bi // BATCH + 1:02}",
+                               P.sections_prompt(ctx.playbook, [_brief(u) for u in batch], list(recs.values())),
+                               P.SECTIONS_SCHEMA)
+            for s in o["sections"]:
+                sections.setdefault(s["label"], s["markdown"])
     db.exec("DELETE FROM sections WHERE run_id=?", ctx.id)
     rows = [("INTRO", [], outline["intro_markdown"])]
     for n, u in enumerate(units, 1):

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -5180,3 +5181,215 @@ def test_notion_default_page_moves_the_assetizer_database(cc_api, home, monkeypa
     assert db.setting("notion_parent_page_id") == "01234567-89ab-cdef-0123-456789abcdef"
     assert db.setting("notion_database_id") is None  # made again under the new page at the next delivery
     assert cc_api.post("/api/notion/default", json={"parent": "no link"}).status_code == 400
+
+
+# --------------------------------------------------------------- 原话模式 (design §R7)
+def _lines(*texts, step=10.0):
+    return [{"start": i * step, "end": (i + 1) * step - 1, "text": t} for i, t in enumerate(texts)]
+
+
+def test_partition_gives_every_line_to_exactly_one_unit():
+    from assetizer.pipeline import fidelity
+    segs = _lines("一一一", "二二二", "三三三", "四四四", "五五五")
+    units = [{"label": "a", "spans": [{"from": 0, "to": 1}, {"from": 3, "to": 3}]},
+             {"label": "b", "spans": [{"from": 1, "to": 2}]},       # line 1 taken by a: nothing is written twice
+             {"label": "c", "spans": [{"from": 0, "to": 0}]}]       # left with no line of its own
+    owned, info = fidelity.partition(units, segs)
+    assert [(s["from"], s["to"]) for s in owned["a"]] == [(0, 1), (3, 4)]  # the missed line 4 joins the line before it
+    assert [(s["from"], s["to"]) for s in owned["b"]] == [(2, 2)]
+    assert info == {"missed_lines": 1, "dropped_units": ["c"]}
+    assert owned["a"][1]["start"] == 30.0 and owned["a"][1]["end"] == 49.0
+    assert fidelity.text_of(segs, owned["a"]).splitlines()[1].endswith("四四四五五五")
+
+
+def test_partition_sends_back_a_plan_that_loses_speech():
+    from assetizer.llm import ContractError
+    from assetizer.pipeline import fidelity
+    segs = _lines("一" * 50, "二" * 50)
+    with pytest.raises(ContractError):
+        fidelity.check_partition([{"label": "a", "spans": [{"from": 0, "to": 0}]}], segs)
+    fidelity.check_partition([{"label": "a", "spans": [{"from": 0, "to": 1}]}], segs)
+
+
+def test_section_problems_catch_compression_lost_numbers_and_process_words():
+    from assetizer.pipeline import fidelity
+    source = "（00:01:00）" + "他讲了很长一段话" * 10 + "人口2850万，原来4000多万，伤亡100万，债务300亿"
+    assert fidelity.section_problems("TOPIC", source, "他讲了话。") != []
+    full = "他讲了很长一段话" * 10 + "人口2,850万，原来4000多万，伤亡100万，债务300亿"
+    assert fidelity.section_problems("TOPIC", source, full) == []  # thousands separators do not count as lost
+    assert "2850" in fidelity.missing_numbers(source, "4000 100 300")
+    assert any("主题记录" in p for p in fidelity.section_problems("TOPIC", source, full + "主题记录未说明"))
+    assert any("记录中" in p for p in fidelity.section_problems("TOPIC", source, full + "记录中没有"))
+    assert fidelity.section_problems("TOPIC", source, full + "记录中西早餐的差别") == []
+    assert fidelity.section_problems("BACKGROUND", source, "简短要点") == []  # a roll-up is meant to be short
+
+
+def test_cut_silences_keeps_speech_and_a_margin():
+    from assetizer.pipeline import fidelity
+    # the 2026-11-04 clip: he reads his phone for 83 s, with one stray sound in the middle
+    spans = [[1987.0, 2204.0]]
+    quiet = [(2005.4, 2031.5), (2031.7, 2075.2), (2075.2, 2088.5), (2117.0, 2122.5), (2190.0, 2193.0)]
+    assert [pytest.approx(x) for x in fidelity.cut_silences(spans, quiet)] == [[1987.0, 2005.8], [2088.1, 2117.4], [2122.1, 2204.0]]
+    assert fidelity.cut_silences([[10.0, 20.0]], [(0.0, 12.0)]) == [[10.0, 20.0]]  # only 2 s of it falls inside
+    assert fidelity.cut_silences([[10.0, 30.0]], [(0.0, 18.0)]) == [[17.6, 30.0]]
+    assert fidelity.cut_silences([[10.0, 12.0]], [(0.0, 50.0)]) == [[10.0, 12.0]]  # silence throughout: keep it
+    assert fidelity.cut_silences([[50.0, 60.0], [10.0, 20.0]], []) == [[10.0, 20.0], [50.0, 60.0]]
+
+
+def test_clip_time_maps_across_the_cuts():
+    from assetizer.pipeline import fidelity
+    keep = [[100.0, 110.0], [200.0, 205.0]]
+    assert [fidelity.to_local(t, keep) for t in (100.0, 105.0, 110.0, 150.0, 200.0, 204.0, 300.0)] == [0, 5, 10, 10, 10, 14, 15]
+    assert fidelity.inside(101, 102, keep) and fidelity.inside(201, 204, keep)
+    assert not fidelity.inside(108, 201, keep) and not fidelity.inside(150, 151, keep)
+
+
+def test_boundaries_follow_the_units_text_and_skip_the_roll_ups(home):
+    from assetizer.pipeline import media_stages
+    from assetizer.pipeline.context import RunContext
+    ctx = RunContext(run={"id": "fid-r1"}, source={"id": "fid", "duration": 1000.0})
+    units = [{"id": "u1", "label": "topic", "title": "T", "role": "TOPIC",
+              "segments": [{"start": 300.0, "end": 310.0}, {"start": 100.0, "end": 120.0}]},
+             {"id": "u2", "label": "qa", "title": "Q", "role": "QA_DIGEST", "segments": [{"start": 400.0, "end": 410.0}]},
+             {"id": "u3", "label": "bg", "title": "B", "role": "BACKGROUND", "segments": [{"start": 0.0, "end": 10.0}]},
+             {"id": "u4", "label": "other", "title": "O", "role": "TOPIC", "segments": [{"start": 500.0, "end": 510.0}]}]
+    media_stages._boundaries_from_spans(ctx, units, [{"unit_id": "u4", "verdict": "REJECT", "publication_priority": "P2"}])
+    b = ctx.load("machine/boundaries.json")
+    assert set(b) == {"u1", "u4"}  # every section with a topic has its video; the roll-ups have none
+    assert b["u1"]["spans"] == [[99.85, 120.3], [299.85, 310.3]]
+    assert (b["u4"]["selection"], b["u4"]["publication_priority"]) == ("CONTEXT_DEPENDENT", "P2")
+
+
+def test_a_clip_can_be_rendered_from_pieces(tmp_path):
+    import shutil
+    import subprocess
+    from assetizer.media import ffmpeg
+    if not shutil.which("ffmpeg"):
+        pytest.skip("no ffmpeg")
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=30:duration=10",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=10", "-c:v", "libx264", "-c:a", "aac", str(src)], check=True)
+    out = ffmpeg.render_pieces(src, [[1.0, 3.0], [6.0, 9.0]], tmp_path / "c.mp4")
+    assert abs(ffmpeg.duration(out) - 5.0) < 0.2
+    streams = {s["codec_type"] for s in ffmpeg.probe(out)["streams"]}
+    assert streams == {"video", "audio"}
+    assert abs(ffmpeg.duration(ffmpeg.render_pieces(src, [[1.0, 3.0]], tmp_path / "d.mp4")) - 2.0) < 0.2
+
+
+def test_a_time_scope_outside_the_list_only_loses_the_hint():
+    from assetizer.pipeline.semantic import clean_time_scope
+    o = {"topics": [{"claims": [{"time_scope": "PLAN"}, {"time_scope": "NOW"}, {"time_scope": None}]}]}
+    assert [c["time_scope"] for c in clean_time_scope(o)["topics"][0]["claims"]] == [None, "NOW", None]
+    assert clean_time_scope("not an object") == "not an object"
+
+
+def test_only_a_channel_that_opted_in_compiles_to_transcript_mode(home, monkeypatch):
+    from assetizer import compiler, db
+    from assetizer.llm import LLM
+    db.exec("INSERT INTO channels(id, name, stage, created_at, updated_at) VALUES ('fid-ch','F','TUNING','2026-01-01','2026-01-01')")
+    answer = {"clause_map": [], "rules": [], "facets": [], "article_style": "x", "policy_conflicts": []}
+    monkeypatch.setattr(LLM, "structured", lambda self, *a, **k: answer if a[1] == "compile" else {"grades": []})
+    first = db.exec("INSERT INTO channel_prompts(channel_id, version, text, sha256, origin, created_at) VALUES ('fid-ch',1,'保留全部信息。','a','manual','2026-01-01')")
+    plain = compiler.compile_prompt("fid-ch", first)
+    assert "fidelity" not in db.unj(db.one("SELECT data FROM playbooks WHERE id=?", plain)["data"], {})
+    db.set_setting("fidelity:fid-ch", "transcript")
+    second = db.exec("INSERT INTO channel_prompts(channel_id, version, text, sha256, origin, created_at) VALUES ('fid-ch',2,'保留全部信息，一字不漏。','b','manual','2026-01-01')")
+    opted = compiler.compile_prompt("fid-ch", second)
+    assert db.unj(db.one("SELECT data FROM playbooks WHERE id=?", opted)["data"], {})["fidelity"] == "transcript"
+    assert "fidelity" not in db.unj(db.one("SELECT data FROM playbooks WHERE id=?", plain)["data"], {})  # versions already compiled keep running as they did
+
+
+def test_transcript_mode_end_to_end(home, tmp_path, monkeypatch):
+    """Knowledge → article → clips → subtitles → review → compose, with the model answers canned and real ffmpeg."""
+    import json as _json
+    import shutil
+    import subprocess
+    from assetizer import db
+    from assetizer.contracts import prompts as P
+    from assetizer.llm import LLM
+    from assetizer.pipeline import finish, media_stages, semantic
+    from assetizer.pipeline.context import RunContext
+    if not shutil.which("ffmpeg"):
+        pytest.skip("no ffmpeg")
+    media = tmp_path / "source.mp4"
+    # 40 s of tone with 12 s of silence in the middle of the first topic
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=40",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=40",
+                    "-af", "volume=enable='between(t,5,17)':volume=0", "-c:v", "libx264", "-c:a", "aac", "-shortest", str(media)], check=True)
+    db.connect()
+    db.exec("INSERT INTO sources(id, url, title, duration, media_path, media_sha256, created_at, updated_at) VALUES ('fid','u','T',40,?,'x','2026','2026')", str(media))
+    db.exec("INSERT INTO runs(id, source_id, kind, production, created_at) VALUES ('fid-r1','fid','PRODUCTION','RUNNING','2026')")
+    run = db.one("SELECT * FROM runs WHERE id='fid-r1'")
+    ctx = RunContext(run=run, source=db.one("SELECT * FROM sources WHERE id='fid'"))
+    ctx.playbook = {"fidelity": "transcript", "identity": {"channel": "F", "speaker": "S", "speaker_key": "host"}, "rules": [], "facets": []}
+    texts = ["今年美国选举结果出来了他赢个毛啊", "人口只有2850万了真是惨", "观众问抖音危险吗", "我觉得没问题", "今天去家具店耗了很久",
+             "我们接着讲选举对市场的影响", "这个国运的事情我就不多讲了", "好了下播"]
+    spans = [(0, 4), (18, 22), (22, 24), (24, 26), (26, 28), (28, 33), (33, 37), (37, 39)]
+    segs = [{"start": float(a), "end": float(b), "text": t} for (a, b), t in zip(spans, texts)]
+    words = []
+    for s in segs:
+        n = len(s["text"])
+        words += [{"word": c, "start": s["start"] + i * (s["end"] - s["start"]) / n, "end": s["start"] + (i + 1) * (s["end"] - s["start"]) / n}
+                  for i, c in enumerate(s["text"])]
+    ctx.save("machine/transcript.json", {"segments": segs, "words": words, "media_sha256": "x"})
+    topic = {"id": "CH01:t1", "title": "选举", "start": "00:00", "end": "00:40", "start_s": 0.0, "end_s": 40.0, "summary": "s",
+             "tickers": [], "claims": [], "teacher_reasoning": "", "visual_evidence": [], "uncertainties": [], "chunk": "CH01"}
+    ctx.save("machine/chunks.json", [{"part_id": "CH01", "speakers": [], "topics": [topic], "uncertainties": []}])
+    ctx.save("machine/merged.json", {"topics": [{"id": "M01", "title": "选举", "chunk_topic_refs": ["CH01:t1"], "start_s": 0.0, "end_s": 40.0}],
+                                     "speakers": [], "conflicts": []})
+    base = {"topic_refs": ["M01"], "focus": "", "knowledge_type": "ARGUMENT", "learning_priority": 2, "tickers": [], "depends_on": [], "why": "w"}
+    skeleton = {"uncertainties": [], "units": [
+        {**base, "label": "unit_vote", "title": "选举", "role": "TOPIC", "clip_candidate": True, "spans": [{"from": 0, "to": 1}, {"from": 5, "to": 6}]},
+        {**base, "label": "unit_qa", "title": "问答", "role": "QA_DIGEST", "clip_candidate": False, "spans": [{"from": 2, "to": 3}]},
+        {**base, "label": "unit_bg", "title": "杂谈", "role": "BACKGROUND", "clip_candidate": False, "spans": [{"from": 4, "to": 4}, {"from": 7, "to": 7}]}]}
+    seen = {}
+
+    def answer(self, root, stage, prompt, schema, **kw):
+        seen[stage] = prompt
+        if stage == "knowledge-skeleton":
+            kw["check"](skeleton)
+            return skeleton
+        if stage.startswith("knowledge-detail"):
+            labels = [u["label"] for u in skeleton["units"] if u["label"] in prompt]
+            return {"uncertainties": [], "units": [{"label": x, "summary": "s", "speaker_key": "host", "teacher_reasoning": "", "visual_evidence": [],
+                                                    "screenshot_anchors": [], "required_context": "", "claims": [], "facets": {}, "uncertainties": []} for x in labels]}
+        if stage == "article-sections-01":
+            return {"sections": [{"label": "unit_vote", "markdown": "## 选举\n\n主题记录太短"},
+                                 {"label": "unit_qa", "markdown": "## 问答\n\n- **问：抖音危险吗**　答：没问题"},
+                                 {"label": "unit_bg", "markdown": "## 杂谈\n\n- 去了家具店"}]}
+        if stage == "article-rewrite-unit_vote":
+            return {"sections": [{"label": "unit_vote", "markdown": "## 选举\n\n今年美国选举结果出来了，「他赢个毛啊」。人口只有 2850 万，真是惨。接着讲选举对市场的影响。国运的事情他说不多讲了。"}]}
+        if stage == "article-outline":
+            assert "他赢个毛啊" in prompt  # the opening and the lists are written from the finished text
+            return {"title": "T", "headline": "H", "intro_markdown": "导语", "outro_markdown": "要点"}
+        if stage.startswith("review-check"):
+            return {"checks": []}
+        raise AssertionError(stage)
+
+    monkeypatch.setattr(LLM, "structured", answer)
+    semantic.knowledge(ctx)
+    units = {u["label"]: u for u in semantic._units(ctx)}
+    assert units["unit_vote"]["role"] == "TOPIC" and units["unit_bg"]["role"] == "BACKGROUND"
+    assert "他赢个毛啊" in seen["knowledge-detail-01"] and "[5 00:00:28]" in seen["knowledge-skeleton"]
+    semantic.article(ctx)
+    text = (ctx.dir / "article" / "article.md").read_text()
+    assert "主题记录" not in text and "他赢个毛啊" in text  # rewritten once for the process word and the compression
+    assert list(seen).index("article-outline") > list(seen).index("article-sections-01")
+    ctx.save("machine/selection.json", {"selections": []})  # selection failed: the videos must not depend on it
+    media_stages.boundary(ctx)
+    assert media_stages.clips(ctx)["clips"] == 1
+    clip = db.one("SELECT * FROM assets WHERE run_id='fid-r1' AND kind='clip'")
+    keep = db.unj(clip["meta"], {})["keep"]
+    assert clip["unit_id"] == units["unit_vote"]["id"]
+    # first topic line, then 18–22 after the 12 s of silence, then 28–37: nothing of the question or the furniture
+    assert len(keep) == 3 and keep[0][1] < 6 and keep[1][0] > 16 and keep[2][0] >= 27
+    from assetizer.media import ffmpeg
+    assert abs(ffmpeg.duration(Path(clip["path"])) - sum(b - a for a, b in keep)) < 0.3
+    media_stages.subtitle_stage(ctx)
+    srt = (Path(clip["path"]).parent / "subtitle.srt").read_text()
+    assert "家具" not in srt and "下播" not in srt and "选举" in srt
+    finish.review_check(ctx)
+    checked = "".join(v for k, v in seen.items() if k.startswith("review-check"))
+    assert "家具" in checked and "没问题" in checked  # the sections without a video are checked too
+    comp = finish.compose(ctx)
+    assert comp["videos"] == 1

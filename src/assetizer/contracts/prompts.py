@@ -162,6 +162,39 @@ INPUT TOPICS
 {json.dumps(topics, ensure_ascii=False)}"""
 
 
+TRANSCRIPT_SKELETON_SCHEMA = obj({
+    "units": arr(obj({
+        "label": {"type": "string", "pattern": rf"^[a-z0-9_]{{3,{LABEL_MAX}}}$"},
+        "title": STR, "topic_refs": arr(STR, minItems=1), "focus": STR,
+        "role": {"type": "string", "enum": ["TOPIC", "QA_DIGEST", "BACKGROUND"]},
+        "spans": arr(obj({"from": {"type": "integer"}, "to": {"type": "integer"}}), minItems=1),
+        "knowledge_type": {"type": "string", "enum": KNOWLEDGE_TYPES},
+        "learning_priority": {"type": "integer", "minimum": 1, "maximum": 3},
+        "tickers": STRS, "depends_on": STRS, "clip_candidate": {"type": "boolean"}, "why": STR,
+    }), minItems=1),
+    "uncertainties": STRS,
+})
+
+
+def transcript_skeleton_prompt(playbook: dict, topics: list[dict], transcript: str) -> str:
+    return f"""{context(playbook, 'knowledge')}
+
+禁止工具与媒体。把本期全部原话划分给 Knowledge Units（知识单元）——本次只出骨架，不写详细内容。
+TRANSCRIPT 是整期的语音转写，每行开头是行号和时间；INPUT TOPICS 是看视频得到的理解笔记，帮你看懂内容（转写有错字）。
+- **每一行转写都要划进一个单元，且只划进一个单元**。spans 用行号写成闭区间（from、to），一个单元可以有多段不相邻的 spans。不要让两个单元共用同一段话。
+- role=TOPIC：一个可以独立学习的主题或判断，他在这个话题上连续讲的话放在一起；同一话题隔了一段又接着讲，用多段 spans。观众的问题他答得长（大约一分钟以上，或展开了论证）的，也是一个 TOPIC，knowledge_type 用 QA。不要把一段讲话硬拆成两个讲同一件事的单元。
+- role=QA_DIGEST：最多一个单元。收进全部答得短的观众问答（念了问题后三言两语答完的），一问不漏。没有就不要这个单元。
+- role=BACKGROUND：最多一个单元。收进开场、等待、调试设备、打招呼、与内容无关的生活杂谈、下播的话。杂谈里有他对事对人的评价的，也放这里，不要丢。没有就不要这个单元。
+- 与其他单元共享的字段：label 用小写英文+数字+下划线（如 unit_07_tsla_gap），本期内唯一；topic_refs 引用 INPUT TOPICS 的 id（必须存在），QA_DIGEST、BACKGROUND 也填时间最相近的主题。learning_priority：3=优先学习，2=值得学习，1=补充理解。depends_on：理解本单元需要先看的其他单元 label。why：一句话说明这个单元讲什么（描述内容，不赞美）。focus：留空字符串。
+- clip_candidate：TOPIC 为 true，QA_DIGEST、BACKGROUND 为 false。
+
+INPUT TOPICS
+{json.dumps(topics, ensure_ascii=False)}
+
+TRANSCRIPT
+{transcript}"""
+
+
 def detail_schema(playbook: dict) -> dict:
     return obj({"units": arr(obj({
         "label": STR, "summary": STR, "speaker_key": STR, "teacher_reasoning": STR,
@@ -176,13 +209,15 @@ def detail_schema(playbook: dict) -> dict:
     })), "uncertainties": STRS})
 
 
-def detail_prompt(playbook: dict, units: list[dict], topics: list[dict]) -> str:
+def detail_prompt(playbook: dict, units: list[dict], topics: list[dict], transcript: bool = False) -> str:
+    source = ("- 每个单元的 source_text 是它的全部原话转写，是第一证据：人名、数字、年份、谁说的都以它为准。"
+              "转写的同音错字才参照主题记录改正；不写 source_text 和主题记录都没有的内容。\n") if transcript else ""
     facets = playbook.get("facets", [])
     fdesc = "\n".join(f"  - {f['key']}（{f['label']}）：{f.get('description', '')}" for f in facets) or "  （无）"
     return f"""{context(playbook, 'knowledge')}
 
 禁止工具与媒体。为下面这一批 Knowledge Units 补全详细内容，只使用所附主题记录中的证据。
-- summary：完整、具体；保留条件、程度、因果与归属。teacher_reasoning：主讲人怎么看出来（推断须标"（推断）"）。
+{source}- summary：完整、具体；保留条件、程度、因果与归属。teacher_reasoning：主讲人怎么看出来（推断须标"（推断）"）。
 - screenshot_anchors：最多 2 个值得截图学习的时刻；t 必须**原样抄写所附主题记录或 claim 中出现过的时间码**（系统已换算为整场时间，不要自己计算），topic_id 指明来源主题。
 - required_context：独立观看这段内容所需的前提（中性描述，不加强）。
 - claims：本单元最关键的计划/已执行/条件/观点陈述；条件与观察范围必须准确（例如"当前不入场"与"继续观察"不能混为"剔除"）。
@@ -205,10 +240,13 @@ OUTLINE_SCHEMA = obj({
 })
 
 
-def outline_prompt(playbook: dict, meta: dict, units: list[dict]) -> str:
+def outline_prompt(playbook: dict, meta: dict, units: list[dict], written: bool = False) -> str:
+    where = ("各单元正文已经写好（UNITS 的 markdown），按 Source 时间顺序排列。开头与结尾只依据这些正文，不新增正文里没有的内容，"
+             "不提炼主讲人没有讲过的框架或原则；不出现“主题记录”“所附记录”等整理过程用语。") \
+        if written else "各单元正文由后续调用分别撰写，按 Source 时间顺序排列。"
     return f"""{context(playbook, 'article')}
 
-禁止工具与媒体。你在为本期写一篇结构化学习文章的**开头与结尾**；各单元正文由后续调用分别撰写，按 Source 时间顺序排列。
+禁止工具与媒体。你在为本期写一篇结构化学习文章的**开头与结尾**；{where}
 - title：本期文章标题（克制、信息化，不标题党）。
 - headline：本期题眼，12–20 字，点出本期最值得学的一两个具体判断（带标的或结构名，例如「MRNA 双缺口回踩，长周末前先减仓」）；不写日期、栏目名或“技术分析”这类泛称，不标题党。
 - intro_markdown：Markdown。包含一段 2–4 句的导语（本期主线），然后一个"学习导航"表格（列：单元｜看点｜优先级★），按时间顺序列出全部单元；优先级用 ★/★★/★★★。不要写运行元数据。
@@ -232,6 +270,33 @@ def sections_prompt(playbook: dict, units: list[dict], topics: list[dict]) -> st
 - 帮助理解的解释写成"（推断）"或"帮助理解："，不得包装成原话。
 - 不要写时间码列表、运行信息或素材索引；不要编造单元里没有的事实；不要在节内重复导航表。
 
+UNITS
+{json.dumps(units, ensure_ascii=False)}
+
+TOPIC RECORDS
+{json.dumps(topics, ensure_ascii=False)}"""
+
+
+def transcript_sections_prompt(playbook: dict, units: list[dict], topics: list[dict], feedback: str = "") -> str:
+    return f"""{context(playbook, 'article')}
+
+禁止工具与媒体。为下面每个 Knowledge Unit 写一节 Markdown 正文（每个 label 恰好一节）。
+source_text 是这个单元的全部原话转写，是第一证据。TOPIC RECORDS 是看视频得到的理解笔记，只用来改正转写的同音错字、看懂指代、写出画面上的文字和图表。
+
+按 role 写：
+- role=TOPIC：把 source_text 从头到尾**逐段改写成流畅的书面中文，这是改写，不是摘要**。他讲到的每个意思、例子、数字、比喻、类比、插话、判断都要写进去，不合并成概括句，不因为看起来不重要就跳过；只去掉口头禅、卡顿、重复和说错重说。可以用小标题、列表、加粗排版，但列表项也要写全原来的意思。他念的观众留言要写明是观众说的，他的回答写明是他的回答。source_text 里隔开的几段，写的时候衔接上。
+- role=QA_DIGEST：按原话顺序逐条写，一问不漏：`- **问：观众问了什么（时间）**　答：他怎么答的`。时间用 source_text 里这一问之前最近的时间。原话只有回答的，从语境写出问题。不合并、不省略，再短也单列一条。
+- role=BACKGROUND：归总成几条要点，不必逐句，但他对人对事的评价和态度要留下。
+
+所有 role 都要遵守：
+- 以 "## " 开头的小节标题（可含 Ticker，**不要编号**，系统会统一编号）；不要写时间码列表、运行信息或素材索引；不要在节内重复导航表。
+- **情绪和评价原样保留**：粗口、贬义词、嘲讽、激烈的说法，用「」逐字引用，不换成中性词，不替他缓和或加重。例如他说海外民运「言行都是非常猥琐」，就写这句，不能写成“言行式微”；他说「他赢个毛啊」，就引这句，不能写成“不能被定义为胜利”。这里的“克制”只是说整理者不加自己的赞美和渲染，不是削弱主讲人的态度。
+- **点到为止要留痕**：他提到一件事又说“不多讲”“不方便讲”“这里不谈”，照写他提到了什么，并写明他说不多讲。不替他下结论，不补全他没说的部分。
+- **时间按原话**：他说“今年”“四五月份”就这样写，不换算、不补年份；只有他自己说出年份才写年份。
+- 观点要写明是他的观点；他转述或朗读别人的内容，写明是转述或朗读。
+- 不补充 source_text 和 TOPIC RECORDS 都没有的事实；不加他没讲过的框架、原则、适用人群和启示。确实需要解释术语时才写一句“帮助理解：（推断）……”，默认不写。
+- 这是写给读者的文章：不出现“主题记录”“所附记录”“记录中”“转写”“source_text”这类整理过程用语；不解释缺了什么信息；段尾不加“未经证实”“未提供佐证”“需要指出”之类的声明。
+{feedback}
 UNITS
 {json.dumps(units, ensure_ascii=False)}
 

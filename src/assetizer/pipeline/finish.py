@@ -11,6 +11,7 @@ from ..contracts import prompts as P
 from ..llm import ContractError
 from ..providers.agy import AgyProvider, ProviderError
 from ..util import fmt_tc, now, read_json, sha256_file, write_json, write_text
+from . import fidelity
 from .context import RunContext, StageWarning
 
 
@@ -34,28 +35,42 @@ def review_check(ctx: RunContext) -> dict:
     for s in db.q("SELECT unit_ids, markdown FROM sections WHERE run_id=? AND kind='UNIT'", ctx.id):
         for uid in db.unj(s["unit_ids"], []):
             article[uid] = s["markdown"]
+    # 原话模式 checks each section against everything it was written from, so nothing there is cut short for the check
+    whole = fidelity.enabled(ctx.playbook)
+    max_article, max_asr = (20000, 20000) if whole else (1600, 1800)
+    clipped = set()
     for c in db.q("SELECT * FROM assets WHERE run_id=? AND kind='clip' AND status='GENERATED' ORDER BY start", ctx.id):
         u = units[c["unit_id"]]
+        clipped.add(u["id"])
         a, b = c["start"], c["end"]
+        spans = [(sg["start"], sg["end"]) for sg in u["segments"]] if whole else [(a, b)]
         items.append({"label": u["label"], "title": u["title"], "required_context": u["required_context"],
-                      "article": article.get(u["id"], "")[:1600],
+                      "article": article.get(u["id"], "")[:max_article],
                       "claims": [{k: x.get(k) for k in ("kind", "text", "condition", "time_scope")} for x in u.get("claims", [])][:8],
                       "asr_head": _text(words, a, a + 20), "asr_tail": _text(words, b - 20, b),
-                      "asr_full": _text(words, a, b)[:1800]})
+                      "asr_full": "".join(_text(words, x, y) for x, y in spans)[:max_asr]})
+    if whole:  # 问答速记 and the 杂谈 section have no clip, and are still written from what he said
+        for u in units.values():
+            if u["id"] not in clipped and u["id"] in article:
+                items.append({"label": u["label"], "title": u["title"], "required_context": u["required_context"],
+                              "article": article[u["id"]][:max_article], "claims": [],
+                              "asr_head": "", "asr_tail": "",
+                              "asr_full": "".join(_text(words, sg["start"], sg["end"]) for sg in u["segments"])[:max_asr]})
     if not items:
         return {"items": 0}
     llm = ctx.llm()
     by_label = {u["label"]: u for u in units.values()}
     found = 0
-    for bi in range(0, len(items), 8):
+    batch = 4 if whole else 8
+    for bi in range(0, len(items), batch):
         try:
-            want = {x["label"] for x in items[bi:bi + 8]}
+            want = {x["label"] for x in items[bi:bi + batch]}
 
             def cover(o, want=want):
                 if len({c["label"] for c in o["checks"]} & want) < 0.8 * len(want):
                     raise ContractError("MISSING_UNITS", "review check did not cover the batch")
 
-            o = llm.structured(ctx.calls, f"review-check-{bi // 8 + 1:02}", P.check_prompt(items[bi:bi + 8]),
+            o = llm.structured(ctx.calls, f"review-check-{bi // batch + 1:02}", P.check_prompt(items[bi:bi + batch]),
                                P.CHECK_SCHEMA, effort="medium", enforce=True, check=cover)
         except ContractError as e:
             ctx.event(f"review check batch failed: {e}", "warn")
