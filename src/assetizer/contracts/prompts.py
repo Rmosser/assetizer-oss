@@ -243,7 +243,8 @@ OUTLINE_SCHEMA = obj({
 def outline_prompt(playbook: dict, meta: dict, units: list[dict], written: bool = False) -> str:
     where = ("各单元正文已经写好（UNITS 的 markdown），按 Source 时间顺序排列。开头与结尾只依据这些正文，不新增正文里没有的内容，"
              "不提炼主讲人没有讲过的框架或原则；不出现“主题记录”“所附记录”“文稿”等整理过程用语；不用“深入”“全面”这类赞美词；"
-             "清单每条只写正文里有的意思，不加他没说的效果、好处和推论，他的判断不改重也不改轻。") \
+             "清单每条只写正文里有的意思，不加他没说的效果、好处和推论，他的判断不改重也不改轻；"
+             "他说“可能”“至少”“大概”“我觉得”的，清单里要留着这些限定，不能写成已经确定的事。") \
         if written else "各单元正文由后续调用分别撰写，按 Source 时间顺序排列。"
     return f"""{context(playbook, 'article')}
 
@@ -286,7 +287,7 @@ source_text 是这个单元的全部原话转写，是第一证据。TOPIC RECOR
 
 按 role 写：
 - role=TOPIC：把 source_text 从头到尾**逐段改写成流畅的书面中文，这是改写，不是摘要**。他讲到的每个意思、例子、数字、比喻、类比、插话、判断都要写进去，不合并成概括句，不因为看起来不重要就跳过；只去掉口头禅、卡顿、重复和说错重说。可以用小标题、列表、加粗排版，但列表项也要写全原来的意思。他念的观众留言要写明是观众说的，他的回答写明是他的回答。source_text 里隔开的几段，写的时候衔接上。
-- role=QA_DIGEST：按原话顺序逐条写，一问不漏：`- **问：观众问了什么（时间）**　答：他怎么答的`。时间用 source_text 里这一问之前最近的时间。原话只有回答的，从语境写出问题。不合并、不省略，再短也单列一条。
+- role=QA_DIGEST：按原话顺序逐条写，一问不漏：`- **问：观众问了什么（时间）**　答：他怎么答的`。时间用 source_text 里这一问之前最近的时间。原话只有回答的，从语境写出问题。不合并、不省略，再短也单列一条。他念的留言里的观点写在问题里，不写进他的回答；他答得只有几个字就写这几个字，不替他补理由。
 - role=BACKGROUND：归总成几条要点，不必逐句，但他对人对事的评价和态度要留下。
 
 所有 role 都要遵守：
@@ -366,7 +367,7 @@ CHECK_SCHEMA = obj({"checks": arr(obj({
 
 def check_prompt(items: list[dict], faithful: bool = False) -> str:
     extra = ("- SOFTENED：正文把原话的粗口、贬义词、称呼或极端说法换成了中性或更轻的说法（例如原话「被杀光了」，正文写“被大批消灭”）；"
-             "原话没说完而正文补了结论的，算 OVERSTATEMENT。\n") if faithful else ""
+             "原话没说完而正文补了结论的，算 OVERSTATEMENT。正文用主讲人的名字或“主讲人”称呼他，不算问题。\n") if faithful else ""
     return f"""{TOOL_RULE}
 {POLICY}
 

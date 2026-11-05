@@ -5266,6 +5266,19 @@ def test_softened_words_send_a_section_back():
     assert any("泰国人" in p for p in problems)
 
 
+def test_transcript_mode_rules_for_the_lists_answers_and_flags():
+    from assetizer.contracts import prompts as P
+    from assetizer.pipeline import fidelity
+    playbook = {"identity": {"channel": "F", "speaker": "S", "speaker_key": "host"}, "rules": [], "facets": []}
+    assert "限定" in P.outline_prompt(playbook, {}, [], written=True)
+    assert "限定" not in P.outline_prompt(playbook, {}, [])
+    assert "不写进他的回答" in P.transcript_sections_prompt(playbook, [], [])
+    assert "不算问题" in P.check_prompt([], faithful=True)
+    assert "不算问题" not in P.check_prompt([])
+    source = "他讲了一段话" * 20
+    assert any("转写" in p for p in fidelity.section_problems("TOPIC", source, source + "（原转写作无耻之动）"))
+
+
 def test_a_section_much_longer_than_what_he_said_is_sent_back():
     from assetizer.pipeline import fidelity
     source = "他讲了一段话" * 20
