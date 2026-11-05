@@ -8,6 +8,7 @@ import { reduceMotion, smooth } from "../util";
 import { cn, Seg, Toast, useCompact, useNarrow } from "../components/channel/bits";
 import { FIELD_OF_SOURCE, FIELD_OF_VAR, GoalCard, IntakeCard, PropsCard, StructureCard, TitleCard } from "../components/channel/Cards";
 import { activeOf, draftOf, Header, modeOf, Switcher } from "../components/channel/Header";
+import { keepPlace, useLinkedScroll } from "../components/channel/linkScroll";
 import { keys, useLitDelegation } from "../components/channel/lit";
 import { LockSheet, TargetPicker } from "../components/channel/LockSheet";
 import { Manuscript } from "../components/channel/Manuscript";
@@ -53,7 +54,7 @@ let morphs = 0;
 function morph(update: () => void, cls: string[], after?: () => void) {
   if (!("startViewTransition" in document) || reduceMotion()) { update(); after?.(); return; }
   const root = document.documentElement, n = ++morphs;
-  root.classList.remove("ch-vt-open", "ch-vt-close", "ch-vt-col");
+  root.classList.remove("ch-vt-open", "ch-vt-close", "ch-vt-col", "ch-vt-nt");
   root.classList.add("ch-vt", ...cls);
   document.startViewTransition(() => { flushSync(update); after?.(); }).finished
     .finally(() => { if (n === morphs) root.classList.remove("ch-vt", ...cls); }).catch(() => {});
@@ -141,6 +142,9 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const [view, setView] = useState<View>(["manuscript", "rules"].includes(qs.get("view") || "") ? (qs.get("view") as View) : "studio");
   const [sel, setSel] = useState<{ sample: string | null; run: string | null }>({ sample: qs.get("sample"), run: qs.get("run") });
   const [cmp, setCmp] = useState(false);
+  const [spread, setSpread] = useState(qs.get("spread") === "1");
+  const [vs, setVs] = useState<string | null>(qs.get("vs"));
+  const [linked, setLinked] = useState(true);
   const [draft, setDraft] = useState<Draft | null>(() => unsaved.get(ch.id) ?? null);
   useEffect(() => { if (draft) unsaved.set(ch.id, draft); else unsaved.delete(ch.id); }, [draft, ch.id]);
   const [open, setOpen] = useState<string | null>(null);
@@ -157,6 +161,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const compact = useCompact();
   const studio = useRef<HTMLDivElement>(null);
   const pane = useRef<HTMLDivElement>(null);
+  const vsPane = useRef<HTMLDivElement>(null);
   const bar = useRef<HTMLElement>(null);
   const toastT = useRef<number | undefined>(undefined);
   const inflight = useRef(new Set<string>());  // requests that spend model quota, under way
@@ -219,9 +224,10 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
     if (view !== "studio" && msPb) p.set("pb", String(msPb));
     if (sampleId && sel.sample) p.set("sample", sampleId);
     if (runId && sel.run) p.set("run", runId);
+    if (spread && view === "studio") { p.set("spread", "1"); if (vs) p.set("vs", vs); }
     const q = p.toString();
     history.replaceState(history.state, "", `${location.pathname}${q ? `?${q}` : ""}`);
-  }, [page, view, msPb, sampleId, runId, sel.sample, sel.run]);
+  }, [page, view, msPb, sampleId, runId, sel.sample, sel.run, spread, vs]);
 
   useEffect(() => {  // the run a phone was waiting for finished: show it
     const s = want && samples.find((x) => x.id === want.sample);
@@ -264,8 +270,17 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
     for (const p of older) { const r = runFor(sample, p.id); if (done(r)) return r; }
     return null;
   })();
-  const cmpQ = usePoll<Compare & { a: { id: string }; b: { id: string } }>(cmp && prevRun && runId ? `/api/compare?a=${prevRun.id}&b=${runId}` : null, 0);
-  const cmpData = cmp && prevRun && cmpQ.data?.a?.id === prevRun.id && cmpQ.data?.b?.id === runId ? cmpQ.data : null;
+  // 展开: this page beside another finished version of the same sample, newest first (a version counts once, by the run its cell shows)
+  const others = mode === "tuning" && sample && run ? (wb?.playbooks || []).slice().sort((a, b) => b.version - a.version)
+    .map((p) => runFor(sample!, p.id)).filter((r): r is Run => done(r) && r.id !== run!.id) : [];
+  const vsRun = others.find((r) => r.id === vs) ?? prevRun ?? others[0] ?? null;
+  const wide = spread && !narrow && page === "studio" && view === "studio" && !!vsRun && pv.data?.configured !== false;
+  const vsPv = usePreview(ch.id, wide ? vsRun!.id : null, dirty ? draft : null);
+  const vsPreview = vsPv.data?.configured ? vsPv.data : null;
+  const cmpRun = wide ? vsRun : cmp ? prevRun : null;
+  const cmpQ = usePoll<Compare & { a: { id: string }; b: { id: string } }>(cmpRun && runId ? `/api/compare?a=${cmpRun.id}&b=${runId}` : null, 0);
+  const cmpData = cmpRun && cmpQ.data?.a?.id === cmpRun.id && cmpQ.data?.b?.id === runId ? cmpQ.data : null;
+  const cmpId = cmpData ? cmpRun?.id ?? null : null;
 
   // ------------------------------------------------------------------ chapters: which section of the page each unit went into
   const { secOf, merged } = useMemo(() => {
@@ -279,6 +294,9 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
     }
     return { secOf: m, merged: many };
   }, [preview]);
+  const pairs = useMemo(() => (cmpData?.pairs || []).flatMap((p) => (p.a && p.b ? [{ a: p.a.id, b: p.b.id }] : [])), [cmpData]);
+  const vsSec = useMemo(() => new Map(pairs.flatMap((p) => { const i = secOf.get(p.b); return i === undefined ? [] : [[p.a, i] as const]; })), [pairs, secOf]);
+  useLinkedScroll(vsPane, pane, pairs, wide && linked, `${vsPreview?.run_id}:${preview?.run_id}:${vsPv.loading}:${pv.loading}:${pairs.length}`);
   const badge = (i: number) => (!merged ? null : cfg?.template === "chapters" ? `第${cn(i + 1)}章` : cfg?.template === "reading-guide" ? String(i + 1).padStart(2, "0") : `#${i + 1}`);
   const jump = (i: number) => {
     const el = pane.current?.querySelector(`[data-k~="c:${i}"]`) as HTMLElement | null;
@@ -321,6 +339,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   };
   const pick = (sid: string, rid: string) => {
     setSel({ sample: sid, run: rid }); setCmp(false); setWant(null);
+    if (sid !== sample?.id) setVs(null);  // the other page stays what was chosen while stepping through this sample's versions
     // an open sheet turns to the version just chosen, so the rules and what they produced stay the same version
     const pid = wb?.samples.find((x) => x.id === sid)?.runs.find((r) => r.id === rid)?.playbook_id;
     if (view !== "studio" && pid) setMsPb(pid);
@@ -383,8 +402,16 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
     const cut = !!col && !!card && card.getBoundingClientRect().top < col.getBoundingClientRect().top - 1;
     morph(go, cut ? ["ch-vt-open", "ch-vt-col"] : ["ch-vt-open"], () => settle(".ch-msh .ch-msx", ".ch-studio"));
   };
-  const openMs = (v: "manuscript" | "rules", f?: string) => sheetOpen(() => { setMsPb(goalPb?.id ?? null); setFocus(f || null); setView(v); });
+  const openMs = (v: "manuscript" | "rules", f?: string) => sheetOpen(() => { setSpread(false); setMsPb(goalPb?.id ?? null); setFocus(f || null); setView(v); });
   const closeMs = () => morph(() => { setView("studio"); setFocus(null); }, ["ch-vt-close"], () => settle(".ch-goal .ch-msx", ".ch-goal"));
+  // the Notion page grows to the left over the source and the cards, its right edge and its toggle where they were
+  const toggleSpread = () => morph(() => setSpread(!wide), [wide ? "ch-vt-close" : "ch-vt-open", "ch-vt-nt"], keepPlace(pane.current));
+  useEffect(() => {
+    if (!wide || sheet || target) return;
+    const on = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented && !(e.target as Element).closest?.("input, textarea")) toggleSpread(); };
+    addEventListener("keydown", on);
+    return () => removeEventListener("keydown", on);
+  }); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ------------------------------------------------------------------ what each pane shows
   const version = mode === "tuning" ? (run?.version ? `v${run.version}` : "通用") : activePb ? `v${activePb.version}` : "通用";
@@ -393,15 +420,19 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const unitMid = new Map((detail?.units || []).map((u) => [u.id, (u.start + u.end) / 2]));
   const flags = mode === "tuning" && run && !detailLoading ? run.flag_at
     : (detail?.flags || []).filter((f) => f.severity !== "INFO" && unitMid.has(f.target_id)).map((f) => unitMid.get(f.target_id) as number);
-  const head: PaneHead | null = mode === "tuning" && sample && run ? (() => {
-    const adopted = sample.adopt.run_id === run.id;
+  const runHead = (s: NonNullable<typeof sample>, r: Run): PaneHead => {
+    const adopted = s.adopt.run_id === r.id;
     return {
-      version, adopted: adopted ? { pinned: sample.adopt.pinned } : null, canAdopt: !adopted, canPin: adopted && !sample.adopt.pinned,
-      canUnpin: adopted && sample.adopt.pinned, onAdopt: () => adopt(sample.id, run.id, true), onPin: () => adopt(sample.id, run.id, true),
-      onUnpin: () => adopt(sample.id, null, false), cmpVersion: prevRun?.version ?? null, cmp, onCmp: () => setCmp(!cmp),
-      link: { href: `/issue/${encodeURIComponent(sample.id)}?run=${encodeURIComponent(run.id)}`, text: "对照视图", external: false },
+      version: r.version ? `v${r.version}` : "通用", adopted: adopted ? { pinned: s.adopt.pinned } : null, canAdopt: !adopted, canPin: adopted && !s.adopt.pinned,
+      canUnpin: adopted && s.adopt.pinned, onAdopt: () => adopt(s.id, r.id, true), onPin: () => adopt(s.id, r.id, true),
+      onUnpin: () => adopt(s.id, null, false), cmpVersion: null, cmp: false, onCmp() {},
+      link: { href: `/issue/${encodeURIComponent(s.id)}?run=${encodeURIComponent(r.id)}`, text: "对照视图", external: false },
     };
-  })() : issue ? {
+  };
+  const head: PaneHead | null = mode === "tuning" && sample && run ? {
+    ...runHead(sample, run), cmpVersion: (wide ? vsRun?.version : prevRun?.version) ?? null, cmp, onCmp: () => setCmp(!cmp),
+    spread: !narrow && vsRun && pv.data?.configured ? { on: wide, toggle: toggleSpread } : undefined,
+  } : issue ? {
     version, adopted: null, canAdopt: false, canPin: false, canUnpin: false, onAdopt() {}, onPin() {}, onUnpin() {},
     cmpVersion: null, cmp: false, onCmp() {},
     link: issue.notion_url ? { href: issue.notion_url, text: "在 Notion 打开", external: true } : { href: `/issue/${encodeURIComponent(issue.id)}`, text: "对照视图", external: false },
@@ -414,7 +445,15 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const switcher = compact ? <Seg small label="预览" value={tab} onChange={setTab} options={[{ value: "notion", label: "Notion 页面" }, { value: "source", label: "原片" }]} /> : null;
   const notionPane = (
     <NotionPane preview={preview} error={pv.error} loading={pv.loading} head={head} cmp={cmpData} secOf={secOf} propKey={propKey}
-      titleKey={titleKey} fieldOf={fieldOf} paneRef={pane} empty={notionEmpty} switcher={switcher} />
+      titleKey={titleKey} fieldOf={fieldOf} paneRef={pane} empty={notionEmpty} switcher={wide ? null : switcher} />
+  );
+  const vsPage = wide && sample && (
+    <NotionPane other preview={vsPreview} error={vsPv.error} loading={vsPv.loading} cmp={cmpData} secOf={vsSec} propKey={propKey}
+      titleKey={titleKey} fieldOf={fieldOf} paneRef={vsPane}
+      head={{ ...runHead(sample, vsRun!), extra: <button className={`ch-phb${linked ? " on" : ""}`} aria-pressed={linked} onClick={() => setLinked(!linked)}>联动</button> }}
+      picker={<span className="ch-vsv" role="group" aria-label="对比版本">{others.map((r) => (
+        <button key={r.id} className={`ch-vsb${r.id === vsRun!.id ? " on" : ""}`} aria-pressed={r.id === vsRun!.id} onClick={() => setVs(r.id)}>v{r.version}</button>
+      ))}</span>} />
   );
   const sourcePane = (
     <SourcePane detail={detail} loading={detailLoading || (!detail && !!(sampleId && runId))} channelName={ch.name} track={track} flags={flags} version={version} cmp={cmpData}
@@ -437,14 +476,14 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
         onLock={() => setSheet(true)} onRetune={retune} reload={reloadList} tabs={tabs} />
       {page === "board" ? <Board ch={ch} mode={mode} onSetIngest={setIngest} flash={flash} /> : <>
       {mode === "tuning" && (wb
-        ? <Matrix wb={wb} ch={ch} sel={{ sample: sample?.id ?? null, run: run?.id ?? null }} cmp={cmpData ? prevRun?.id ?? null : null} act={act}
+        ? <Matrix wb={wb} ch={ch} sel={{ sample: sample?.id ?? null, run: run?.id ?? null }} cmp={cmpId} act={act}
             want={narrow ? want : null} onWant={setWant} onPick={pickCell} />
         : <section className="ch-tb loading" aria-busy="true" />)}
-      {hasBar && <Current wb={wb!} s={sample!} run={run!} cmp={cmpData ? prevRun?.id ?? null : null} onPick={pick} act={act} barRef={bar} />}
+      {hasBar && <Current wb={wb!} s={sample!} run={run!} cmp={cmpId} onPick={pick} act={act} barRef={bar} />}
       {mode === "locked" && <LockedBar issues={issues} selected={issue?.id ?? null} onPick={(i) => setSel({ sample: i.id, run: i.current_run_id })} />}
       {mode === "discovery" && <DiscoveryBar issue={issue} />}
-      <div className={`ch-studio${view !== "studio" ? " ms" : ""}${hasBar ? " hc" : ""}`} ref={studio}>
-        {view === "studio" ? (
+      <div className={`ch-studio${view !== "studio" ? " ms" : ""}${hasBar ? " hc" : ""}${wide ? " wide" : ""}`} ref={studio}>
+        {wide ? vsPage : view === "studio" ? (
           <>
             {!compact ? sourcePane : narrow ? turn : null}
             <div className="ch-cards" aria-label="设置">
@@ -470,7 +509,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
             seed={annQ.data} onClose={closeMs} onRetune={() => retune().catch((e) => flash(e.message))} onSave={savePrompt}
             onRecompile={recompile} initialText={initialText} />
         )}
-        {view !== "studio" || !compact ? notionPane : !narrow ? turn : null}
+        {wide || view !== "studio" || !compact ? notionPane : !narrow ? turn : null}
         <Wires host={studio} />
       </div>
       </>}

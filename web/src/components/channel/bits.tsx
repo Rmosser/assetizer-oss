@@ -44,7 +44,7 @@ export const cn = (n: number) => (n <= 10 ? CN[n] : n < 20 ? "十" + (n > 10 ? C
 export const short = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
 type IconName = "date" | "text" | "relation" | "select" | "time" | "url" | "title" | "number" | "check" | "chev" | "chevd" | "play"
-  | "x" | "pen" | "plus" | "db" | "lock" | "swap" | "box" | "ext";
+  | "x" | "pen" | "plus" | "db" | "lock" | "swap" | "box" | "ext" | "unfold" | "fold";
 const PATHS: Record<IconName, React.ReactNode> = {
   date: <><rect x="3.5" y="5" width="17" height="15" rx="2" /><path d="M3.5 9.5h17M8 3v4M16 3v4" /></>,
   text: <path d="M4 7h16M4 12h16M4 17h10" />,
@@ -66,6 +66,8 @@ const PATHS: Record<IconName, React.ReactNode> = {
   swap: <path d="M7 7h11l-3-3M17 17H6l3 3" />,
   box: <rect x="5" y="5" width="14" height="14" rx="2" />,
   ext: <path d="M14 5h5v5M19 5l-8 8M10 6H6a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1v-4" />,
+  unfold: <path d="M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7" />,
+  fold: <path d="M20 10h-6V4M14 10l7-7M4 14h6v6M10 14l-7 7" />,
 };
 export function Icon({ name, size = 15, fill = false }: { name: IconName; size?: number; fill?: boolean }) {
   return (

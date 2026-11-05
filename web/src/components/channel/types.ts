@@ -99,6 +99,7 @@ export type SourceDetail = {
 };
 export type Compare = {
   a_units: (Unit & { change: string })[]; b_units: (Unit & { change: string })[];
+  pairs: { a: { id: string } | null; b: { id: string } | null }[];  // units of the two runs over the same stretch of video
   counts: { new: number; split: number; merge: number; gone: number };
   rules_added: string[]; rules_removed: string[]; rules_changed: { from: string; to: string; label: string }[];
 };

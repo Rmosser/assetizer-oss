@@ -33,6 +33,12 @@ export ASSETIZER_HOME=$(mktemp -d)
 
 至少在 1600、1280、390 三种宽度和深色模式下各看一遍。频道页的检查要点见 [channel-page.md](channel-page.md) 第 11 节。
 
+调试台（矩阵、三栏、展开并排）可以用模拟数据看，不要后端、Notion 和模型（先 build）：
+
+```bash
+node web/tools/mock-spread.mjs   # 打开 http://127.0.0.1:8797/channels/mock/studio
+```
+
 CookieCloud 配置面板有一个浏览器冒烟脚本（先 build；它在仓库根目录起一个一次性的本地后端，不接受生产地址；默认用本机 Chrome，`BROWSER=webkit` 换 WebKit）。`PYTHON` 要给绝对路径：
 
 ```bash

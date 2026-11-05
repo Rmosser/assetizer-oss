@@ -14,6 +14,8 @@ export function notionDate(v: string) {
   return `${MONTHS[t.getMonth()]} ${t.getDate()}, ${t.getFullYear()} ${h % 12 || 12}:${String(t.getMinutes()).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
 }
 const TAG: Record<string, string> = { split: "拆出", merge: "合并", new: "新" };
+/** the same marks seen from the other page of the spread: what became of this unit over there */
+const TAG_A: Record<string, string> = { split: "拆开", merged: "并入", gone: "不再单列" };
 
 export function Rich({ segs }: { segs?: Seg[] }) {
   return <>{(segs || []).map((s, i) => {
@@ -119,35 +121,48 @@ export type PaneHead = {
   version: string; adopted: { pinned: boolean } | null; canAdopt: boolean; canPin: boolean; canUnpin: boolean;
   onAdopt: () => void; onPin: () => void; onUnpin: () => void;
   cmpVersion: number | null; cmp: boolean; onCmp: () => void; link: { href: string; text: string; external: boolean } | null;
+  spread?: { on: boolean; toggle: () => void };  // 展开: this page beside another version of it
+  extra?: React.ReactNode;
 };
 
 /** Notion 页面: what this run becomes in the library under the settings on the left, before anything is written. */
-export function NotionPane({ preview, error, loading, head, cmp, secOf, propKey, titleKey, fieldOf, paneRef, empty, switcher }: {
+export function NotionPane({ preview, error, loading, head, cmp, secOf, propKey, titleKey, fieldOf, paneRef, empty, switcher, other, picker }: {
   preview: Preview | null; error: string | null; loading: boolean; head: PaneHead | null; cmp: Compare | null;
   secOf: Map<string, number>; propKey: (r: PropRow) => string; titleKey: string; fieldOf: (v: string) => string | null;
   paneRef: React.RefObject<HTMLDivElement | null>; empty?: React.ReactNode; switcher?: React.ReactNode;
+  other?: boolean;  // the page on the left of the spread, the a side of `cmp`
+  picker?: React.ReactNode;  // which version it is, in place of the pane's name
 }) {
-  const changes = new Map((cmp?.b_units || []).map((u) => [u.id, u.change]));
+  const changes = new Map((other ? cmp?.a_units : cmp?.b_units)?.map((u) => [u.id, u.change]) || []);
+  const tags = other ? TAG_A : TAG;
   let n = 0;
   const p = preview;
   const titleText = p?.title.map((x) => x.text).join("") || "";
   return (
-    <div className="ch-pane ch-nt">
+    <div className={`ch-pane ch-nt${other ? " vs" : ""}`}>
       <div className="ch-ph">
-        {switcher || <span className="pt">Notion 页面</span>}
-        {head && <span className="ch-chip sm">{head.version}</span>}
+        {picker || <>
+          {switcher || <span className="pt">Notion 页面</span>}
+          {head && <span className="ch-chip sm">{head.version}</span>}
+        </>}
         {head?.adopted && <span className="ch-adopted"><Adopt pinned={head.adopted.pinned} />{head.adopted.pinned ? "采用" : "采用 · 最新完成"}</span>}
         {head && (
           <div className="ch-pha">
             {head.canPin && <button className="ch-phb" onClick={head.onPin}>钉住这一版</button>}
             {head.canUnpin && <button className="ch-phb ghost" onClick={head.onUnpin}>跟随最新完成</button>}
             {head.canAdopt && <button className="ch-phb" onClick={head.onAdopt}>采用这一版</button>}
-            {head.cmpVersion != null && (
+            {head.cmpVersion != null && !head.spread?.on && (
               <button className={`ch-phb${head.cmp ? " on" : ""}`} aria-pressed={head.cmp} onClick={head.onCmp}><Icon name="swap" size={12} /><span>对比 v{head.cmpVersion}</span></button>
             )}
             {head.link && (head.link.external
               ? <a className="ch-phl" href={head.link.href} target="_blank" rel="noreferrer">{head.link.text} ↗</a>
               : <a className="ch-phl" {...linkProps(head.link.href)}>{head.link.text} ↗</a>)}
+            {head.extra}
+            {head.spread && (
+              <button className="ch-phb ch-nx" aria-expanded={head.spread.on} title={head.spread.on ? "合上（Esc）" : "展开"} aria-label={head.spread.on ? "合上" : "展开"} onClick={head.spread.toggle}>
+                <Icon name={head.spread.on ? "fold" : "unfold"} size={13} />
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -161,7 +176,7 @@ export function NotionPane({ preview, error, loading, head, cmp, secOf, propKey,
               <span className="nst"><span>Share</span><Icon name="ext" size={14} /></span>
             </div>
             <div className="nb">
-              {cmp && (
+              {cmp && !other && (
                 <div className="cmpbar">
                   <b>v{head?.cmpVersion} → {head?.version}</b>
                   <span className="k"><i className="nw" />新 {cmp.counts.new}</span>
@@ -187,11 +202,13 @@ export function NotionPane({ preview, error, loading, head, cmp, secOf, propKey,
               {p.body_error && <p className="b-p empty">{p.body_error}</p>}
               {p.blocks.map((b) => {
                 const sec = b.unit_ids.length ? secOf.get(b.unit_ids[0]) : undefined;
-                const k = b.origin === "unit" && sec !== undefined
+                const k = other && b.origin === "unit"  // lights the same stretch of the page beside it, by its chapter there
+                  ? keys(sec !== undefined && `c:${sec}`, ...b.unit_ids.map((u) => `a:${u}`), b.tpl && "tpl")
+                  : b.origin === "unit" && sec !== undefined
                   ? keys(`c:${sec}`, ...b.unit_ids.map((u) => `u:${u}`), b.tpl && "tpl")
                   : b.tpl ? keys(b.key === "h1" ? "tpl:h1" : null, "tpl") : undefined;
                 const isHead = b.origin === "unit" && b.key.endsWith(":h");
-                const tag = cmp && isHead ? [...new Set(b.unit_ids.map((u) => TAG[changes.get(u) || ""]).filter(Boolean))].join(" · ") : "";
+                const tag = cmp && isHead ? [...new Set(b.unit_ids.map((u) => tags[changes.get(u) || ""]).filter(Boolean))].join(" · ") : "";
                 if (b.type === "numbered_list_item") n += 1; else n = 0;
                 if (b.type === "numbered_list_item") {
                   return <div key={b.key} className="blk lt-bg" data-k={k} data-side={k ? "dst" : undefined}><div className="b-ol"><em>{n}.</em><span><Rich segs={b.text} /></span></div></div>;

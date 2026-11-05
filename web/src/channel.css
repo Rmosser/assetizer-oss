@@ -282,6 +282,8 @@ button.ch-curc:focus-visible { outline-offset: -2px; }
 /* the 稿纸 takes the source and card columns of the same grid: the Notion page does not move, and the sheet's right edge is
    the card column's, where its 合上稿纸 meets the card's 打开稿纸 */
 .ch-studio > .ch-msh { grid-column: 1 / 3; }
+/* 展开: two Notion pages side by side across the whole width, the page being looked at keeping the right edge */
+.ch-studio.wide { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .ch-studio.hc { margin-top: 8px; }
 .ch-pane { display: flex; flex-direction: column; height: calc(100vh - var(--top) - 44px); min-height: 640px; max-height: 1400px; border-radius: 12px;
   box-shadow: var(--shadow); overflow: hidden; border: 1px solid var(--rule); position: sticky; top: calc(var(--top) + 12px); }
@@ -299,6 +301,11 @@ button.ch-curc:focus-visible { outline-offset: -2px; }
 /* the actions and the link wrap as one row, so the link never drops onto a line of its own */
 .ch-pha { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
 .ch-pha .ch-phl { margin-left: auto; }
+.ch-phb.ch-nx { width: 26px; padding: 0; justify-content: center; flex: none; }
+.ch-vsv { display: inline-flex; gap: 2px; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.ch-vsb { flex: none; height: 24px; padding: 0 8px; border-radius: 6px; font: 500 12px var(--mono); color: var(--ink-3); }
+.ch-vsb:hover { color: var(--ink); }
+.ch-vsb.on { color: var(--paper); background: var(--ink); }
 .ch-adopted { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); }
 .ch-pw { flex: 1; overflow: auto; position: relative; transition: opacity 0.2s var(--ease); -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
 .ch-pw.empty { display: grid; place-items: center; color: var(--ink-3); font-size: 13px; }
@@ -672,6 +679,19 @@ button.ch-curc:focus-visible { outline-offset: -2px; }
 ::view-transition-new(ch-cards) { animation: ch-vt-rise 0.32s 0.14s cubic-bezier(0.2, 0, 0, 1) both; }
 ::view-transition-old(ch-mast), ::view-transition-old(ch-cur) { animation: none; }  /* neither changes: the snapshot stands in */
 ::view-transition-new(ch-mast), ::view-transition-new(ch-cur) { animation: none; opacity: 0; }
+/* 展开 uses the same stage: the source and the cards step back as above, the page grows from its right edge and the other
+   version comes up in the space it leaves. The goal card goes with the cards this time. */
+.ch-vt.ch-vt-nt .ch-goal { view-transition-name: none; }
+.ch-vt.ch-vt-nt .ch-studio > .ch-nt:not(.vs) { view-transition-name: ch-page; }
+.ch-vt.ch-vt-nt .ch-studio > .ch-nt.vs { view-transition-name: ch-vs; }
+.ch-vt-nt::view-transition-group(ch-page) { z-index: 2; border-radius: 12px; overflow: clip; background: var(--nt-bg); box-shadow: 0 0 0 1px var(--rule), var(--shadow);
+  animation-duration: 0.44s; animation-timing-function: cubic-bezier(0.2, 0, 0, 1); }
+.ch-vt-nt::view-transition-group(ch-vs) { z-index: 1; }
+::view-transition-old(ch-page), ::view-transition-new(ch-page) { height: 100%; object-fit: none; object-position: right top; mix-blend-mode: plus-lighter; }
+::view-transition-old(ch-page) { animation: ch-vt-out 0.16s linear both; }
+::view-transition-new(ch-page) { animation: ch-vt-in 0.26s 0.05s linear both; }
+::view-transition-old(ch-vs) { animation: ch-vt-back 0.22s cubic-bezier(0.4, 0, 1, 1) both; }
+::view-transition-new(ch-vs) { animation: ch-vt-fore 0.34s 0.1s cubic-bezier(0.2, 0, 0, 1) both; }
 @keyframes ch-vt-out { to { opacity: 0; } }
 @keyframes ch-vt-in { from { opacity: 0; } }
 @keyframes ch-vt-back { to { opacity: 0; transform: scale(0.98); } }
