@@ -11,7 +11,7 @@
 
 ## 发版
 
-1. 改 `package.yml` 的 `version` 并提交（提交标题沿用「版本 x.y.z：一句话说明」）。
+1. 确认当前分支包含生产上正在跑的版本：`origin/main` 可能落后生产，从落后的分支打包，安装后功能会退回去。改 `package.yml` 的 `version` 并提交（提交标题沿用「版本 x.y.z：一句话说明」）。
 2. 打包：
 
    ```bash
@@ -55,9 +55,11 @@
 lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <命令>
 ```
 
-常用：`status`（队列与最近的运行）、`doctor`（依赖与凭据文件是否在；加 `--agy` 才探测模型登录，会调用一次模型）、`cookies`（探测 CookieCloud）、`set <键> <值>`（机房卡片里能改的设置也可以这样写，键和范围见 `knobs.py`，例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`、`logs`（只读导出日志，见下面「日志与迭代」）。
+常用：`status`（队列与最近的运行）、`doctor`（ffmpeg、ffprobe、agy、yt-dlp、磁盘、Notion token、Telegram、服务器 Chromium 配置；加 `--agy` 才探测默认 provider 的登录，会调用一次模型；不查 CookieCloud 和分给别家的工序）、`cookies`（探测 CookieCloud）、`set <键> <值>`（机房卡片里能改的设置也可以这样写，键和范围见 `knobs.py`，例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`、`logs`（只读导出日志，见下面「日志与迭代」）。
 
-队列由 worker 自动暂停和恢复（例如模型登录失效、读不了视频），不要手动设置 `queue_paused`；需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」，它们还会把等待中的运行重新排队、解除对应告警。agy 的登录告警例外：按钮不解除它，只在 agy 回答 `/usage` 时解除（恢复时会在后台问一次）；模型调用报「未登录」时 worker 也先问一次 `/usage`，答得上就只让这一期等网络，不暂停生产；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
+新盒子的 `init` 不能在容器里跑：LPK 不含 `seeds/`（`scripts/lzc/build_content.sh`），`init` 要读它。
+
+队列由 worker 自动暂停和恢复，不要手动设置 `queue_paused`。暂停期间 worker 每 10 分钟探测一次在用的 provider（`health()`，会调用模型），都通过就恢复队列、解除这条告警。「读不了视频」不走这条路：它由空闲时的读视频自检解除，每小时一次，通过后等它的运行才重新排队。需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」：它们清掉暂停，把等登录和等额度的运行重新排队，解除额度告警。按钮不解除 agy 的登录告警，它要等上面的探测，或 agy 回答 `/usage`（恢复时会在后台问一次）；模型调用报「未登录」时 worker 也先问一次 `/usage`，答得上就只让这一期等网络，不暂停生产；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
 
 ## 日志与迭代
 
@@ -71,7 +73,7 @@ agy 和 yt-dlp 更新得勤，改适配代码时要参考它们最近的表现�
 
 运行、工序明细和模型调用记录（`model_calls`）是产品数据，不随日志删。
 
-每周一的日报多几行「🔧 迭代」：过去 7 天失败、等待、模型调用出错各几次（按原因），部分完成几期，有没有前一个月没见过的报错。网络抖动、直播没结束、视频不可用、清空时停下、太短不收不算。合计 5 次以上，或出现了新的报错，就写「日志多了，可以让开发用的 agent 扫一遍」。
+每周一的日报多几行「🔧 迭代」：过去 7 天失败、等待、模型调用出错各几次（按原因），部分完成几期，有没有前一个月没见过的报错。运行级的网络抖动、直播没结束、视频不可用、清空时停下、太短不收不算；模型调用的 `PROVIDER_TRANSIENT`、`PROVIDER_TIMEOUT` 照样计数。合计 5 次以上，或出现了新的报错，就写「日志多了，可以让开发用的 agent 扫一遍」。
 
 **扫一遍**由开发者用的 agent 主动发起：Mac 上的 Claude Code 每周一有定时任务按下面做，别的 agent 也照这个做。
 
@@ -83,7 +85,7 @@ agy 和 yt-dlp 更新得勤，改适配代码时要参考它们最近的表现�
    lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli logs > /tmp/assetizer-logs.json
    ```
 
-   `--summary` 是这一周的读数，`many` 为 true 才往下看；不加 `--summary` 是保留着的全部日志（`runs` 失败与部分完成的运行、`calls` 出错的模型调用带 stderr 末尾、`yt_dlp` 的原话、`events` 里的警告和错误），已去掉 token、cookie 和链接里的密钥。
+   `--summary` 是这一周的读数，`many` 为 true 才往下看；不加 `--summary` 是保留着的全部日志（`runs` 失败与部分完成的运行、`calls` 出错的模型调用带 stderr 末尾、`yt_dlp` 的原话、`events` 里的警告和错误），已去掉 token、cookie 和链接里的密钥。导出有上限（运行 300、调用 200、yt-dlp 100、事件 500，每个文件只取末尾 3000 字），只有 agy 产生 `stderr.log`，magpie 和兔子的 stderr 为空，编译调用不进 `model_calls`，所以没出现不等于没发生。
 3. 归类，对照代码判断要不要迭代：
    - yt-dlp：`YTDLP_OUTDATED`、`YOUTUBE_REFUSED` 变多，看 `yt_dlp` 里的原话，对照 `docker/requirements.lock` 的版本和 `youtube.py` 的 `classify()`；被判成 `UNKNOWN` 的新说法要登记进 `classify()`。
    - agy：按 `agy_version` 看 `calls`，新版本之后才出现的错误（读不了视频、越界读文件、输出不合规、超时），对照 `providers/agy.py`（`MEDIA_READ`、`classify_error`）和 `llm.py`。
@@ -109,6 +111,13 @@ agy 和 yt-dlp 更新得勤，改适配代码时要参考它们最近的表现�
 
   网页只处理「没登录」的情况；agy 已登录时不会退出重登，换 Google 账号仍用上面的命令行（在 agy 里 `/logout` 再登录）。
 - **agy 额度**：`agy -p /usage --output-format json` 由 agy 自己回答，不开对话、不耗额度。worker 在 agy 在用时每 15 分钟读一次（设置 `agy_quota`、一周走势 `agy_quota_log`），机房的「刷新」立即读一次。ChatGPT（magpie）的额度取自最近一次调用回执里的 `codex.rate_limits`（设置 `magpie_quota`）。
+- **magpie 和兔子的密钥**：`secrets/magpie-api-key`、`secrets/tuzi-api-key`，告警「模型密钥失效」时放这里，恢复后队列自动继续。放法和 Notion token 一样（只有用到时才需要）：
+
+  ```bash
+  lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; cat > /lzcapp/var/assetizer/data/secrets/magpie-api-key'
+  ```
+
+  地址和模型在设置 `magpie_url`、`magpie_model`、`tuzi_model`；哪道工序用哪家在机房「分工与补录」（设置 `stage_providers`，默认 provider 是 `llm_provider`）。
 
 - **YouTube**：用 CookieCloud，在「机房」→「YouTube 会话」里按面板步骤配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)）。容器走的代理节点换 IP 后，读取会报 `ip_not_allowed`：令牌不用动，把面板显示的出口 IP 加进 CookieCloud Setup 的 `/setup/read-allowlist` 并同步，旧 IP 删掉。
 
@@ -127,7 +136,11 @@ ssh root@devbox.heiyu.space '/lzcsys/bin/lzc-docker inspect -f "{{range .Network
 ssh -N -L 18770:<上一步的地址>:8770 root@devbox.heiyu.space
 ```
 
-然后打开 http://127.0.0.1:18770 。到 prodbox 的 SSH 偶尔会断开，长时间使用时套一层自动重连。盒子上的规则（`/AGENTS.md`）：lzcapp 容器用 `lzc-docker` 管理；不要从 `/`、`/data`、`/lzcsys/data` 递归扫描；找数据目录前先读 `/lzcsys/data/README`。
+然后打开 http://127.0.0.1:18770 。prodbox 同法，换掉主机名。到 prodbox 的 SSH 偶尔会断开，长时间使用时套一层自动重连。盒子上的规则（`/AGENTS.md`）：lzcapp 容器用 `lzc-docker` 管理；不要从 `/`、`/data`、`/lzcsys/data` 递归扫描；找数据目录前先读 `/lzcsys/data/README`。
+
+## 容器出站
+
+`lzc-manifest.yml` 给 web 和 worker 配了代理 `http://172.18.0.1:17896`，`.heiyu.space`、`.lazycat.cloud`、`web`、`worker` 和本机不走代理（`NO_PROXY`）。yt-dlp、CookieCloud 这些默认走它，所以 `ip_not_allowed` 看的是代理节点的出口 IP。magpie、兔子和 GPU 转写绕过代理直连（`providers/magpie.py`、`providers/tuzi.py`、`media/asr.py`）。
 
 ## GPU 转写（局域网 4070 Ti）
 

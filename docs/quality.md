@@ -9,6 +9,8 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'   # 生产用的 whis
 npm --prefix web ci
 ```
 
+新工作树没有 `.venv` 时，可以复用另一份检出的环境，把下面的 `.venv/bin/pytest` 换成 `PYTHONPATH=src ../assetizer/.venv/bin/python -m pytest`。
+
 ## 每次改动
 
 | 检查 | 命令 | 说明 |

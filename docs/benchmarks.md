@@ -4,7 +4,7 @@
 
 ## 怎么跑
 
-在 prodbox 的 worker 容器里运行（默认用盒子当前的 provider，`--provider` 可以临时指定）：
+在 prodbox 的 worker 容器里运行（默认用设置 `llm_provider` 的 provider 跑全部工序，不反映 `stage_providers`；`--provider` 可以临时指定 agy 或 tuzi）：
 
 ```bash
 lzc-cli docker -- exec -w /lzcapp/pkg/content cloudlazycatappassetizer-worker-1 python -m assetizer.cli bench
@@ -12,7 +12,7 @@ lzc-cli docker -- exec -w /lzcapp/pkg/content cloudlazycatappassetizer-worker-1 
 
 - `--only probes`：只跑便宜的探测，不需要基准视频，约 ¥0.5。
 - `--only quality`：只跑基准集上的质量对比，每期 58 分钟的视频约 ¥2。
-- 报告写在 `<home>/bench/reports/<日期>.md` 和同名的 `.json`，会自动和上一份报告对比。
+- 报告写在 `<home>/bench/reports/<YYYY-MM-DD_HHMM>.md` 和同名的 `.json`，会自动和上一份报告对比。
 - 每次跑都用新的目录，不复用上次的模型回答；基准视频和代理文件缓存在 `<home>/bench/media/`。
 
 ## 登记表

@@ -20,12 +20,12 @@
 | 调试中 | `stage = TUNING` | 「调试中」+「定稿 vN」 | 样片 × 版本矩阵（`Grid`）和工具条（`Current`）；手机上是条带（`Strip`） | 所选那一版的新增 / 改动 / 冲突 |
 | 已定稿 | `stage = LOCKED` | 收录状态 +「回到调试期」 | 最近几期 + 校注趋势（`LockedBar`） | 只读；有新草稿时提示回到调试期试跑 |
 
-已定稿频道若有期数被 Notion 映射问题挡住（`/api/channels` 的 `blocked > 0`），页头改为朱红「交付暂停」，卡片叁自动展开出问题的属性。
+已定稿频道若有期数被 Notion 映射问题挡住（`/api/channels` 的 `blocked > 0`），页头改为朱红「交付暂停」，卡片叁自动展开出问题的属性。看板的期次条（`StateBars.tsx`）里，`BLOCKED`、`FAILED` 和停下问你的 `HELD`（`PARTIAL`、`MAYBE_HAVE`、`YOURS_ON_PAGE`）也是朱红。
 
 ### 总览、看板与调试台（2026-10-28，design §R6-5）
 
 - `/channels` 是全部频道的总览（`components/channel/Overview.tsx`）：每个频道一行，阶段章、待定稿、收录灯，期数 / 本月 / 每期单元 / 每期校注 / 视频小时，近 16 周每周几期；等你拍板和交付暂停的频道排在前面。页头的频道菜单（`Switcher`）顶上是「全部频道」。
-- 已定稿频道打开看板（`/channels/{cid}/board`，`Board.tsx`）；页头的「看板 · 调试台」分段切换（只有已定稿频道有），调试台是 `/channels/{cid}/studio`。没有第三段的地址按阶段给默认页，并改写成带第三段的地址（之后调试台整理自己的查询参数也不会跳回看板）；带 `sample`、`run`、`view`、`pb` 参数的旧链接落在调试台。两页在同一个 `ChannelView` 里：切到看板不丢卡片里没保存的 Notion 设置，保存条在看板上也在。调试台的读取（最近几期、Notion 配置、批注、预览）等它第一次显示才开始；页头的「测试副本」标记来自频道列表，看板上也有。
+- 已定稿频道打开看板（`/channels/{cid}/board`，`Board.tsx`）；页头的「看板 · 调试台」分段切换（只有已定稿频道有），调试台是 `/channels/{cid}/studio`。已定稿频道没有第三段的地址落在看板并补上第三段（之后调试台整理自己的查询参数也不会跳回看板）；调试中和发现中的频道只有调试台，地址里的第三段会被删掉；带 `sample`、`run`、`view`、`pb` 参数的旧链接落在调试台。两页在同一个 `ChannelView` 里：切到看板不丢卡片里没保存的 Notion 设置，保存条在看板上也在。调试台的读取（最近几期、Notion 配置、批注、预览）等它第一次显示才开始；页头的「测试副本」标记来自频道列表，看板上也有。
 - 看板：上面是数字（期数与本月 / 上月、知识单元、视频小时与片段、每期校注、入 Notion），左边是近 16 周每周出刊（整数刻度；还没有成刊时只有一句话）与全部期次（不重复写频道名），右边吸顶三块——**试一期**（最新还没收的一期与「试这一期」，没有可试的就不出现）、**收录**（开关、最短时长（0 写「不限」，连 Shorts 一起收）；一行写上次扫描的时间与发现了什么、worker 的下次轮次或迟了多久，开启日期在开关的悬停提示里；最近一次扫描出错时的原因；会员视频收不进来时朱红一行写原因，登录态的问题带「机房」链接；「立即扫描」）和**补录**（排队与正在补的一期、额度不足时暂停的说明、「按日期挑选…」「贴链接」「取消排队」；「贴链接」在原位展开输入框，回车或「补录」提交，Esc 收起）。窄屏依次是数字、三块、每周出刊、期次。看板读不到时给出错与重试。
 - 「按日期挑选…」：本月 / 近 30 天 / 近 90 天 / 今年 / 全部，或任选起止日期（含起止日）：预设下面的胶囊写着当前范围，点开在原位展开一个月（周一起头，今天以后不能选，标题切到全年十二个月可快速跳回去）；第一下点起点、第二下点终点（先后不限），之间色带跟着指针走，选完自动收起；Esc 先取消起点、再收起，不会关掉补录面板；方向键 / PageUp / PageDown 也能选。`/backfill/candidates?since=&until=` 按频道的发片频率估出要列多深（yt-dlp 平铺列表，最多 1000 期），在后台列，页面每 1.5 秒问一次直到列好；列表留 10 分钟，更深的列表也服务更浅的范围。日期是「约 3 周前」这样的近似值，所以每一期标着大致时间。列好后还没有的期默认勾上（太短的不勾；「可能已有」的也不勾，可以手动勾：库里有一页没填视频链接、标题里的 MM/DD 对得上同一天或标题相同的手写页，悬停看是哪一页，见 architecture.md「交付到 Notion」），已在本刊、库里已有、排队中、样片不能勾；查不了 Notion 库时一期都不勾，底部写明并给「重新核对」；没列到开始日期（超过 1000 期）时注明只列了多少期。底部按勾选的期算视频小时、生产要多久（本频道每分钟视频的生产分钟数 × 时长）和约占周额度（看得出时才给）。出错时就地重试。
 - 卡片伍（收录）在已定稿频道上只显示状态和「去看板」；调试中的频道照旧显示开关（定稿后开启）。
@@ -49,15 +49,16 @@
 
 | 决定 | 何时出现 | 结果 |
 |---|---|---|
-| 写入 | 库里没有这一期 | 定稿后交付采用的那一版 |
+| 写入 | 库里没有这一期 | 定稿后交付采用的那一版。只对还没写过的期生效：已有课代表的页又没选替换的不重写（`STALE` 改回 `DELIVERED`），`REGISTERED` 的也不写 |
 | 保留库里的页 | 库里已有 | 不写，记 `REGISTERED` |
 | 换成新版本 | 库里已有，**且那一页是课代表写的** | 旧页归档后写新页（`STALE`） |
 | 等跑完 | 还有运行在跑、且未钉住 | 记 `HELD`；跑完交付新版，失败交付原采用版（`release_hold`） |
 
 - **只替换课代表自己写过的页**：定稿单只在库里那一页就是这期记下的 `notion_page_id` 时提供「换成新版本」（`channel_lock_preview` 的 `owned`）；服务端 `lock()` 拒绝没有 `notion_page_id` 的期做替换；交付时还会再查一次库（`delivery.registered`），已有别的页就登记为 `REGISTERED`，不新建。用户自建的页因此只能保留，不会连同上面的笔记一起被归档。
+- **交付时还可能停下**：采用的版本是 `COMPLETE_PARTIAL` 时定稿照样通过，但交付记 `HELD` / `PARTIAL`，补齐后才写；要替换的旧页上有别人的内容时记 `HELD` / `YOURS_ON_PAGE`，由你经 `/api/sources/{sid}/replace` 选留着旧页或换新页（见 [architecture.md](architecture.md)「交付到 Notion」）。
 - 库里有没有：按目标库里映射为「视频链接」的属性查视频 id（`delivery.registered_many`，结果翻页读完）。查不了库时，已写过页（有 `notion_page_id`）的期按「库里已有」处理、默认保留。**目标库没有视频链接属性时查不到任何页**，定稿单会把每期都当成「写入」。
-- 还在排队的试跑在定稿时取消；回到调试期（`retune`）清掉所有 `HELD`，并暂停自动收录。
-- **调试期间发的视频**：收录从开着被关掉时记下时间（`ingest:<频道>` 的 `paused_at`）。重新定稿时，定稿单按频道列表列出那之后发的、还没有的视频（不含样片、排队中、库里已有、太短的），默认勾上；定稿后勾上的进补录队列（一次一期、看额度，不挤占新视频），没勾的不收。列表读不到时那一组写明原因。
+- 还在排队的试跑在定稿时取消；回到调试期（`retune`）清掉所有 `HELD`，暂停自动收录，取消排队的补录（重新定稿也不恢复）。
+- **调试期间发的视频**：收录从开着被关掉时记下时间（`ingest:<频道>` 的 `paused_at`）。重新定稿时，定稿单从频道列表最新 30 期里列出那之后发的、还没有的视频（不含样片、排队中、库里已有、太短的），默认勾上；查 Notion 库失败时当作库里没有，照样勾上（和补录面板相反），入队后派发前还会再查一次库；定稿后勾上的进补录队列（一次一期、看额度，不挤占新视频），没勾的不收。列表读不到时那一组写明原因。
 - 所选版本必须至少在一期样片上跑完过（`tuning.tested`），否则拒绝（409）。
 - 定稿写入的是每期采用的那一版，所以定稿单写明其中有多少不是定稿版本跑出来的：「7 期不是 v11：v8 × 6、v7 × 1」。保留库里的页的期不算；「等跑完」的期按在跑的版本算。
 - 还没有跑完任何版本的样片：没有运行在跑时，定稿单显示「还没有完成的版本」，定稿后不会写入（`deliver_pending` 只处理有 `current_run_id` 的期）；有运行在跑时显示「等 vN 跑完」，那次运行跑完后自动成为采用版并写入。
@@ -77,17 +78,17 @@
 - 稿纸 = 学习目标原文 + 页边批注。批注来自 `GET /api/playbooks/{pid}/annotations`：每个子句在原文里的位置和去处（落实为哪条规则、系统承担、重复、未采用）、规则短名、冲突、覆盖统计、与上一版相比新增 / 改动 / 删除的规则。
 - 导入的规程没有逐句对应；没有短名的旧规程用规则开头几个字代替短名（`compiler.rule_label`）。两种情况稿纸都提供「重新编译出新草稿」：`POST /api/playbooks/{pid}/recompile` 用同一份学习目标重新编译（导入的规程取频道最新的学习目标），不复用上次的模型答复，原版本不变。重新编译期间编译状态显示「编译中」（以出现更新的规程版本为完成）。
 - 已定稿频道的稿纸不能改原文；导入的或缺短名的版本仍可「重新编译出新草稿」。
-- **在哪打开就在哪合上**：卡片壹右上角的「打开稿纸」（已定稿时为「查看稿纸」）把卡片展开成稿纸，「合上稿纸」就在同一个位置；宽屏下两者坐标完全一致。Esc 也能合上，正在改原文时只能经保存条离开。打开后焦点在「合上稿纸」，合上后回到「打开稿纸」。手机上卡片头部是折叠按钮，「打开稿纸」放在卡片底部。
+- **在哪打开就在哪合上**：卡片壹右上角的「打开稿纸」（已定稿时为「查看稿纸」）把卡片展开成稿纸，「合上稿纸」就在同一个位置；宽屏下两者坐标完全一致。Esc 也能合上；正在改原文时 Esc 不起作用，从保存条放弃或保存。这时「合上稿纸」仍能点，改动留在本机，再打开稿纸回到编辑态。打开后焦点在「合上稿纸」，合上后回到「打开稿纸」。手机上卡片头部是折叠按钮，「打开稿纸」放在卡片底部。
 - **改到一半不丢**：改原文时内容随输入存在本机（`localStorage` 的 `az-goal-draft:<频道>`），刷新、关掉标签或手机丢了页面，回来时仍在编辑态，保存或放弃后清掉；正在改时关闭或刷新页面先提醒。同一份学习目标 15 分钟内保存过、还在编译时再保存，不重复编译。
 - **切版本**：看过的版本的批注都留在页面里，切回去立即显示；新版本加载时上一版留在屏上（稍久才压暗），到了再淡入，差异始终用同一版的原文计算。版本标签下的底块滑到选中的版本。关掉「与 vN 的差异」时旧行折叠、新行的标记淡出；「原文 / 规则」切换后回到顶部。
 
 ### 3.4.1 展开：两版 Notion 页面并排
 
-- Notion 面板头最右的按钮把页面向左展开，盖住原片和设置卡，占满整宽；左边是同一期的另一版，右边仍是所选的格。按钮和右缘不动，再点一下或按 Esc 合上。只在这一期还有别的跑完的版本、有 Notion 目标、宽度大于 860px 时出现；已定稿频道只有一版，没有这个按钮。
-- 左页默认是上一个跑过的版本，页头的版本号可以换成其他跑完的版本；在矩阵或工具条上换右页，左页不变，除非两边撞上同一版（这时左页让位给默认版本）。两页都能「采用这一版」。
-- 差异：右页顶部是 `vA → vB` 统计条，章节标题标新 / 拆出 / 合并；左页标拆开 / 并入 / 不再单列。两页对比走 `/api/compare?a=<左>&b=<右>`，「对比 vN」按钮展开时隐藏。悬停一段，另一页同一段视频对应的章节一起亮（`compare.pairs`），属性也一样。
+- Notion 面板头最右的按钮把页面向左展开，盖住原片和设置卡，占满整宽；左边是同一期的另一版，右边仍是所选的格。按钮和右缘不动，再点一下或按 Esc 合上。只在这一期还有别的跑完的版本、有 Notion 目标、宽度大于 860px 时出现；已定稿频道只有一版，没有这个按钮。「跑完的版本」看矩阵这一格代表的运行（`runFor`：采用的 → 在跑的 → 最新的），所以某版本正在重跑或最新一次失败时不算，工具条换版本（`finished`）的口径更宽。
+- 左页默认是比右页旧的版本里最近跑完的；右页已是最旧时取其余版本里最新的，这时统计条是新 → 旧方向。页头的版本号可以换成其他跑完的版本，换过才固定：之后在矩阵或工具条上换右页，左页不变，除非两边撞上同一版（这时回到默认）；没换过时左页跟着右页走。换样片清掉手动的选择。两页都能「采用这一版」。
+- 差异：右页顶部是 `vA → vB` 统计条，章节标题标新 / 拆出 / 合并；左页标拆开 / 并入 / 不再单列。两页对比走 `/api/compare?a=<左>&b=<右>`，「对比 vN」按钮展开时隐藏。悬停一段，另一页同一段视频对应的章节一起亮（`compare.pairs`），属性也一样。配对是一对一的（重叠 ÷ 较短单元 ≥ 0.5）；章节标记来自 `changes()`（重叠占自身 ≥ 0.6），两套算法不同，拆出的多个单元只有一个配上。
 - 「联动」默认开：滚任意一页，另一页跟着走，同一段视频的知识单元同时到顶，两者之间按比例（`linkScroll.ts`）。关掉后两页各滚各的。
-- 没保存的 Notion 设置两页都用上。地址带 `spread=1` 和 `vs=<运行>`，刷新回到同一处。
+- 没保存的 Notion 设置两页都用上。地址带 `spread=1`，手动选过左页时再带 `vs=<运行>`，刷新回到同一处；「联动」不进地址，刷新后恢复为开。
 
 ### 3.5 对比上一版
 
@@ -95,7 +96,7 @@
 
 ### 3.6 矩阵与工具条：总览和细看（design §R3-11）
 
-- **主列**：有草稿时是草稿，没有时是最新版本（`leadOf`）。它是矩阵里最宽的一列，接下来要决定的总是它。
+- **主列**：依次是草稿、生效中的版本、最新版本（`leadOf`）。它是矩阵里最宽的一列，接下来要决定的总是它。
 - **默认列**：主列、上一个跑过的版本、被采用的、生效中的、在跑或排队的、当前选中的版本；其余收在「全部 N 版」里，展开后矩阵自己横向滚动，样片列吸左。列头是版本号、与上一版备注不同的部分（完整备注在悬停提示里）和采用这一版的期数。
 - **样片顺序**：后加的在上（`added_at` 倒序，同时加的保持加入顺序）。`tuning.trial()` 不指定样片时仍从最早加的跑起。
 - **一格**：跑完的格写轨道、单元数、校注数，采用的带 ✓，含义在悬停提示和 `aria-label` 里。空格子主列显示「试跑」，其他列悬停才显示（触屏上一直在）。
@@ -107,7 +108,7 @@
 
 - **与交付同源**：预览由 `preview.build()` 生成，正文复用交付用的同一套构建计划（`templates.PLANS[模板]` 或 `delivery._default_plan`，再加 `delivery._tail`），所以预览和真实写入一致。每个块带 `origin`（unit / intro / outro / frame / tail）、`unit_ids`、`asset_id`，供点亮和跳转使用。
 - **只读、带缓存**：库结构和关联页标题缓存 60 秒（`preview.cached`），预览请求不写 Notion。换库时清掉缓存；打开频道页、保存后这类不带改动的请求会重新读 Notion 并刷新缓存，所以在 Notion 里改了库结构，刷新页面就能看到。
-- **未保存的改动也算**：卡片贰、叁、肆的编辑形成 draft，前端防抖 300 ms 后连同 draft 请求 `POST /api/channels/{cid}/notion/preview`（`preview.draft_config` 合并到已保存配置上）。有改动时底部浮出保存条；去别的页面或别的频道再回来，改动和保存条都还在（按频道存在页面组件之外），关闭或刷新页面时提醒；保存条在时，提示条浮在它上方，不压住「放弃 / 保存」。保存带上读到的修订号（`rev`）：另一台设备在这之后保存过（412），保存条换成「这个频道的 Notion 设置刚在别处改过」与「放弃我的 / 用我的覆盖」，不会悄悄盖掉对方的改动。
+- **未保存的改动也算**：卡片贰、叁、肆的编辑形成 draft，前端防抖 300 ms 后连同 draft 请求 `POST /api/channels/{cid}/notion/preview`（`preview.draft_config` 合并到已保存配置上）。有改动时底部浮出保存条；去别的页面或别的频道再回来，改动和保存条都还在（按频道存在页面组件之外），关闭或刷新页面时提醒；保存条在时，提示条浮在它上方，不压住「放弃 / 保存」。保存带上读到的修订号（`rev`）：另一台设备在这之后保存过（412），保存条换成「这个频道的 Notion 设置刚在别处改过」与「放弃我的 / 用我的覆盖」，不会悄悄盖掉对方的改动。稿纸打开时保存条隐藏：改动仍进预览，要合上稿纸才能保存或放弃。
 - **改名跟随**：映射按属性 id 存，写入的选项按选项 id 记在 `option_ids`（`mapping.sync`）；读到库结构时（打开频道页、交付前）按 id 换成 Notion 里的当前名字并存回。旧配置没有选项 id 的，第一次读到时按名字补上。
 - **删了又建**：删掉的属性又建了同名同类型的，库里只有这一个、也没被别的映射用上时直接接上，不算问题项。
 - **问题项**：属性类型变了、选项被删、属性被删时，预览返回 `problems`；卡片叁在该行标朱红，交付暂停时自动展开它。报错文案在行内去掉已显示的属性名（`brief()`）。选不到的旧选项划掉显示，多选里点一下就能去掉。
@@ -121,7 +122,7 @@
   - `tok:<变量>`：标题变量；`p:<属性 id>`：Notion 属性；`tpl`、`tpl:h1`：页面结构
   - `u:<单元 id>`、`c:<章节序号>`：知识单元与它写进的章节；`a:<单元 id>`：对比时旧版的单元
   - `r:<规则 id>`、`cl:<子句 id>`：稿纸里的规则与子句
-- 实现见 `components/channel/lit.ts`：事件委托找到悬停元素的键，然后**注入一条 CSS 规则**（`[data-k~="键"]` 加上 `lt-bg` / `lt-ring` / `lt-seg` 的高亮样式），而不是重渲染。Notion 预览可能有上千个块，靠 React 状态逐个改会卡。
+- 实现见 `components/channel/lit.ts`：事件委托取悬停元素 `data-k` 的第一个键（后面的键只用来被别处点亮，顺序有含义），然后**注入一条 CSS 规则**（`[data-k~="键"]` 加上 `lt-bg` / `lt-ring` / `lt-seg` 的高亮样式），而不是重渲染。Notion 预览可能有上千个块，靠 React 状态逐个改会卡。
 - 连线（`Wires.tsx`）只画 `f:`、`tok:`、`p:` 三类，路线走栏与栏之间的空隙，不横穿面板；只连视口内可见的元素；窗口窄于 1100px 不画。滚动和缩放时用 `requestAnimationFrame` 重算。连线以点亮的键为 React key：从一个事实直接移到下一个会重新描线，滚动重算只移动现有的线。
 - 卡片肆里带点亮样式的是选中的模板和页面大标题，悬停 Notion 预览里来自模板的块会点亮它们，反过来也一样。
 - 点单元或轨道，Notion 预览滚到对应章节（`c:` 键）；原片正在播放时同时跳到单元起点。
@@ -189,6 +190,9 @@
 | `src/assetizer/preview.py` | Notion 预览 |
 | `src/assetizer/tuning.py` | 样片、试跑、采用、对比、定稿、回到调试期 |
 | `src/assetizer/pipeline/runner.py` | 跑完自动采用（`adopt_completed`）、定稿后提交时清钉住（`submit`） |
+| `src/assetizer/ingest.py` | 收录、补录队列与派发 |
+| `src/assetizer/playback.py` | 原片栏的低清版 |
+| `src/assetizer/templates.py` | Notion 页面模板 |
 | `src/assetizer/delivery.py` | 库内查重（`registered_many` / `registered`）与交付 |
 | `src/assetizer/web/app.py` | 频道页接口：定稿单的查库与 `owned` / `can_replace`、重新编译与编译状态 |
 | `src/assetizer/compiler.py` | 编译、子句位置、规则短名、批注 |
@@ -196,7 +200,7 @@
 
 ## 9. 页面用到的接口
 
-`/api/channels`（频道列表、状态与 `stats`）、`POST /api/channels/{cid}`（改名、学习原因）、`/api/status`（告警灯）、`/api/channels/{cid}/board`（看板）、`POST /api/channels/{cid}/scan`（立即扫描）、`POST /api/channels/{cid}/backfill`（补录排队；`now` 为「试这一期」）、`POST /api/channels/{cid}/backfill/link`（贴链接补录，只收本频道的视频）、`POST /api/channels/{cid}/backfill/cancel`、`/api/channels/{cid}/workbench`、`/api/channels/{cid}/candidates`（最新 15 期，样片挑选与试一期）、`/api/channels/{cid}/backfill/candidates`（按日期补录，列表在后台读）、`/api/channels/{cid}/samples/{sid}/remove`、`/api/channels/{cid}/trial-queue/clear`、`/api/runs/{rid}/retry`、`/api/channels/draft`、`/api/channels/track`、`/api/channels/{cid}/recent`、`/api/sources/{sid}?run=`、`/api/sources/{sid}/playback`、`/api/compare`、`/api/channels/{cid}/notion`（读 / 存）、`/api/channels/{cid}/notion/preview`、`/api/channels/{cid}/notion/target`、`/api/notion/databases`、`/api/notion/pages`、`/api/playbooks/{pid}/annotations`、`/api/playbooks/{pid}/recompile`、`/api/channels/{cid}/lock-preview`、`/api/channels/{cid}/lock`、`/api/channels/{cid}/retune`、`/api/channels/{cid}/trial`、`/api/channels/{cid}/samples`、`/api/channels/{cid}/ingest`、`/api/channels/{cid}/prompt`、`/api/sources/{sid}/adopt`。
+`/api/channels`（频道列表、状态与 `stats`）、`POST /api/channels/{cid}`（改名、学习原因）、`/api/status`（告警灯）、`/api/channels/{cid}/board`（看板）、`POST /api/channels/{cid}/scan`（立即扫描）、`POST /api/channels/{cid}/backfill`（补录排队；`now` 为「试这一期」）、`POST /api/channels/{cid}/backfill/link`（贴链接补录，只收本频道的视频）、`POST /api/channels/{cid}/backfill/cancel`、`/api/channels/{cid}/workbench`、`/api/channels/{cid}/candidates`（最新几期，上限 15：样片挑选取 15 期，看板「试一期」取 5 期）、`/api/channels/{cid}/backfill/candidates`（按日期补录，列表在后台读）、`/api/channels/{cid}/samples/{sid}/remove`、`/api/channels/{cid}/trial-queue/clear`、`/api/runs/{rid}/retry`、`/api/channels/draft`、`/api/channels/track`、`/api/channels/{cid}/recent`、`/api/sources/{sid}?run=`、`/api/sources/{sid}/playback`、`/api/compare`、`/api/channels/{cid}/notion`（读 / 存）、`/api/channels/{cid}/notion/preview`、`/api/channels/{cid}/notion/target`、`/api/notion/databases`、`/api/notion/pages`、`/api/playbooks/{pid}/annotations`、`/api/playbooks/{pid}/recompile`、`/api/channels/{cid}/lock-preview`、`/api/channels/{cid}/lock`、`/api/channels/{cid}/retune`、`/api/channels/{cid}/trial`、`/api/channels/{cid}/samples`、`/api/channels/{cid}/ingest`、`/api/channels/{cid}/prompt`、`/api/sources/{sid}/adopt`。
 
 旧链接 `/channels/{cid}/<旧标签>` 会跳到新页面：`prompt` 跳稿纸，`playbook` 跳规则视图，`settings` 跳看板，其余回到频道的默认页；调试台的位置写在地址里（`?sample=&run=&view=manuscript|rules&pb=`），刷新和分享都能回到同一处。
 

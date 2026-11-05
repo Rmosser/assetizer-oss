@@ -8,10 +8,10 @@
 
 | 路径 | 内容 |
 |---|---|
-| `src/assetizer/` | 后端：FastAPI（`web/app.py`）、生产流水线（`pipeline/`）、编译（`compiler.py`）、调试与定稿（`tuning.py`）、Notion 交付（`delivery.py`、`notion/`、`preview.py`） |
+| `src/assetizer/` | 后端：FastAPI（`web/app.py`）、生产流水线（`pipeline/`）、编译（`compiler.py`）、调试与定稿（`tuning.py`）、模型调用（`llm.py`、`providers/`）、Notion 交付（`delivery.py`、`notion/`、`preview.py`） |
 | `web/` | 前端（React + Vite + TS）；构建产物写入 `src/assetizer/web/static`，不进 Git |
 | `tests/test_core.py` | 全部后端测试 |
-| `seeds/` | 两个频道的初始学习目标与规程（`assetizer init` 使用） |
+| `seeds/` | 两个频道的初始学习目标与规程（`assetizer init` 使用；只在源码环境有，LPK 不含） |
 | `assets/` | 字幕用的中文字体；代码按源码目录的相对路径找它，打包时与 `src/` 放在一起 |
 | `experiments/` | 2026-10-05 对照实验的一次性脚本，不参与运行 |
 | `package.yml`、`lzc-*.yml`、`docker/`、`scripts/lzc/` | 懒猫 LPK 打包与发版 |
@@ -41,6 +41,6 @@ cd web && npm run build      # 前端类型检查 + 构建
 - 频道页（`web/src/pages/Channel.tsx`、`web/src/components/channel/`）改动前读 [docs/channel-page.md](docs/channel-page.md)：页面级类名用 `ch-` 前缀，复刻区块里的短类名一律写在 `.chp` 之下，避开 `styles.css` 的全局类名；高亮用墨色，朱红只用于冲突、失败、挡住交付的问题、校注刻度和「定」章；JS 与 CSS 的断点一起改。
 - 界面文案少字：布局已经说明的事不加次级标签和说明文字。
 - 改变长期决定时更新 [docs/design.md](docs/design.md)，保留条目编号（代码注释会引用「design §R2-5」这样的编号）。
-- 改了行为就同步更新 README 与相关 docs；当前文档写现状，过程与验证写在提交或 PR 里。提交信息用中文：标题一句话说明改了什么，正文列要点；发版提交写「版本 x.y.z：…」。
+- 改了行为就同步更新 README 与相关 docs；当前文档写现状，过程与验证写在提交或 PR 里；需求单和方案落地后移进 `docs/history/`，现状另写进当前文档。提交信息用中文：标题一句话说明改了什么，正文列要点；发版提交写「版本 x.y.z：…」。
 - 交付前审阅自己的净差异，集中修复确认的问题；检查通过、目标满足、没有实质阻断就停，不为一般建议继续扩大改动。
 - 改 agy、yt-dlp 的适配之前，或周一日报写「日志多了」时，按 [operations.md](docs/operations.md)「日志与迭代」只读扫一遍生产日志。
