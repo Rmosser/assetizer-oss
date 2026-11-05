@@ -231,7 +231,7 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
   box-shadow: var(--shadow); overflow: hidden; border: 1px solid var(--rule); position: sticky; top: calc(var(--top) + 12px); }
 .ch-yt { background: var(--yt-bg); color: var(--yt-ink); }
 .ch-nt { background: var(--nt-bg); color: var(--nt-ink); }
-.ch-ph { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--rule); font: 500 12.5px var(--sans);
+.ch-ph { display: flex; align-items: center; gap: 6px 10px; min-height: 44px; padding: 7px 14px; border-bottom: 1px solid var(--rule); font: 500 12.5px var(--sans);
   color: var(--ink-2); background: var(--chp-card); flex: none; flex-wrap: wrap; }
 .ch-ph .pt { font: 600 13px var(--sans); color: var(--ink); }
 .ch-phb { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--rule-2); font-size: 12px; color: var(--ink); }
@@ -240,6 +240,9 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-phb.ghost { border-color: transparent; color: var(--ink-3); }
 .ch-phl { font-size: 12px; color: var(--ink-3); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
 .ch-phl:hover { color: var(--ink); }
+/* the actions and the link wrap as one row, so the link never drops onto a line of its own */
+.ch-pha { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.ch-pha .ch-phl { margin-left: auto; }
 .ch-adopted { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); }
 .ch-pw { flex: 1; overflow: auto; position: relative; transition: opacity 0.2s var(--ease); -webkit-mask-image: linear-gradient(#000 calc(100% - 32px), transparent); mask-image: linear-gradient(#000 calc(100% - 32px), transparent); }
 .ch-pw.empty { display: grid; place-items: center; color: var(--ink-3); font-size: 13px; }

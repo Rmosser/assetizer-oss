@@ -137,16 +137,19 @@ export function NotionPane({ preview, error, loading, head, cmp, secOf, propKey,
         {switcher || <span className="pt">Notion 页面</span>}
         {head && <span className="ch-chip sm">{head.version}</span>}
         {head?.adopted && <span className="ch-adopted"><Adopt pinned={head.adopted.pinned} />{head.adopted.pinned ? "采用" : "采用 · 最新完成"}</span>}
-        {head?.canPin && <button className="ch-phb" onClick={head.onPin}>钉住这一版</button>}
-        {head?.canUnpin && <button className="ch-phb ghost" onClick={head.onUnpin}>跟随最新完成</button>}
-        {head?.canAdopt && <button className="ch-phb" onClick={head.onAdopt}>采用这一版</button>}
-        {head?.cmpVersion != null && (
-          <button className={`ch-phb${head.cmp ? " on" : ""}`} aria-pressed={head.cmp} onClick={head.onCmp}><Icon name="swap" size={12} /><span>对比 v{head.cmpVersion}</span></button>
+        {head && (
+          <div className="ch-pha">
+            {head.canPin && <button className="ch-phb" onClick={head.onPin}>钉住这一版</button>}
+            {head.canUnpin && <button className="ch-phb ghost" onClick={head.onUnpin}>跟随最新完成</button>}
+            {head.canAdopt && <button className="ch-phb" onClick={head.onAdopt}>采用这一版</button>}
+            {head.cmpVersion != null && (
+              <button className={`ch-phb${head.cmp ? " on" : ""}`} aria-pressed={head.cmp} onClick={head.onCmp}><Icon name="swap" size={12} /><span>对比 v{head.cmpVersion}</span></button>
+            )}
+            {head.link && (head.link.external
+              ? <a className="ch-phl" href={head.link.href} target="_blank" rel="noreferrer">{head.link.text} ↗</a>
+              : <a className="ch-phl" {...linkProps(head.link.href)}>{head.link.text} ↗</a>)}
+          </div>
         )}
-        <span className="grow" />
-        {head?.link && (head.link.external
-          ? <a className="ch-phl" href={head.link.href} target="_blank" rel="noreferrer">{head.link.text} ↗</a>
-          : <a className="ch-phl" {...linkProps(head.link.href)}>{head.link.text} ↗</a>)}
       </div>
       <div className={`ch-pw nt${loading ? " loading" : ""}`} ref={paneRef}>
         {error && <p className="ch-err pad">{error}</p>}
