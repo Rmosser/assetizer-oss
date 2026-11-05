@@ -47,6 +47,10 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
     } catch (e) { setErr((e as Error).message); setBusy(false); }
   };
   const v = lp?.playbook.version;
+  // 定稿 writes what each sample adopts, whichever version made it: what is going in that this version did not make
+  const written = (r: LockRow) => { const a = action(r); return a === "keep" ? null : a === "wait" || !r.adopted ? r.running?.version ?? null : r.adopted.version; };
+  const others = (lp?.samples || []).map(written).filter((x): x is number => x != null && x !== v);
+  const tally = [...new Set(others)].sort((a, b) => b - a).map((x) => `v${x} × ${others.filter((o) => o === x).length}`).join("、");
   return (
     <Sheet ref={sheet} onClose={onClose}>
       <div className="ch-sheet">
@@ -92,6 +96,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
                 <div className="srow cf"><span className="t">v{v} 还没在样片上跑过</span>
                   <button className="ch-btn sm" onClick={async () => { try { await onTrial(pbId); close(); } catch (e) { setErr((e as Error).message); } }}>去试跑</button></div>
               )}
+              {others.length > 0 && <div className="srow"><span className="t">{others.length} 期不是 v{v}：{tally}</span></div>}
               {lp.conflicts.length > 0 && (
                 <button className="srow cf" onClick={() => close(() => onConflict(lp.conflicts[0].clause_id))}>
                   <span className="t">v{v} 有 {lp.conflicts.length} 处与「只依据视频」冲突，执行时按原则</span><span className="n z">看原句 →</span>

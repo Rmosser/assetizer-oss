@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { get } from "../../api";
+import { smooth } from "../../util";
 import { Adopt, est, fmt, Icon, Track, useNarrow } from "./bits";
 import type { Channel, Run, Sample, Workbench } from "./types";
 
@@ -71,27 +72,37 @@ function AddSample({ cid, onAdd, close }: { cid: string; onAdd: (url: string) =>
   );
 }
 
-function Cell({ s, pb, run, queued, sel, cmp, onPick, act }: {
-  s: Sample; pb: Workbench["playbooks"][number]; run: Run | null; queued: number; sel: boolean; cmp: boolean;
+const percent = ([a, b]: [number, number]) => `${b ? Math.round((a / b) * 100) : 4}%`;
+const doing = (r: Run) => (r.production === "WAITING" ? (WAIT[r.wait_reason || ""] || "等待") : r.production === "QUEUED" ? "排队中" : "进行中");
+/** The version a trial uses by default, as the server has it (tuning.draft_playbook): the column and chip that lead. */
+const leadOf = (wb: Workbench) => wb.draft_id ?? wb.playbooks[0]?.id ?? null;
+/** What a run came to: its knowledge units, and its 校注 after a red tick; the words are in the cell's tooltip. */
+function Tally({ run }: { run: Run }) {
+  return <><b>{run.units ?? run.track.length}</b>{run.notes > 0 && <span className="ch-fl">{run.notes}</span>}</>;
+}
+
+function Cell({ s, pb, run, queued, sel, cmp, lead, onPick, act }: {
+  s: Sample; pb: Workbench["playbooks"][number]; run: Run | null; queued: number; sel: boolean; cmp: boolean; lead: boolean;
   onPick: () => void; act: MatrixActions;
 }) {
   const label = `${s.title} · v${pb.version}`;
   if (done(run)) {
     const adopted = s.adopt.run_id === run.id;
+    const tip = `${label} · ${run.units ?? run.track.length} 单元 · 校注 ${run.notes}${adopted ? " · 采用" : ""}`;
     return (
-      <button className={`ch-cell${sel ? " sel" : cmp ? " cmp" : ""}`} onClick={onPick} aria-pressed={sel} aria-label={label}>
+      <button className={`ch-cell${sel ? " sel" : cmp ? " cmp" : ""}`} onClick={onPick} aria-pressed={sel} aria-label={tip} title={tip}>
         <Track units={run.track} flags={run.flag_at} dur={s.duration || 0} />
-        <span className="cap"><b>{run.units ?? run.track.length} 单元</b><span>校注 {run.notes}</span>{adopted && <Adopt pinned={s.adopt.pinned} />}</span>
+        <span className="cap"><Tally run={run} />{adopted && <Adopt pinned={s.adopt.pinned} small />}</span>
       </button>
     );
   }
   if (run && live(run)) {
     const [a, b] = run.progress;
-    const what = run.production === "WAITING" ? (WAIT[run.wait_reason || ""] || "等待") : run.production === "QUEUED" ? "排队中" : "进行中";
+    const what = `${doing(run)} ${a}/${b}`, eta = run.eta_seconds ? est(run.eta_seconds / 60) : null;
     return (
-      <div className="ch-cell dis" aria-label={label}>
-        <span className="prog"><b style={{ width: `${b ? Math.round((a / b) * 100) : 4}%` }} /></span>
-        <span className="cap"><b>{what} {a}/{b}</b>{run.eta_seconds ? <span>{est(run.eta_seconds / 60)}</span> : null}</span>
+      <div className="ch-cell dis" aria-label={label} title={eta ? `${what} · ${eta}` : what}>
+        <span className="prog"><b style={{ width: percent(run.progress) }} /></span>
+        <span className="cap"><b>{what}</b>{eta && <span>{eta}</span>}</span>
       </div>
     );
   }
@@ -117,7 +128,7 @@ function Cell({ s, pb, run, queued, sel, cmp, onPick, act }: {
   }
   return (
     <div className="ch-cell dis" aria-label={label}>
-      <button className="ch-cplus" onClick={() => act.trial([pb.id], [s.id])}><Icon name="play" size={9} fill />试跑</button>
+      <button className={`ch-cplus${lead ? " lead" : ""}`} aria-label={`试跑：${label}`} onClick={() => act.trial([pb.id], [s.id])}><Icon name="play" size={9} fill />试跑</button>
     </div>
   );
 }
@@ -208,8 +219,8 @@ export function RunPending({ wb, want, act, switcher }: { wb: Workbench; want: W
       <div className="ch-pw ch-pend" role="status">
         <b>{s.title}</b>
         {run && live(run) ? (
-          <><span className="ch-prog" style={{ width: 160 }}><b style={{ width: `${b ? Math.round((a / b) * 100) : 4}%` }} /></span>
-            <span>{run.production === "WAITING" ? (WAIT[run.wait_reason || ""] || "等待") : run.production === "QUEUED" ? "排队中" : "进行中"} {a}/{b}{run.eta_seconds ? ` · ${est(run.eta_seconds / 60)}` : ""}</span></>
+          <><span className="ch-prog" style={{ width: 160 }}><b style={{ width: percent(run.progress) }} /></span>
+            <span>{doing(run)} {a}/{b}{run.eta_seconds ? ` · ${est(run.eta_seconds / 60)}` : ""}</span></>
         ) : queued >= 0 ? <span>v{pb.version} 排队第 {queued + 1}</span>
           : run && stopped(run) ? (<><span>v{pb.version} 已停下</span><button className="ch-btn sm" onClick={() => act.retry(run.id)}>重试</button></>)
           : run ? (<><span className="z" title={run.error_line || undefined}>v{pb.version} 没有跑完{run.error_line ? `：${run.error_line}` : ""}</span>
@@ -221,92 +232,224 @@ export function RunPending({ wb, want, act, switcher }: { wb: Workbench; want: W
   );
 }
 
+/** What a version's note says beyond the note of the version before: a line of revisions shares its start ("原版修订：…·资料收紧"
+ *  then "原版修订：…·资料收紧·全流程完整"), and only the end tells columns apart. The whole note stays in the tooltip. */
+function noteDelta(note: string, prev?: string | null) {
+  let i = 0;
+  while (prev && i < note.length && i < prev.length && note[i] === prev[i]) i++;
+  if (i === note.length) i = 0;  // nothing beyond it: the note as it is
+  // only whole clauses are shared: 原话模式 and 原版修订 have a character in common, not a start
+  const sep = /[\s·・:：,，、;；/|-]/;
+  while (i > 0 && !sep.test(note[i]) && !sep.test(note[i - 1])) i--;
+  return note.slice(i).replace(/^[\s·・:：,，、;；/|-]+/, "").replace(/^v\d+\s+/i, "") || note;
+}
+const LEAD_W = 230, COL_W = 118, NEW_W = 132;  // no column below what its own cell and heading need; past that the table scrolls
+
+/** The overview: which sample has been run on which version, and which version each one will deliver. The version being
+ *  tuned leads. Older versions come in with 全部 N 版 unless something rests on them: an issue adopts one, or it runs. */
 function Grid({ wb, ch, sel, cmp, onPick, act }: MatrixProps) {
   const [all, setAll] = useState(false);
-  const [folded, setFolded] = useState(false);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [clearing, setClearing] = useState<number | null>(null);
+  const [asking, setAsking] = useState<number | null>(null);  // an older version's 试跑 takes a second click
   const pbs = wb.playbooks;
-  const adoptedPb = new Set(wb.samples.map((s) => s.runs.find((r) => r.id === s.adopt.run_id)?.playbook_id));
-  const cols = all ? pbs : pbs.filter((p, i) => i < 3 || adoptedPb.has(p.id));
-  const hidden = pbs.length - cols.length;
+  const lead = leadOf(wb);
+  const before = pbs.find((p) => p.id !== lead && wb.samples.some((s) => s.runs.some((r) => r.playbook_id === p.id)));
+  const keep = new Set<number | null | undefined>([lead, before?.id, wb.active_id, ...wb.queue.map((q) => q.playbook_id)]);
+  for (const s of wb.samples) for (const r of s.runs) if (r.id === s.adopt.run_id || r.id === sel.run || live(r)) keep.add(r.playbook_id);
+  const cols = all ? pbs : pbs.filter((p) => keep.has(p.id));
+  const foldable = pbs.some((p) => !keep.has(p.id));
   const compiling = ch.compile?.state === "running";
-  const rows = folded ? wb.samples.filter((s) => s.id === sel.sample) : wb.samples;
-  const grid = { gridTemplateColumns: `minmax(0, 300px) ${compiling ? "minmax(0, 1fr) " : ""}repeat(${Math.max(1, cols.length)}, minmax(0, 1fr)) 84px` };
+  const widths = [...(compiling ? [NEW_W] : []), ...cols.map((p) => (p.id === lead ? LEAD_W : COL_W))];
+  // every row is as wide as the sum, or the table if that is wider: the columns line up whatever a row holds
+  const grid = {
+    gridTemplateColumns: `minmax(250px, 1.1fr) ${widths.map((w) => `minmax(${w}px, ${w === LEAD_W ? 1.25 : 1}fr)`).join(" ") || `minmax(${COL_W}px, 1fr)`}`,
+    minWidth: 250 + (widths.reduce((a, b) => a + b, 0) || COL_W),
+  };
   return (
-    <section className="ch-tb" aria-label="样片与版本">
-      <div className="ch-tbr ch-tbh" style={grid}>
-        <div className="c0">
-          <span>样片</span>
-          <button className="ch-addbtn" aria-expanded={adding} onClick={() => setAdding(!adding)}><Icon name="plus" size={12} /><span>加样片</span></button>
-          <button className="ch-icb grow" aria-label={folded ? "展开全部样片" : "只看当前样片"} onClick={() => setFolded(!folded)}>
-            <span style={{ display: "inline-flex", transform: folded ? "rotate(180deg)" : undefined }}><Icon name="chevd" size={14} /></span>
-          </button>
+    <section className={`ch-tb${all ? " all" : ""}`} aria-label="样片与版本">
+      <div className="ch-tbx">
+        <div className="ch-tbr ch-tbh" style={grid}>
+          <div className="c0">
+            <span>样片</span>
+            <button className="ch-addbtn" aria-expanded={adding} onClick={() => setAdding(!adding)}><Icon name="plus" size={12} /><span>加样片</span></button>
+            {foldable && <button className="ch-lk grow" aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起" : `全部 ${pbs.length} 版`}</button>}
+          </div>
+          {compiling && <div className="vh"><span className="vh1"><span className="vl">新版本</span><span className="ch-chip sm">编译中</span></span><span className="vm">约 3 分钟</span></div>}
+          {cols.map((p) => {
+            const queued = wb.queue.filter((q) => q.playbook_id === p.id).length;
+            const running = wb.samples.reduce((n, s) => n + s.runs.filter((r) => r.playbook_id === p.id && live(r)).length, 0);
+            const busy = queued + running > 0, plan = `试跑 ${p.missing} 期 · ${est(p.est_minutes)}`, confirming = busy && clearing === p.id;
+            const load = [running && `在跑 ${running}`, queued && `排队 ${queued}`].filter(Boolean).join(" · ");
+            if (asking === p.id && p.missing > 0 && !busy) {
+              return (
+                <div key={p.id} className="vh">
+                  <span className="vh1"><span className="vl">v{p.version}</span><span className="vn">{est(p.est_minutes)}</span></span>
+                  <span className="vm">
+                    <button className="ch-vrun" onClick={() => { setAsking(null); act.trial([p.id]); }}>确认 {p.missing} 期</button>
+                    <button className="lnk" onClick={() => setAsking(null)}>取消</button>
+                  </span>
+                </div>
+              );
+            }
+            return (
+              <div key={p.id} className="vh">
+                <span className="vh1">
+                  <span className="vl">v{p.version}</span>
+                  {p.id === wb.draft_id && <span className="ch-chip sm">草稿</span>}
+                  {p.status === "ACTIVE" && <span className="ch-chip sm ink">生效中</span>}
+                  {p.note && <span className="vn" title={p.note}>{noteDelta(p.note, pbs[pbs.indexOf(p) + 1]?.note)}</span>}
+                </span>
+                <span className="vm">
+                  {p.adopt_count > 0 && !confirming && <span className="ad-count" title={`${p.adopt_count} 期采用这一版`}><span className="ch-ad sm"><Icon name="check" size={8} /></span>{p.adopt_count}</span>}
+                  {busy && (
+                    // 清空 takes the place of 试跑 N 期 the moment it is clicked: a second click must not drop the whole queue;
+                    // it stops what runs as well (a10)
+                    <span className="ch-vq">{confirming
+                      ? <><button onClick={() => { setClearing(null); act.clear(); }}>确认清空</button><button onClick={() => setClearing(null)}>取消</button></>
+                      : <><span className="n" title={load}>{load}</span><button onClick={() => setClearing(p.id)}>清空</button></>}</span>
+                  )}
+                  {p.missing > 0 && (p.id === lead
+                    ? <button className="ch-vrun" title={plan} onClick={() => act.trial([p.id])}><Icon name="play" size={9} fill />{busy ? `${p.missing} 期` : plan}</button>
+                    : !busy && <button className="ch-vrun ol" title={plan} onClick={() => setAsking(p.id)}><Icon name="play" size={9} fill />{p.missing} 期</button>)}
+                </span>
+              </div>
+            );
+          })}
+          {!cols.length && <div className="vh q">还没有规程版本</div>}
         </div>
-        {compiling && <div className="vh"><span className="vh1"><span className="vl">新版本</span><span className="ch-chip sm">编译中</span></span><span className="vm">约 3 分钟</span></div>}
-        {cols.map((p) => {
-          const queued = wb.queue.filter((q) => q.playbook_id === p.id).length;
-          const running = wb.samples.reduce((n, s) => n + s.runs.filter((r) => r.playbook_id === p.id && live(r)).length, 0);
-          return (
-            <div key={p.id} className="vh">
-              <span className="vh1">
-                <span className="vl">v{p.version}</span>
-                {p.id === wb.draft_id && <span className="ch-chip sm">草稿</span>}
-                {p.status === "ACTIVE" && <span className="ch-chip sm ink">生效中</span>}
-                {p.note && <span className="vn" title={p.note}>{p.note}</span>}
-              </span>
-              <span className="vm">
-                <span className="ad-count"><Adopt pinned={false} small />采用 {p.adopt_count}/{wb.samples.length}</span>
-                {p.missing > 0 && (
-                  <button className="ch-vrun" onClick={() => act.trial([p.id])}><Icon name="play" size={9} fill />试跑 {p.missing} 期 · {est(p.est_minutes)}</button>
-                )}
-                {queued + running > 0 && (
-                  // 清空 takes the place of 试跑 N 期 the moment it is clicked: a second click must not drop the whole queue;
-                  // it stops what runs as well (a10)
-                  <span className="ch-vq"><span>{[running && `在跑 ${running}`, queued && `排队 ${queued}`].filter(Boolean).join(" · ")}</span>{clearing === p.id
-                    ? <><button onClick={() => { setClearing(null); act.clear(); }}>确认清空</button><button onClick={() => setClearing(null)}>取消</button></>
-                    : <button onClick={() => setClearing(p.id)}>清空</button>}</span>
-                )}
-              </span>
+        {wb.samples.map((s) => (
+          <div key={s.id} className="ch-tbr" style={grid}>
+            <div className="ch-tbs">
+              <span className="stt" title={s.title}>{s.title}</span>
+              {s.notion_url && <span className="sti" role="img" aria-label="库里已有" title="库里已有"><Icon name="db" size={11} /></span>}
+              {s.busy && <span className="stb" role="img" aria-label="试跑中" title="试跑中" />}
+              <em className="std">{fmt(s.duration)}</em>
+              {removing === s.id ? (
+                <span className="ch-rmc">
+                  <button className="ch-btn xs" onClick={() => setRemoving(null)}>取消</button>
+                  <button className="ch-btn xs solid" onClick={async () => { setRemoving(null); await act.remove(s.id); }}>移出</button>
+                </span>
+              ) : (
+                <button className="rm" aria-label={`移出样片：${s.title}`} onClick={() => setRemoving(s.id)}><Icon name="x" size={13} /></button>
+              )}
             </div>
-          );
-        })}
-        {!cols.length && <div className="vh q">还没有规程版本</div>}
-        <button className="older" disabled={!hidden && !all} onClick={() => setAll(!all)}>
-          {all ? "收起" : hidden ? <>更早 {hidden}<Icon name="chev" size={12} /></> : ""}
-        </button>
+            {compiling && <div className="ch-cell dis"><span className="qd shim" /><span className="cap"><span>等编译</span></span></div>}
+            {cols.map((p) => {
+              const run = runFor(s, p.id);
+              const queued = wb.queue.findIndex((q) => q.source_id === s.id && q.playbook_id === p.id);
+              return <Cell key={p.id} s={s} pb={p} run={run} queued={queued} sel={!!run && sel.run === run.id} cmp={!!run && cmp === run.id}
+                lead={p.id === lead} onPick={() => run && onPick(s.id, run.id)} act={act} />;
+            })}
+            {!cols.length && <div className="ch-cell dis" />}
+          </div>
+        ))}
+        {!wb.samples.length && <div className="ch-tbempty">先加两三期有代表性的视频做样片，再用规程试跑。</div>}
       </div>
       {adding && <AddSample cid={ch.id} onAdd={act.add} close={() => setAdding(false)} />}
-      {rows.map((s) => (
-        <div key={s.id} className="ch-tbr" style={grid}>
-          <div className="ch-tbs">
-            <span className="ch-thumb"><em>{fmt(s.duration)}</em></span>
-            <span className="txt">
-              <span className="stt" title={s.title}>{s.title}</span>
-              <span className="stm">{s.notion_url && <span>库里已有</span>}{s.busy && <span>试跑中</span>}</span>
-            </span>
-            {removing === s.id ? (
-              <span className="ch-rmc">
-                <button className="ch-btn xs" onClick={() => setRemoving(null)}>取消</button>
-                <button className="ch-btn xs solid" onClick={async () => { setRemoving(null); await act.remove(s.id); }}>移出</button>
-              </span>
-            ) : (
-              <button className="rm" aria-label={`移出样片：${s.title}`} onClick={() => setRemoving(s.id)}><Icon name="x" size={13} /></button>
-            )}
-          </div>
-          {compiling && <div className="ch-cell dis"><span className="qd shim" /><span className="cap"><span>等编译</span></span></div>}
-          {cols.map((p) => {
-            const run = runFor(s, p.id);
-            const queued = wb.queue.filter((q) => q.source_id === s.id && q.playbook_id === p.id).length ? wb.queue.findIndex((q) => q.source_id === s.id && q.playbook_id === p.id) : -1;
-            return <Cell key={p.id} s={s} pb={p} run={run} queued={queued} sel={!!run && sel.run === run.id} cmp={!!run && cmp === run.id}
-              onPick={() => run && onPick(s.id, run.id)} act={act} />;
-          })}
-          {!cols.length && <div className="ch-cell dis" />}
-          <div className="older" />
-        </div>
-      ))}
-      {!wb.samples.length && <div className="ch-tbempty">先加两三期有代表性的视频做样片，再用规程试跑。</div>}
+    </section>
+  );
+}
+
+/** The cell being looked at, over the three panes: the table is for taking stock, this is for going through it. It stays
+ *  under the masthead as the page scrolls. With the focus on it, ←→ change the version and ↑↓ the sample. */
+export function Current({ wb, s, run, cmp, onPick, act, barRef }: {
+  wb: Workbench; s: Sample; run: Run; cmp: string | null; onPick: (sampleId: string, runId: string) => void; act: MatrixActions;
+  barRef: React.RefObject<HTMLElement | null>;
+}) {
+  const chips = useRef<HTMLDivElement>(null);
+  const [stuck, setStuck] = useState(false);
+  useEffect(() => {  // 全部样片 is for when the table has scrolled away
+    let raf = 0;
+    const check = () => {
+      raf = 0;
+      const el = barRef.current;
+      if (el) setStuck(el.getBoundingClientRect().top <= parseFloat(getComputedStyle(el).top) + 1);
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(check); };
+    check();
+    addEventListener("scroll", on, { passive: true });
+    addEventListener("resize", on);
+    return () => { cancelAnimationFrame(raf); removeEventListener("scroll", on); removeEventListener("resize", on); };
+  }, [barRef]);
+  useEffect(() => {  // with more versions than fit, the chosen one is on screen; scrollIntoView could move the page as well
+    const box = chips.current, el = box?.querySelector<HTMLElement>(".on");
+    if (!box || !el) return;
+    const left = el.offsetLeft, right = left + el.offsetWidth;
+    if (left < box.scrollLeft) box.scrollTo({ left, behavior: smooth() });
+    else if (right > box.scrollLeft + box.clientWidth) box.scrollTo({ left: right - box.clientWidth, behavior: smooth() });
+  }, [run.id]);
+  const list = wb.samples.filter((x) => x.runs.some(done));
+  const i = list.findIndex((x) => x.id === s.id);
+  const lead = leadOf(wb);
+  // a version's finished run on this sample: the one on screen if it is this version's, then the adopted one, then the newest
+  const finished = (pid: number) => {
+    const rs = s.runs.filter((r) => r.playbook_id === pid && done(r));
+    return rs.find((r) => r.id === run.id) || rs.find((r) => r.id === s.adopt.run_id) || rs[0] || null;
+  };
+  const ready = wb.playbooks.map((p) => finished(p.id)).filter((r) => !!r);
+  // the next sample on the same version where it has that one, else what it adopts, else its newest
+  const step = (d: number) => {
+    const t = list[i + d];
+    if (!t) return;
+    const rs = t.runs.filter(done), same = rs.filter((r) => r.playbook_id === run.playbook_id), adopted = (r: Run) => r.id === t.adopt.run_id;
+    const r = same.find(adopted) || same[0] || rs.find(adopted) || rs[0];
+    onPick(t.id, r.id);
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") step(e.key === "ArrowUp" ? -1 : 1);
+    else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      const r = ready[ready.findIndex((x) => x.id === run.id) + (e.key === "ArrowLeft" ? -1 : 1)];
+      if (r) onPick(s.id, r.id);
+    } else return;
+    e.preventDefault();
+    barRef.current?.focus({ preventScroll: true });  // the chip that had it may be gone with the sample
+  };
+  return (
+    <section className={`ch-cur${stuck ? " stuck" : ""}`} ref={barRef} tabIndex={-1} aria-label="当前样片" onKeyDown={onKey}>
+      <span className="ch-curn">
+        <button className="ch-icb prev" aria-label="上一期" aria-disabled={i <= 0} onClick={() => step(-1)}><Icon name="chev" size={14} /></button>
+        <span>{i + 1}/{list.length}</span>
+        <button className="ch-icb" aria-label="下一期" aria-disabled={i >= list.length - 1} onClick={() => step(1)}><Icon name="chev" size={14} /></button>
+      </span>
+      <b className="ch-curt" title={s.title}>{s.title}</b>
+      <em className="ch-curd">{fmt(s.duration)}</em>
+      <div className="ch-curs" ref={chips} role="group" aria-label="版本">
+        {wb.playbooks.map((p) => {
+          const r = finished(p.id);
+          if (r) {
+            const on = r.id === run.id, adopted = s.adopt.run_id === r.id;
+            const tip = `v${p.version} · ${r.units ?? r.track.length} 单元 · 校注 ${r.notes}${adopted ? " · 采用" : ""}`;
+            return (
+              <button key={p.id} className={`ch-curc${on ? " on" : cmp === r.id ? " cmp" : ""}`} aria-pressed={on} aria-label={tip} title={tip} onClick={() => onPick(s.id, r.id)}>
+                <Track units={r.track} flags={r.flag_at} dur={s.duration || 0} />
+                <span className="cap"><b className="v">v{p.version}</b><Tally run={r} />{adopted && <Adopt pinned={s.adopt.pinned} small />}</span>
+              </button>
+            );
+          }
+          const rs = s.runs.filter((x) => x.playbook_id === p.id), going = rs.find(live);
+          const queued = wb.queue.findIndex((q) => q.source_id === s.id && q.playbook_id === p.id);
+          if (going) {
+            const [a, b] = going.progress;
+            return (
+              <div key={p.id} className="ch-curc st" title={`${doing(going)} ${a}/${b}${going.eta_seconds ? ` · ${est(going.eta_seconds / 60)}` : ""}`}>
+                <span className="ch-prog"><b style={{ width: percent(going.progress) }} /></span>
+                <span className="cap"><b className="v">v{p.version}</b><span>{a}/{b}</span></span>
+              </div>
+            );
+          }
+          if (queued >= 0) {
+            return <div key={p.id} className="ch-curc st"><span className="qd" /><span className="cap"><b className="v">v{p.version}</b><span>排队第 {queued + 1}</span></span></div>;
+          }
+          if (p.id !== lead) return null;
+          return rs[0]
+            ? <button key={p.id} className="ch-curc try" title={rs[0].error_line || undefined} onClick={() => act.retry(rs[0].id)}>重试 v{p.version}</button>
+            : <button key={p.id} className="ch-curc try" onClick={() => act.trial([p.id], [s.id])}><Icon name="play" size={9} fill />试跑 v{p.version}</button>;
+        })}
+      </div>
+      <button className="ch-curu" onClick={() => scrollTo({ top: 0, behavior: smooth() })}><Icon name="chevd" size={12} />全部样片</button>
     </section>
   );
 }

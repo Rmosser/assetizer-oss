@@ -137,25 +137,35 @@
 .ch-confirm { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
 .ch-head > .ch-err { flex-basis: 100%; }
 
-/* sample × version matrix */
+/* sample × version matrix: one line per sample. Versions that do not fit scroll inside the table, the first column stays */
 .ch-tb { position: relative; border: 1px solid var(--rule); border-radius: 14px; background: var(--chp-card); }
 .ch-tb.loading { height: 140px; }
+.ch-tbx { overflow-x: auto; border-radius: 13px; }
+.ch-tb.all .ch-tbx { padding-bottom: 8px; }  /* a scrollbar clear of the last row */
 .ch-tbr { display: grid; border-top: 1px solid var(--rule); }
 .ch-tbr:first-child { border-top: 0; }
-.ch-tbh .c0 { padding: 10px 12px 10px 16px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-3); }
-.ch-addbtn { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border-radius: 999px; border: 1px dashed var(--rule-2); font-size: 11.5px; color: var(--ink-2); }
+.ch-tbr > :nth-child(2) { border-left: 0; }  /* the first column's own edge, which stays when the rest scrolls under it */
+.ch-tbh .c0, .ch-tbs { position: sticky; left: 0; z-index: 3; background: var(--chp-card); border-right: 1px solid var(--rule); }
+.ch-tbh .c0 { padding: 8px 12px 8px 14px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-3); }
+.ch-tbh .c0 .ch-lk { font-size: 11.5px; white-space: nowrap; }
+.ch-addbtn { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border-radius: 999px; border: 1px dashed var(--rule-2); font-size: 11.5px; color: var(--ink-2); white-space: nowrap; }
 .ch-addbtn:hover { background: var(--nt-bg); border-style: solid; }
-.ch-tbh .vh { padding: 9px 14px; border-left: 1px solid var(--rule); display: flex; flex-direction: column; gap: 4px; justify-content: center; min-width: 0; }
+.ch-tbh .vh { padding: 8px 12px; border-left: 1px solid var(--rule); display: flex; flex-direction: column; gap: 4px; justify-content: center; min-width: 0; overflow: hidden; }
 .ch-tbh .vh.q { color: var(--ink-3); font-size: 12px; }
-.chp .vh1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.chp .vl { font: 600 14px var(--mono); letter-spacing: -0.01em; }
-.chp .vn { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chp .vm { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; flex-wrap: wrap; }
-.chp .ad-count { display: inline-flex; align-items: center; gap: 5px; }
-.ch-vrun { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--ink); color: var(--paper); font-size: 11.5px; }
-.ch-vq { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
-.ch-vq button { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
-.ch-tb .older { border-left: 1px solid var(--rule); display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--ink-3); gap: 4px; }
+.chp .vh1 { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 20px; }
+.chp .vl { font: 600 14px var(--mono); letter-spacing: -0.01em; white-space: nowrap; }
+.chp .vn { min-width: 0; font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chp .vm { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.chp .ad-count { flex: none; display: inline-flex; align-items: center; gap: 4px; font: 500 11px var(--mono); }
+.chp .vm .lnk { flex: none; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
+.ch-vrun { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; background: var(--ink); color: var(--paper); font-size: 11.5px; white-space: nowrap; }
+/* an older version's: there when you point at its column, and it asks once more */
+.ch-vrun.ol { padding: 0 8px; gap: 5px; background: none; color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--rule-2); opacity: 0; transition: opacity 0.15s; }
+.ch-tbh .vh:hover .ch-vrun.ol, .ch-vrun.ol:focus-visible { opacity: 1; }
+.ch-vq { margin-left: auto; min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
+.ch-vq .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ch-vq button { flex: none; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
+.ch-vq + .ch-vrun { margin-left: 0; }
 .ch-addpop { position: absolute; left: 12px; top: 46px; z-index: 25; width: 380px; padding: 12px; border-radius: 12px; background: var(--chp-sheet);
   border: 1px solid var(--rule); box-shadow: 0 18px 40px -16px rgba(0, 0, 0, 0.35); display: flex; flex-direction: column; gap: 10px; animation: ch-pop 0.18s var(--ease); }
 .ch-addpop input { height: 32px; border: 1px solid var(--rule-2); border-radius: 8px; padding: 0 10px; font: 13px var(--sans); color: var(--ink); background: var(--nt-bg); }
@@ -164,33 +174,43 @@
 .ch-cands button { display: flex; gap: 10px; text-align: left; padding: 6px 8px; border-radius: 6px; font-size: 12.5px; }
 .ch-cands button:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 6%, transparent); }
 .ch-cands .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ch-tbs { position: relative; padding: 8px 16px; display: flex; align-items: center; gap: 12px; min-width: 0; }
-.ch-tbs .txt { min-width: 0; display: flex; flex-direction: column; }
-.ch-tbs .stt { font: 500 13px/1.35 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ch-tbs .stm { font-size: 11.5px; color: var(--ink-3); display: flex; gap: 8px; margin-top: 2px; }
-.ch-tbs .rm { position: absolute; right: 8px; top: 50%; margin-top: -13px; width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: var(--ink-3); opacity: 0; transition: opacity 0.15s; }
-.ch-tbr:hover .ch-tbs .rm, .ch-tbs .rm:focus-visible { opacity: 1; }
+.ch-tbs { padding: 0 14px; height: 38px; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ch-tbs .stt { flex: 1; min-width: 0; font: 500 13px/1.35 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ch-tbs .sti { flex: none; display: inline-flex; color: var(--ink-3); }
+.ch-tbs .stb { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-2); animation: ch-pulse 1.6s var(--ease) infinite; }
+@keyframes ch-pulse { 50% { opacity: 0.3; } }
+.ch-tbs .std { flex: none; font: 500 11px var(--mono); color: var(--ink-3); transition: opacity 0.15s; }
+.ch-tbs .rm { position: absolute; right: 10px; top: 50%; margin-top: -13px; width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: var(--ink-3); opacity: 0; transition: opacity 0.15s; }
+.ch-tbs:hover .rm, .ch-tbs .rm:focus-visible { opacity: 1; }
+.ch-tbs:hover .std, .ch-tbs:has(.rm:focus-visible) .std { opacity: 0; }
 .ch-tbs .rm:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .ch-rmc { position: absolute; right: 8px; display: flex; gap: 6px; background: var(--chp-card); padding-left: 6px; }
 .ch-thumb { width: 56px; height: 32px; border-radius: 5px; background: #17130f; position: relative; flex: none; overflow: hidden; display: inline-block; }
 .ch-thumb::before { content: ""; position: absolute; inset: 0; background: radial-gradient(60% 80% at 40% 40%, rgba(255, 255, 255, 0.16), transparent 70%); }
 .ch-thumb em { position: absolute; right: 3px; bottom: 2px; font: 500 9px/12px var(--mono); color: #fff; background: rgba(0, 0, 0, 0.72); padding: 0 3px; border-radius: 2px; font-style: normal; }
-.ch-cell { border-left: 1px solid var(--rule); padding: 8px 14px; text-align: left; display: flex; flex-direction: column; justify-content: center;
-  gap: 6px; position: relative; min-height: 54px; min-width: 0; transition: background 0.15s var(--ease); }
+.ch-cell { border-left: 1px solid var(--rule); padding: 6px 12px; text-align: left; display: flex; flex-direction: column; justify-content: center;
+  gap: 4px; position: relative; height: 38px; min-width: 0; transition: background 0.15s var(--ease); }
 button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transparent); }
+button.ch-cell:focus-visible { outline-offset: -2px; }  /* the table clips what is outside it */
 .ch-cell.sel { background: var(--nt-bg); box-shadow: inset 0 0 0 2px var(--ink); }
-.ch-cell.cmp { outline: 1.5px dashed var(--ink-3); outline-offset: -5px; }
-.ch-cell .cap { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
-.ch-cell .cap b { font-weight: 500; color: var(--ink-2); }
-.ch-cell .cap .ch-ad { margin-left: auto; }
-.ch-cell .cap .lnk { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
+.ch-cell.cmp { outline: 1.5px dashed var(--ink-3); outline-offset: -4px; }
+.ch-cell .cap, .ch-curc .cap { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; line-height: 12px; color: var(--ink-3); white-space: nowrap; }
+.ch-cell .cap > span:not(.ch-ad):not(.ch-fl), .ch-cell .cap > b, .ch-curc .cap > span:not(.ch-ad):not(.ch-fl) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ch-cell .cap b, .ch-curc .cap b { font: 500 11px/12px var(--mono); color: var(--ink-2); }
+.ch-fl { flex: none; font: 500 11px/12px var(--mono); }
+.ch-fl::before { content: ""; display: inline-block; width: 2px; height: 9px; margin-right: 3px; background: var(--zhu); vertical-align: -1px; }  /* the 校注 tick of the track */
+.ch-cell .cap .ch-ad, .ch-curc .cap .ch-ad { margin: -1px 0 -1px auto; }
+.ch-cell .cap .lnk { flex: none; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
 .ch-cell .prog { position: relative; display: block; height: 10px; border-radius: 2px; background: color-mix(in srgb, var(--ink) 6%, transparent); overflow: hidden; }
 .ch-cell .prog b { position: absolute; left: 0; top: 0; bottom: 0; background: repeating-linear-gradient(-45deg, var(--ink-3) 0 4px, var(--ink-2) 4px 8px); background-size: 11.31px 11.31px; animation: ch-slide 1.1s linear infinite; border-radius: 2px; }
-.ch-cell .qd { display: block; height: 10px; border: 1px dashed var(--rule-2); border-radius: 2px; }
+.ch-cell .qd, .ch-curc .qd { display: block; height: 10px; border: 1px dashed var(--rule-2); border-radius: 2px; }
 .ch-cell .qd.shim { background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ink) 8%, transparent), transparent); background-size: 200% 100%; animation: ch-shim 1.4s linear infinite; }
 .ch-cell .qd.bad { border-color: color-mix(in srgb, var(--zhu) 45%, transparent); background: repeating-linear-gradient(-45deg, var(--zhu-wash) 0 4px, transparent 4px 8px); }
 @keyframes ch-shim { from { background-position: 200% 0; } to { background-position: -200% 0; } }
-.ch-cplus { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; border: 1px dashed var(--rule-2); font-size: 11.5px; color: var(--ink-2); align-self: flex-start; }
+/* an empty cell offers 试跑 for the version being tuned; on older versions when you point at it */
+.ch-cplus { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px; border-radius: 999px; border: 1px dashed var(--rule-2); font-size: 11px; color: var(--ink-2); white-space: nowrap; align-self: flex-start;
+  opacity: 0; transition: opacity 0.15s; }
+.ch-cplus.lead, .ch-cell:hover .ch-cplus, .ch-cplus:focus-visible { opacity: 1; }
 .ch-cplus:hover { border-style: solid; background: var(--nt-bg); }
 .ch-tbempty { padding: 16px; font-size: 13px; color: var(--ink-3); border-top: 1px solid var(--rule); }
 .ch-trk { position: relative; display: block; height: 10px; border-radius: 2px; background: color-mix(in srgb, var(--ink) 6%, transparent); }
@@ -203,6 +223,40 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-trk i.sp { background: repeating-linear-gradient(90deg, var(--ink-2) 0 3px, var(--paper) 3px 4px) !important; }
 .ch-trk i.gn { background: repeating-linear-gradient(-45deg, var(--ink-4) 0 2px, transparent 2px 4px) !important; }
 .ch-trk b.fl { position: absolute; top: -5px; width: 2px; height: 4px; margin-left: -1px; background: var(--zhu); border-radius: 1px; }
+
+/* the cell being looked at (Matrix.tsx Current): under the table, then under the masthead; the panes below make room for it.
+   Its gaps above and below match, and page bottom is the panes' 32px (.chp): 8 + 56 + 8 = 72 from the masthead down to them */
+.ch-cur { position: sticky; top: calc(var(--top) + 8px); z-index: 21; display: flex; align-items: center; gap: 12px; height: 56px; margin-top: 14px; padding: 0 7px 0 6px;
+  border: 1px solid var(--rule); border-radius: 12px; background: var(--chp-card); transition: box-shadow 0.2s var(--ease); }
+.ch-cur.stuck { box-shadow: var(--shadow); }
+.ch-curn { flex: none; display: inline-flex; align-items: center; gap: 2px; font: 500 11px var(--mono); color: var(--ink-3); }
+.ch-curn .ch-icb { width: 24px; height: 24px; border-radius: 6px; }
+.ch-curn .ch-icb.prev .ico { transform: scaleX(-1); }
+.ch-curn .ch-icb[aria-disabled="true"] { opacity: 0.35; cursor: default; background: none; color: var(--ink-3); }
+/* a long title gives way before the versions do, and the versions stop short of squeezing it out */
+.ch-curt { flex: 0 1000 auto; min-width: 0; font: 500 13px/1.35 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ch-curd { flex: none; margin-left: -4px; font: 500 11px var(--mono); color: var(--ink-3); }
+.ch-curs { position: relative; flex: 0 1 auto; max-width: calc(100% - 300px); margin-left: auto; display: flex; gap: 6px; padding: 7px 1px; overflow-x: auto; scrollbar-width: none; }
+.ch-cur.stuck .ch-curs { max-width: calc(100% - 396px); }
+.ch-curs::-webkit-scrollbar { display: none; }
+.ch-curc { flex: none; width: 104px; height: 42px; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 8px; display: flex; flex-direction: column; justify-content: center; gap: 4px; text-align: left; transition: background 0.15s var(--ease); }
+button.ch-curc:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transparent); }
+button.ch-curc:focus-visible { outline-offset: -2px; }
+.ch-curc.on, button.ch-curc.on:hover { background: var(--nt-bg); box-shadow: inset 0 0 0 2px var(--ink); border-color: transparent; }
+.ch-curc.cmp { outline: 1.5px dashed var(--ink-3); outline-offset: -4px; }
+.ch-curc .cap { gap: 6px; }
+.ch-curc .cap .v { color: var(--ink); }
+.ch-curc .ch-prog { height: 10px; }
+.ch-curc.st { color: var(--ink-3); }
+.ch-curc.try { flex-direction: row; align-items: center; justify-content: center; gap: 5px; border-style: dashed; border-color: var(--rule-2); font-size: 11.5px; color: var(--ink-2); white-space: nowrap; }
+.ch-curc.try:hover { border-style: solid; }
+/* 全部样片 comes in once the table has scrolled away, and the versions make room for it */
+.ch-curu { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0; border: 0 solid var(--rule-2); border-radius: 999px; font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden;
+  max-width: 0; margin-left: -12px; visibility: hidden; opacity: 0;
+  transition: max-width 0.24s var(--ease), margin 0.24s var(--ease), padding 0.24s var(--ease), opacity 0.2s var(--ease), visibility 0.24s; }
+.ch-curu .ico { flex: none; transform: rotate(180deg); }
+.ch-curu:hover { background: var(--nt-bg); }
+.ch-cur.stuck .ch-curu { max-width: 96px; margin-left: 0; padding: 0 10px 0 7px; border-width: 1px; visibility: visible; opacity: 1; }
 
 /* state strips */
 .ch-ib { display: flex; align-items: stretch; border: 1px solid var(--rule); border-radius: 14px; background: var(--chp-card); overflow: hidden; }
@@ -228,6 +282,7 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 /* the 稿纸 takes the source and card columns of the same grid: the Notion page does not move, and the sheet's right edge is
    the card column's, where its 合上稿纸 meets the card's 打开稿纸 */
 .ch-studio > .ch-msh { grid-column: 1 / 3; }
+.ch-studio.hc { margin-top: 8px; }
 .ch-pane { display: flex; flex-direction: column; height: calc(100vh - var(--top) - 44px); min-height: 640px; max-height: 1400px; border-radius: 12px;
   box-shadow: var(--shadow); overflow: hidden; border: 1px solid var(--rule); position: sticky; top: calc(var(--top) + 12px); }
 .ch-yt { background: var(--yt-bg); color: var(--yt-ink); }
@@ -487,6 +542,8 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-msh { display: flex; flex-direction: column; height: calc(100vh - var(--top) - 44px); min-height: 640px; max-height: 1400px; background: var(--chp-sheet); border: 1px solid var(--rule);
   border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; position: sticky; top: calc(var(--top) + 12px); }
 .ch-msh.solo { height: auto; min-height: 0; max-height: none; position: static; margin-top: 8px; }
+/* under the bar of the cell being looked at (.ch-cur) */
+.ch-studio.hc :is(.ch-pane, .ch-cards, .ch-msh) { top: calc(var(--top) + 72px); height: calc(100vh - var(--top) - 104px); min-height: 600px; }
 /* the rail has the 学习目标 card header's measure — 16px above, 28px controls, the card's 4px inset in its column plus its
    18px padding on the right — so 合上稿纸 lands exactly on 打开稿纸; when the rail wraps, the toggle stays in that corner */
 .ch-msh .msrail { display: flex; align-items: flex-start; gap: 10px; padding: 16px 22px 12px 18px; border-bottom: 1px solid var(--rule); background: var(--chp-card); flex: none; }
@@ -589,6 +646,7 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 .ch-vt.ch-vt-col .ch-studio > .ch-cards { view-transition-name: ch-goal; }
 .ch-vt.ch-vt-col .ch-goal { view-transition-name: none; }
 .ch-vt .masthead { view-transition-name: ch-mast; }
+.ch-vt .ch-cur { view-transition-name: ch-cur; }
 .ch-vt .ch-dock { view-transition-name: ch-dock; }
 .ch-vt .ch-toast { view-transition-name: ch-toast; }
 /* the rest of the page holds still: a plain crossfade instead of the page turn (styles.css 翻开), which is for moving between
@@ -600,7 +658,7 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 ::view-transition-group(ch-src), ::view-transition-group(ch-cards) { z-index: 1; }
 ::view-transition-group(ch-goal) { z-index: 2; border-radius: 14px; overflow: clip; background: var(--chp-sheet); box-shadow: 0 0 0 1px var(--rule), var(--shadow);
   animation-duration: 0.44s; animation-timing-function: cubic-bezier(0.2, 0, 0, 1); }
-::view-transition-group(ch-mast) { z-index: 3; animation: none; }
+::view-transition-group(ch-mast), ::view-transition-group(ch-cur) { z-index: 3; animation: none; }
 ::view-transition-group(ch-dock), ::view-transition-group(ch-toast) { z-index: 4; }
 ::view-transition-old(ch-goal), ::view-transition-new(ch-goal) { height: 100%; object-fit: none; object-position: right top; }
 ::view-transition-old(ch-goal) { animation: ch-vt-out 0.16s linear both; }
@@ -612,8 +670,8 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
 ::view-transition-new(ch-src) { animation: ch-vt-fore 0.34s 0.1s cubic-bezier(0.2, 0, 0, 1) both; }
 ::view-transition-old(ch-cards) { animation: ch-vt-sink 0.22s cubic-bezier(0.4, 0, 1, 1) both; }
 ::view-transition-new(ch-cards) { animation: ch-vt-rise 0.32s 0.14s cubic-bezier(0.2, 0, 0, 1) both; }
-::view-transition-old(ch-mast) { animation: none; }  /* the masthead does not change: its snapshot stands in for it */
-::view-transition-new(ch-mast) { animation: none; opacity: 0; }
+::view-transition-old(ch-mast), ::view-transition-old(ch-cur) { animation: none; }  /* neither changes: the snapshot stands in */
+::view-transition-new(ch-mast), ::view-transition-new(ch-cur) { animation: none; opacity: 0; }
 @keyframes ch-vt-out { to { opacity: 0; } }
 @keyframes ch-vt-in { from { opacity: 0; } }
 @keyframes ch-vt-back { to { opacity: 0; transform: scale(0.98); } }
@@ -668,8 +726,12 @@ button.ch-cell:hover { background: color-mix(in srgb, var(--nt-bg) 55%, transpar
   .chp { padding-bottom: 32px; }
 }
 @media (max-width: 1099px) {
-  .ch-tb { overflow-x: auto; }
-  .ch-tbr { min-width: 820px; }
+  .ch-tbx { padding-bottom: 8px; }  /* the table may scroll here without 全部 N 版 */
+}
+/* no pointer to point with: what waits for one is simply there */
+@media (hover: none) {
+  .ch-cplus, .ch-vrun.ol { opacity: 1; }
+  .ch-cplus:not(.lead) { border-color: transparent; color: var(--ink-3); }  /* the version being tuned still leads */
 }
 /* phones: samples as a strip of cards, one preview at a time, the setting cards folded */
 .ch-strip { position: relative; display: flex; flex-direction: column; gap: 10px; }
@@ -905,6 +967,13 @@ button.ch-cardh { width: 100%; text-align: left; margin: 0; }
    targets (the sheets and the bar are portalled to <body>, outside .chp) */
 @media (pointer: coarse) {
   .chp .ch-btn.sm, .chp .ch-btn.xs, :is(.ch-sheet, .ch-target) .ch-btn.sm { height: 44px; padding: 0 16px; font-size: 13.5px; }
+  .ch-tbs, .ch-cell { height: 46px; }
+  .ch-tbs .ch-rmc .ch-btn.xs { height: 34px; padding: 0 12px; }
+  .ch-cplus { height: 32px; }
+  .ch-tbs .rm { opacity: 1; }
+  .ch-tbs .std { margin-right: 26px; }
+  .ch-curn .ch-icb { width: 36px; height: 40px; }
+  .ch-curu { height: 36px; }
   :is(.ch-sheet, .ch-target) .ch-btn:not(.sm):not(.xs), .ch-dock .ch-btn { height: 44px; }
   :is(.ch-sheet, .ch-target) .ch-seg button { height: 40px; padding: 0 12px; }
   .ch-dock input { height: 40px; }

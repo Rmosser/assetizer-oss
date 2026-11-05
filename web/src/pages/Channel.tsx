@@ -11,7 +11,7 @@ import { activeOf, draftOf, Header, modeOf, Switcher } from "../components/chann
 import { keys, useLitDelegation } from "../components/channel/lit";
 import { LockSheet, TargetPicker } from "../components/channel/LockSheet";
 import { Manuscript } from "../components/channel/Manuscript";
-import { done, Matrix, runFor, RunPending, type MatrixActions, type Want } from "../components/channel/Matrix";
+import { Current, done, Matrix, runFor, RunPending, type MatrixActions, type Want } from "../components/channel/Matrix";
 import { NotionPane, type PaneHead } from "../components/channel/NotionPane";
 import { SourcePane } from "../components/channel/SourcePane";
 import { Board } from "../components/channel/Board";
@@ -157,6 +157,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const compact = useCompact();
   const studio = useRef<HTMLDivElement>(null);
   const pane = useRef<HTMLDivElement>(null);
+  const bar = useRef<HTMLElement>(null);
   const toastT = useRef<number | undefined>(undefined);
   const inflight = useRef(new Set<string>());  // requests that spend model quota, under way
   useLitDelegation(studio);
@@ -185,11 +186,6 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   const status = usePoll<any>("/api/status", 30000);
   const alerts: string[] = (status.data?.alerts || []).map((a: any) => a.key).filter((k: string) => ["notion-auth", "YOUTUBE_AUTH", "AGY_AUTH_REQUIRED", "DISK_LOW"].includes(k));
 
-  const draftPb = draftOf(ch) || null, activePb = activeOf(ch) || null;
-  const goalPb = mode === "locked" ? activePb : draftPb || activePb;
-  const annQ = usePoll<Annotations>(goalPb && studioSeen ? `/api/playbooks/${goalPb.id}/annotations` : null, 0);
-  const newerDraft = mode === "locked" && draftPb && activePb && draftPb.version > activePb.version ? draftPb : null;
-
   // ------------------------------------------------------------------ the selected cell / issue
   const samples = wb?.samples || [];
   let sample = samples.find((s) => s.id === sel.sample) || null;
@@ -199,6 +195,16 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
     run = sample ? sample.runs.find((r) => r.id === sample!.adopt.run_id && done(r)) || sample.runs.find(done) || null : null;
   }
   const issue = mode !== "tuning" ? issues.find((i) => i.id === sel.sample) || issues[0] || null : null;
+
+  const draftPb = draftOf(ch) || null, activePb = activeOf(ch) || null;
+  // 壹 speaks of the version on screen, the same one as the source and the Notion page beside it
+  const goalPb = mode === "locked" ? activePb : (run && ch.playbooks.find((p) => p.id === run!.playbook_id)) || draftPb || activePb;
+  const annQ = usePoll<Annotations>(goalPb && studioSeen ? `/api/playbooks/${goalPb.id}/annotations` : null, 0);
+  // versions do not change: one seen before shows at once, and stepping through them does not empty the card in between
+  const annSeen = useRef(new Map<number, Annotations>());
+  if (annQ.data) annSeen.current.set(annQ.data.playbook.id, annQ.data);
+  const goalAnn = (goalPb && annSeen.current.get(goalPb.id)) || null;
+  const newerDraft = mode === "locked" && draftPb && activePb && draftPb.version > activePb.version ? draftPb : null;
   const sampleId = mode === "tuning" ? sample?.id ?? null : issue?.id ?? null;
   const runId = mode === "tuning" ? run?.id ?? null : issue?.current_run_id ?? null;
   const detailQ = usePoll<SourceDetail>(sampleId && runId ? `/api/sources/${encodeURIComponent(sampleId)}?run=${encodeURIComponent(runId)}` : null, 0);
@@ -313,6 +319,21 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
     clear: guard(async () => { wbQ.setData(await post<Workbench>(`/api/channels/${ch.id}/trial-queue/clear`)); }),
     retry: once((rid: string) => `r:${rid}`, guard(async (rid: string) => { await post(`/api/runs/${encodeURIComponent(rid)}/retry`); wbQ.reload(); })),
   };
+  const pick = (sid: string, rid: string) => {
+    setSel({ sample: sid, run: rid }); setCmp(false); setWant(null);
+    // an open sheet turns to the version just chosen, so the rules and what they produced stay the same version
+    const pid = wb?.samples.find((x) => x.id === sid)?.runs.find((r) => r.id === rid)?.playbook_id;
+    if (view !== "studio" && pid) setMsPb(pid);
+  };
+  // a cell of the table opens below it: the page comes to rest with the bar under the masthead and the three panes in full
+  const pickCell = (sid: string, rid: string) => {
+    pick(sid, rid);
+    const el = bar.current;
+    if (!el) return;
+    const dy = el.getBoundingClientRect().top - parseFloat(getComputedStyle(el).top);
+    if (dy > 1) scrollBy({ top: dy, behavior: smooth() });
+    el.focus({ preventScroll: true });
+  };
   const adopt = guard(async (sid: string, rid: string | null, pinned: boolean) => {
     await post(`/api/sources/${encodeURIComponent(sid)}/adopt`, { run_id: rid, pinned });
     wbQ.reload();
@@ -401,6 +422,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
   );
   const turn = narrow && want && wb ? <RunPending wb={wb} want={want} act={act} switcher={switcher} /> : tab === "source" ? sourcePane : notionPane;
   const lockPb = draftPb || activePb;
+  const hasBar = mode === "tuning" && !narrow && !!wb && !!sample && !!run;
   // unsaved Notion settings stay with the channel, and the bar that saves them, on the 看板 too
   const dock = useLeaving(dirty && (page === "board" || view === "studio"));
   const toastOut = useLeaving(toast);
@@ -416,16 +438,17 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
       {page === "board" ? <Board ch={ch} mode={mode} onSetIngest={setIngest} flash={flash} /> : <>
       {mode === "tuning" && (wb
         ? <Matrix wb={wb} ch={ch} sel={{ sample: sample?.id ?? null, run: run?.id ?? null }} cmp={cmpData ? prevRun?.id ?? null : null} act={act}
-            want={narrow ? want : null} onWant={setWant} onPick={(s, r) => { setSel({ sample: s, run: r }); setCmp(false); setWant(null); }} />
+            want={narrow ? want : null} onWant={setWant} onPick={pickCell} />
         : <section className="ch-tb loading" aria-busy="true" />)}
+      {hasBar && <Current wb={wb!} s={sample!} run={run!} cmp={cmpData ? prevRun?.id ?? null : null} onPick={pick} act={act} barRef={bar} />}
       {mode === "locked" && <LockedBar issues={issues} selected={issue?.id ?? null} onPick={(i) => setSel({ sample: i.id, run: i.current_run_id })} />}
       {mode === "discovery" && <DiscoveryBar issue={issue} />}
-      <div className={`ch-studio${view !== "studio" ? " ms" : ""}`} ref={studio}>
+      <div className={`ch-studio${view !== "studio" ? " ms" : ""}${hasBar ? " hc" : ""}`} ref={studio}>
         {view === "studio" ? (
           <>
             {!compact ? sourcePane : narrow ? turn : null}
             <div className="ch-cards" aria-label="设置">
-              <GoalCard mode={mode} ch={ch} pb={goalPb} ann={annQ.data && annQ.data.playbook.id === goalPb?.id ? annQ.data : null}
+              <GoalCard mode={mode} ch={ch} pb={goalPb} ann={goalAnn}
                 newerDraft={newerDraft} onOpen={openMs} onRetune={() => retune().catch((e) => flash(e.message))} onDraft={draftGoal} />
               {nv && cfg ? (
                 <>

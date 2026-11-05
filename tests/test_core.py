@@ -550,6 +550,18 @@ def test_trials_queue_video_by_video_and_run_one_at_a_time(home):
         tuning.trial("w", [v2])
 
 
+def test_samples_list_the_newest_first_and_a_batch_in_the_order_it_was_added(home):
+    from assetizer import db, tuning
+    v1, _ = _tuning_fixture()
+    for sid in ("AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC"):
+        tuning.add_sample("w", sid)
+    db.exec("UPDATE samples SET added_at='2026-01-01T00:00:00'")
+    db.exec("UPDATE samples SET added_at='2026-01-02T00:00:00' WHERE source_id='CCCCCCCCCCC'")
+    order = ["CCCCCCCCCCC", "AAAAAAAAAAA", "BBBBBBBBBBB"]
+    assert [s["id"] for s in tuning.workbench("w")["samples"]] == order
+    assert [s["source_id"] for s in tuning.lock_preview("w", v1)["samples"]] == order
+
+
 def test_a_version_trial_skips_samples_it_already_ran(home):
     from assetizer import db, tuning
     from assetizer.util import now

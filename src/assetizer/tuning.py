@@ -199,7 +199,7 @@ def workbench(channel_id: str) -> dict:
     active = next((p for p in pbs if p["status"] == "ACTIVE"), None)
     samples = []
     for r in db.q("""SELECT s.*, sm.added_at FROM samples sm JOIN sources s ON s.id=sm.source_id
-                     WHERE sm.channel_id=? ORDER BY sm.added_at""", channel_id):
+                     WHERE sm.channel_id=? ORDER BY sm.added_at DESC, sm.rowid""", channel_id):  # the newest first
         runs = [run_stats(x) for x in db.q("SELECT * FROM runs WHERE source_id=? AND kind='PRODUCTION' ORDER BY created_at DESC", r["id"])]
         cur = next((x for x in runs if x["id"] == r["current_run_id"]), None)
         samples.append({
@@ -393,7 +393,7 @@ def lock_preview(channel_id: str, playbook_id: int) -> dict:
     if not ch or not pb:
         raise ValueError("规程版本不属于这个频道")
     rows = []
-    for s in db.q("SELECT s.*, sm.added_at FROM samples sm JOIN sources s ON s.id=sm.source_id WHERE sm.channel_id=? ORDER BY sm.added_at",
+    for s in db.q("SELECT s.*, sm.added_at FROM samples sm JOIN sources s ON s.id=sm.source_id WHERE sm.channel_id=? ORDER BY sm.added_at DESC, sm.rowid",
                   channel_id):
         cur = db.one("SELECT r.id, p.version FROM runs r LEFT JOIN playbooks p ON p.id=r.playbook_id WHERE r.id=?",
                      s["current_run_id"]) if s["current_run_id"] else None

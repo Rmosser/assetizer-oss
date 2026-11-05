@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { get } from "../../api";
 import { Fold } from "../Fold";
 import { hm, Icon, minRule, nextScan, Seg, short, Stepper, Switch, TYPE_ICON, useNarrow } from "./bits";
-import type { Mode } from "./Header";
+import { draftOf, type Mode } from "./Header";
 import { keys } from "./lit";
 import { Opt } from "./NotionPane";
 import type { Annotations, Channel, Draft, Mapping, NotionRow, NotionView, Playbook, Preview } from "./types";
@@ -85,7 +85,7 @@ export function GoalCard({ mode, ch, pb, ann, newerDraft, onOpen, onRetune, onDr
   return (
     <Card cls="ch-goal" n="壹" title="学习目标" right={pb ? `v${pb.version} · ${rules} 条规则` : null} alert={!!ann?.conflicts.length || failed}
       act={!narrow && sheet}
-      sum={pb ? `v${pb.version}${pb.status === "NEEDS_CONFIRMATION" ? " 草稿" : ""}${ann?.conflicts.length ? ` · ${ann.conflicts.length} 处冲突` : ""}` : null}>
+      sum={pb ? `v${pb.version}${pb.id === draftOf(ch)?.id ? " 草稿" : ""}${ann?.conflicts.length ? ` · ${ann.conflicts.length} 处冲突` : ""}` : null}>
       <div className="ch-hls">
         {compiling && <div className="ch-hl"><b className="htg">编译中</b><span className="tx">新版本 · 约 3 分钟</span><span className="ch-prog" style={{ width: 90 }}><b style={{ width: "40%" }} /></span></div>}
         {failed && <div className="ch-hl cf"><b className="htg">失败</b><span className="tx">编译没有完成：{short(ch.compile?.error || "", 60)}</span></div>}
