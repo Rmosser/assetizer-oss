@@ -242,7 +242,8 @@ OUTLINE_SCHEMA = obj({
 
 def outline_prompt(playbook: dict, meta: dict, units: list[dict], written: bool = False) -> str:
     where = ("各单元正文已经写好（UNITS 的 markdown），按 Source 时间顺序排列。开头与结尾只依据这些正文，不新增正文里没有的内容，"
-             "不提炼主讲人没有讲过的框架或原则；不出现“主题记录”“所附记录”等整理过程用语。") \
+             "不提炼主讲人没有讲过的框架或原则；不出现“主题记录”“所附记录”“文稿”等整理过程用语；不用“深入”“全面”这类赞美词；"
+             "清单每条只写正文里有的意思，不加他没说的效果、好处和推论，他的判断不改重也不改轻。") \
         if written else "各单元正文由后续调用分别撰写，按 Source 时间顺序排列。"
     return f"""{context(playbook, 'article')}
 
@@ -291,6 +292,11 @@ source_text 是这个单元的全部原话转写，是第一证据。TOPIC RECOR
 所有 role 都要遵守：
 - 以 "## " 开头的小节标题（可含 Ticker，**不要编号**，系统会统一编号）；不要写时间码列表、运行信息或素材索引；不要在节内重复导航表。
 - **情绪和评价原样保留**：粗口、贬义词、嘲讽、激烈的说法，用「」逐字引用，不换成中性词，不替他缓和或加重。例如他说海外民运「言行都是非常猥琐」，就写这句，不能写成“言行式微”；他说「他赢个毛啊」，就引这句，不能写成“不能被定义为胜利”。这里的“克制”只是说整理者不加自己的赞美和渲染，不是削弱主讲人的态度。
+- **称呼和极端说法用原词**：他点名的国家、族群、人群照原词写，他说「泰国人」不写“当地人”，他说「一批穷人」不写“群体”。说得极端的不改轻：「被杀光了」不写“被大批消灭”，「可以随意杀人」不写“执法有随意性”，「政治动物」不写“政治人物”。
+- **没说完的话不补**：他话说到一半转了话题，就写到他说到的地方，不替他补结论或后半句。
+- **引号里只放读得通的话**：转写的错字先参照 TOPIC RECORDS 或按读音改正再引用；改不准的不放进「」，改用转述。
+- **人名对不上不悄悄改**：他说出的人名和上下文明显对不上时，照写他说的，再括注“（他此处说的是某某，上下文讲的是某某）”。
+- **不加套话**：字数大致和原话相当，不靠连接语写长。不写“值得注意”“其底层逻辑在于”“深入”“全面”这类他没说的词。说明一次是他的观点后就直接写内容，不要每句都以“主讲人指出/认为”开头。
 - **点到为止要留痕**：他提到一件事又说“不多讲”“不方便讲”“这里不谈”，照写他提到了什么，并写明他说不多讲。不替他下结论，不补全他没说的部分。
 - **时间按原话**：他说“今年”“四五月份”就这样写，不换算、不补年份；只有他自己说出年份才写年份。
 - 观点要写明是他的观点；他转述或朗读别人的内容，写明是转述或朗读。
@@ -349,7 +355,7 @@ INPUT
 
 # --------------------------------------------------------------- review check (flags only)
 CHECK_KINDS = ["HALF_SENTENCE_START", "DANGLING_REFERENCE", "ENDS_BEFORE_CONCLUSION", "NEXT_TOPIC_BLEED",
-               "CLAIM_MISMATCH", "ATTRIBUTION_RISK", "OVERSTATEMENT"]
+               "CLAIM_MISMATCH", "ATTRIBUTION_RISK", "OVERSTATEMENT", "SOFTENED"]
 CHECK_SCHEMA = obj({"checks": arr(obj({
     "label": STR,
     "issues": arr(obj({"kind": {"type": "string", "enum": CHECK_KINDS},
@@ -358,7 +364,9 @@ CHECK_SCHEMA = obj({"checks": arr(obj({
 }))})
 
 
-def check_prompt(items: list[dict]) -> str:
+def check_prompt(items: list[dict], faithful: bool = False) -> str:
+    extra = ("- SOFTENED：正文把原话的粗口、贬义词、称呼或极端说法换成了中性或更轻的说法（例如原话「被杀光了」，正文写“被大批消灭”）；"
+             "原话没说完而正文补了结论的，算 OVERSTATEMENT。\n") if faithful else ""
     return f"""{TOOL_RULE}
 {POLICY}
 
@@ -368,7 +376,7 @@ def check_prompt(items: list[dict]) -> str:
 - ENDS_BEFORE_CONCLUSION：结尾是否在结论前结束；NEXT_TOPIC_BLEED：结尾是否混入下一主题；
 - CLAIM_MISMATCH：单元的计划/已执行/条件陈述与该区间 ASR 是否不一致（例如 ASR 是"继续关注"，单元写成"剔除"）；
 - ATTRIBUTION_RISK / OVERSTATEMENT：归属错误或程度被加强。
-每个 issue 的字段：
+{extra}每个 issue 的字段：
 - title：给审阅者看的具体标题，不超过 24 字，必须点出对象（被质疑的说法，或片段的时间点），例如“列入 T0 级别”超出了原话、01:05 起 MP 尚未出场；不要只写类别名。
 - claim：从 article 里逐字复制被质疑的那一句（去掉 Markdown 符号，不改写、不加引号，不超过 60 字）；问题只涉及片段起止、与正文无关时给空字符串。
 - evidence：从 ASR 原文摘出最能说明问题的一句（不超过 60 字），只允许补标点，不改字。

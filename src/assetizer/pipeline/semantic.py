@@ -9,7 +9,7 @@ from ..llm import ContractError
 from ..util import fmt_tc, parse_tc, ulid
 from . import fidelity
 from .context import RunContext, StageWarning
-from .media_stages import _transcript, main_span
+from .media_stages import _silences, _transcript, main_span, screenshots_off
 
 BATCH = 6
 SOURCE_BATCH = 4000  # 原话模式：一批最多这么多字的原话，写正文的输出才不至于太长
@@ -208,8 +208,9 @@ def _source_segments(ctx: RunContext) -> list[dict] | None:
     if not fidelity.enabled(ctx.playbook):
         return None
     tr = _transcript(ctx)
-    if tr and tr.get("segments"):
-        return tr["segments"]
+    segments = fidelity.spoken(tr["segments"], _silences(ctx)) if tr and tr.get("segments") else None
+    if segments:
+        return segments
     ctx.flag("RUN", None, "TRANSCRIPT_MISSING", "REVIEW", "这一期没有转写，正文只能按理解摘要写，会有压缩")
     return None
 
@@ -313,7 +314,7 @@ def knowledge(ctx: RunContext) -> dict:
             d = {"summary": u.get("why", ""), "speaker_key": speaker_key, "teacher_reasoning": "", "visual_evidence": [],
                  "screenshot_anchors": [], "required_context": "", "claims": [], "facets": {}, "uncertainties": ["详细内容缺失"]}
         anchors = []
-        for a in d.get("screenshot_anchors", [])[:2]:
+        for a in [] if screenshots_off(ctx) else d.get("screenshot_anchors", [])[:2]:
             try:
                 t = _clamp(parse_tc(a["t"]), ctx.duration)
             except ValueError:
@@ -359,7 +360,7 @@ def _brief(u: dict) -> dict:
 # ------------------------------------------------------------------ article
 def _source_brief(u: dict, source: list[dict]) -> dict:
     return {k: u.get(k) for k in ("label", "title", "role", "knowledge_type", "tickers", "visual_evidence", "facets")} \
-        | {"source_text": fidelity.text_of(source, u["segments"])}
+        | {"source_text": fidelity.text_of(source, u["segments"], mark_pauses=u.get("role") == "QA_DIGEST")}
 
 
 def _write_from_source(ctx: RunContext, units: list[dict], by_id: dict, source: list[dict]) -> dict[str, str]:
@@ -390,7 +391,8 @@ def _write_from_source(ctx: RunContext, units: list[dict], by_id: dict, source: 
                            P.SECTIONS_SCHEMA)
         again = next((s["markdown"] for s in o["sections"] if s["label"] == u["label"]), "")
         left = fidelity.section_problems(u.get("role") or "TOPIC", text, again) if again else problems
-        if again and len(left) <= len(problems) and fidelity.cjk(again) >= fidelity.cjk(md) * 0.9:
+        # 写长了要改短，所以只拦住比原稿和原话都短太多的重写
+        if again and len(left) <= len(problems) and fidelity.cjk(again) >= min(fidelity.cjk(md), fidelity.cjk(text)) * 0.9:
             sections[u["label"]] = again
         else:
             left = problems

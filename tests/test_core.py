@@ -5236,6 +5236,58 @@ def test_cut_silences_keeps_speech_and_a_margin():
     assert fidelity.cut_silences([[50.0, 60.0], [10.0, 20.0]], []) == [[10.0, 20.0], [50.0, 60.0]]
 
 
+def test_speech_recognised_inside_a_long_silence_is_dropped():
+    from assetizer.pipeline import fidelity
+    segs = [{"start": 88.0, "end": 89.0, "text": "请不吝点赞订阅"}, {"start": 570.0, "end": 576.0, "text": "我去看了一下后台"},
+            {"start": 593.0, "end": 593.0, "text": "没有时长"}, {"start": 600.0, "end": 601.0, "text": "短停顿里的话"}]
+    quiet = [(22.0, 96.4), (96.5, 553.2), (554.9, 571.7), (598.0, 602.0)]
+    assert [s["text"] for s in fidelity.spoken(segs, quiet)] == ["我去看了一下后台", "没有时长", "短停顿里的话"]
+    assert fidelity.spoken(segs, []) == segs
+
+
+def test_softened_words_send_a_section_back():
+    from assetizer.pipeline import fidelity
+    source = "泰国人做事不严谨，教士集团领导层被杀光了兄弟，剩下一批穷人。" * 3
+    assert fidelity.softened_words(source, "当地人做事不严谨，领导层被大批消灭。") == ["杀光", "泰国人", "穷人"]
+    assert fidelity.softened_words(source, source) == []
+    problems = fidelity.section_problems("BACKGROUND", source, "当地人做事不严谨。")
+    assert any("泰国人" in p for p in problems)
+
+
+def test_a_section_much_longer_than_what_he_said_is_sent_back():
+    from assetizer.pipeline import fidelity
+    source = "他讲了一段话" * 20
+    assert any("写长了" in p for p in fidelity.section_problems("TOPIC", source, source + "他讲了一段话" * 8))
+    assert fidelity.section_problems("TOPIC", source, source + "他讲了一段话" * 4) == []
+    short = "他讲了一段话" * 10
+    assert fidelity.section_problems("TOPIC", short, short * 2) == []  # 60 characters: too short for a ratio to mean anything
+
+
+def test_short_answers_carry_their_own_times():
+    from assetizer.pipeline import fidelity
+    segs = [{"start": 100.0, "end": 102.0, "text": "问一"}, {"start": 102.5, "end": 104.0, "text": "答一"},
+            {"start": 110.0, "end": 112.0, "text": "问二"}]
+    spans = [{"start": 100.0, "end": 112.0, "from": 0, "to": 2}]
+    assert fidelity.text_of(segs, spans, mark_pauses=True) == "（00:01:40）问一答一\n（00:01:50）问二"
+    assert fidelity.text_of(segs, spans) == "（00:01:40）问一答一问二"
+
+
+def test_a_channel_can_turn_its_screenshots_off(home):
+    from assetizer import db
+    from assetizer.pipeline import media_stages
+    from assetizer.pipeline.context import RunContext
+    db.connect()
+    ctx = RunContext(run={"id": "off-r1"}, source={"id": "off", "channel_id": "talking-head"})
+    db.exec("INSERT INTO sources(id, url, created_at, updated_at) VALUES ('off','u','2026','2026')")
+    db.exec("INSERT INTO runs(id, source_id, kind, production, created_at) VALUES ('off-r1','off','PRODUCTION','RUNNING','2026')")
+    assert not media_stages.screenshots_off(ctx)
+    db.set_setting("screenshots:talking-head", "off")
+    assert media_stages.screenshots_off(ctx)
+    assert media_stages.screenshots(ctx) == {"screenshots": 0, "off": True}
+    other = RunContext(run={"id": "off-r1"}, source={"id": "off", "channel_id": "charts"})
+    assert not media_stages.screenshots_off(other)
+
+
 def test_clip_time_maps_across_the_cuts():
     from assetizer.pipeline import fidelity
     keep = [[100.0, 110.0], [200.0, 205.0]]

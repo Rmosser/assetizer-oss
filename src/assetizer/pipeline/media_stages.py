@@ -84,9 +84,16 @@ def _transcript(ctx: RunContext) -> dict | None:
 
 
 # ------------------------------------------------------------------ screenshots
+def screenshots_off(ctx: RunContext) -> bool:
+    """频道设置 screenshots:<频道>=off：这个频道的画面没有信息量（只有口播），文章不放截图。"""
+    return db.setting(f"screenshots:{ctx.source.get('channel_id')}") == "off"
+
+
 def screenshots(ctx: RunContext) -> dict:
     n = 0
     db.exec("DELETE FROM assets WHERE run_id=? AND kind='screenshot'", ctx.id)
+    if screenshots_off(ctx):
+        return {"screenshots": 0, "off": True}
     for u in _units(ctx):
         for i, a in enumerate(u.get("screenshot_anchors", [])[:2]):
             p = ctx.path("assets", "screenshots", u["label"], f"{i + 1}.jpg")

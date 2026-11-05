@@ -70,7 +70,7 @@ def review_check(ctx: RunContext) -> dict:
                 if len({c["label"] for c in o["checks"]} & want) < 0.8 * len(want):
                     raise ContractError("MISSING_UNITS", "review check did not cover the batch")
 
-            o = llm.structured(ctx.calls, f"review-check-{bi // batch + 1:02}", P.check_prompt(items[bi:bi + batch]),
+            o = llm.structured(ctx.calls, f"review-check-{bi // batch + 1:02}", P.check_prompt(items[bi:bi + batch], faithful=whole),
                                P.CHECK_SCHEMA, effort="medium", enforce=True, check=cover)
         except ContractError as e:
             ctx.event(f"review check batch failed: {e}", "warn")
@@ -90,10 +90,11 @@ def review_check(ctx: RunContext) -> dict:
     return {"items": len(items), "issues": found}
 
 
-FIDELITY_KINDS = {"CLAIM_MISMATCH", "ATTRIBUTION_RISK", "OVERSTATEMENT"}
+FIDELITY_KINDS = {"CLAIM_MISMATCH", "ATTRIBUTION_RISK", "OVERSTATEMENT", "SOFTENED"}
 _KIND_ZH = {"HALF_SENTENCE_START": "片段从半句开始", "DANGLING_REFERENCE": "开头指代不明",
             "ENDS_BEFORE_CONCLUSION": "片段在结论前结束", "NEXT_TOPIC_BLEED": "结尾混入下一主题",
-            "CLAIM_MISMATCH": "陈述与原话可能不一致", "ATTRIBUTION_RISK": "归属可能有误", "OVERSTATEMENT": "程度可能被加强"}
+            "CLAIM_MISMATCH": "陈述与原话可能不一致", "ATTRIBUTION_RISK": "归属可能有误", "OVERSTATEMENT": "程度可能被加强",
+            "SOFTENED": "原话的说法被改轻"}
 
 
 # ------------------------------------------------------------------ compose
