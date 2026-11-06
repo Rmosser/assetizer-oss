@@ -105,8 +105,12 @@
 .ch-swbtn .ico { color: var(--ink-3); }
 .ch-swbtn > .ico { transition: transform 0.2s var(--ease); }
 .ch-swbtn[aria-expanded="true"] > .ico { transform: rotate(180deg); }
-.ch-ava { border-radius: 50%; display: grid; place-items: center; font-family: var(--serif); font-weight: 700; flex: none;
+.ch-ava { border-radius: 50%; display: grid; place-items: center; font-family: var(--serif); font-weight: 700; flex: none; overflow: hidden;
   background: color-mix(in srgb, var(--ink) 9%, var(--paper)); color: var(--ink-2); }
+.ch-ava img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.ch-seg-pic { display: inline-block; width: 16px; height: 16px; margin-right: 6px; border-radius: 50%; object-fit: cover; vertical-align: -3px; }
+.ch-fld-note { margin: 6px 0 0 82px; font-size: 12.5px; color: var(--ink-3); }
+.ch-fld-note.z { color: var(--zhu-ink); }
 .ch-rename { display: flex; align-items: center; gap: 12px; }
 .ch-rename input { font: 700 25px/1.2 var(--serif); border: 0; border-bottom: 1.5px solid var(--ink); background: transparent; color: var(--ink); width: 14em; padding: 2px 0; }
 .ch-rename input:focus { outline: none; }
@@ -725,8 +729,11 @@ button.ch-curc:focus-visible { outline-offset: -2px; }
 .ch-sheet .srow .n.z { color: var(--zhu-ink); }
 .ch-sheet .srow.cf { background: var(--zhu-wash); border-color: color-mix(in srgb, var(--zhu) 30%, transparent); }
 .ch-sheet .srow.cf .t { color: var(--zhu-ink); white-space: normal; }
+.ch-sheet .srow.tally .t { white-space: normal; }  /* the count is the point: wraps beside its button on a phone */
 .ch-sheet .ok { width: 18px; height: 18px; border-radius: 50%; background: var(--ink); color: var(--paper); display: grid; place-items: center; flex: none; }
 .ch-sheet .sfoot, .ch-target .sfoot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+/* 定稿 stays in reach however long the list of samples is */
+.ch-sheet .sfoot { position: sticky; bottom: 0; z-index: 1; margin-inline: calc(-1 * var(--s5)); padding: 12px var(--s5) calc(12px + var(--safe-b)); border-top: 1px solid var(--rule); background: var(--chp-card); margin-bottom: calc(-1 * (var(--s5) + var(--safe-b))); }
 .ch-target > input { width: 100%; height: 36px; border: 1px solid var(--rule-2); border-radius: 9px; padding: 0 12px; font: 14px var(--sans); color: var(--ink); background: var(--nt-bg); }
 .ch-target .list { display: flex; flex-direction: column; gap: 2px; margin: 10px 0; max-height: 320px; overflow: auto; }
 .ch-target .it { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px; text-align: left; font-size: 13.5px; }
@@ -877,6 +884,7 @@ button.ch-cardh { width: 100%; text-align: left; margin: 0; }
 .ch-bst { margin-top: 12px; display: grid; gap: 3px; }
 .ch-bst p { margin: 0; font-size: 12.5px; color: var(--ink-2); }
 .ch-bst p.z { color: var(--zhu-ink); }
+.ch-bst p.one { padding-left: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ch-bacts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .ch-blink { display: flex; gap: 8px; margin-top: 10px; }
 .ch-blink input { flex: 1; min-width: 0; height: 30px; border: 1px solid var(--rule-2); border-radius: 8px; padding: 0 10px;

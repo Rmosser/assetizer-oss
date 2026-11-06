@@ -24,6 +24,7 @@
 | Notion 交付、映射、页面模板、查重、预览 | [architecture.md](architecture.md)「交付到 Notion」、[channel-page.md](channel-page.md) §4 | `delivery.py`、`notion/`、`templates.py`、`preview.py` |
 | 自动收录新视频、立即扫描、补录旧视频 | [architecture.md](architecture.md)「频道生命周期」、[design.md](design.md) §R6-5、§R6-6、[channel-page.md](channel-page.md) §2 | `ingest.py`、`web/app.py`（看板接口）、`web/src/components/channel/Board.tsx` |
 | agy 在网页里登录、额度（5 小时 / 每周） | [operations.md](operations.md)「凭据与登录」、[design.md](design.md) §R6-3、§R6-4 | `providers/agy_login.py`、`providers/agy.py`（`usage`、`record_usage`）、`providers/magpie.py`（`quota_view`）、`web/src/components/AgyLogin.tsx` |
+| magpie：订阅额度、模型、分工、上报 | [design.md](design.md) §R6-8、§R6-9、§R5-5 | `providers/magpie_state.py`、`providers/magpie.py`、`providers/__init__.py`（路由）、`knobs.py`、`web/src/components/Routes.tsx`（分工与模型列表）、`web/src/pages/Engine.tsx`（`SubTile`） |
 | YouTube 登录与 CookieCloud | [operations.md](operations.md)「凭据与登录」、[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)、[cookiecloud-read-ingress.md](cookiecloud-read-ingress.md) | `cookies.py`、`youtube.py`、`web/app.py`（`/api/cookiecloud/*`）、`web/src/components/CookieCloud.tsx` |
 | 盒子级设置（并行、保留期、分工、补录额度） | [design.md](design.md) §R6-7 | `knobs.py`、`web/src/components/Knobs.tsx` |
 | 调试样片的低清版 | [design.md](design.md) §R-20 | `playback.py`、`media/ffmpeg.py`（`playback_copy`） |

@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS sources (
   transcript_path TEXT,
   current_run_id TEXT,
   adopt_pinned INTEGER NOT NULL DEFAULT 0,          -- 调试期：用户钉住的版本，新跑完的运行不替换它
+  lock_pinned INTEGER NOT NULL DEFAULT 0,           -- 这个钉是定稿单钉的，不是用户：回到调试期时清掉
   deliver_after_run TEXT,                            -- 定稿时选了「等跑完」：这次运行结束前不交付（delivery=HELD）
   delivery TEXT NOT NULL DEFAULT 'NOT_STARTED',      -- NOT_STARTED | BLOCKED | DELIVERING | DELIVERED | STALE | FAILED | REGISTERED | HELD
   delivery_reason TEXT,
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS sources (
   notion_url TEXT,
   notion_synced_run TEXT,
   notion_database_id TEXT,                             -- where notion_page_id lives (channel targets can move)
+  notion_icon TEXT,                                    -- the channel avatar that page carries (channel_icons)
   package_path TEXT,
   review TEXT NOT NULL DEFAULT 'UNREVIEWED',          -- legacy per-issue review; no longer drives UI or delivery (design §R2-4)
   review_notes TEXT,
@@ -95,7 +97,7 @@ CREATE TABLE IF NOT EXISTS runs (
   error_class TEXT,
   error TEXT,
   priority INTEGER NOT NULL DEFAULT 0,
-  origin TEXT,                                         -- manual | ingest | backfill | trial (NULL: before 2026-10-28)
+  origin TEXT,                                         -- manual | ingest | backfill | trial | lock（定稿单排入或等着的）(NULL: before 2026-10-28)
   attempts INTEGER NOT NULL DEFAULT 0,
   pgid INTEGER,
   stop_at TEXT,                                        -- 清空 asked this trial to stop (a10): the worker stops it
@@ -331,8 +333,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE sources SET delivered_at=updated_at WHERE delivery='DELIVERED'")
     if "adopt_pinned" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN adopt_pinned INTEGER NOT NULL DEFAULT 0")
+    if "lock_pinned" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN lock_pinned INTEGER NOT NULL DEFAULT 0")
+        # until now 定稿's pins looked like the user's: on a locked channel a pin is taken for 定稿's (a hand-pinned one
+        # too, which only comes up if the channel goes back to 调试期)
+        conn.execute("UPDATE sources SET lock_pinned=1 WHERE adopt_pinned=1 AND channel_id IN (SELECT id FROM channels WHERE stage='LOCKED')")
     if "deliver_after_run" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN deliver_after_run TEXT")
+    if "notion_icon" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN notion_icon TEXT")
     if "notion_database_id" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN notion_database_id TEXT")
         r = conn.execute("SELECT value FROM settings WHERE key='notion_database_id'").fetchone()

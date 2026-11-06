@@ -81,17 +81,72 @@ export const PRODUCTION: Record<string, string> = {
   COMPLETE: "已完成", COMPLETE_PARTIAL: "完成 · 有告警", CANCELLED: "已取消", EXPERIMENT: "实验",
 };
 export const WAIT: Record<string, string> = {
-  AGY_AUTH_REQUIRED: "模型登录失效", PROVIDER_QUOTA: "模型配额", YOUTUBE_AUTH: "YouTube 需登录",
+  AGY_AUTH_REQUIRED: "模型登录失效", PROVIDER_QUOTA: "模型配额", PROVIDER_MODEL: "工序的模型已取消", YOUTUBE_AUTH: "YouTube 需登录",
   DISK_LOW: "磁盘不足", PLAYBOOK_CONFIRMATION: "频道待定稿", LIVE_IN_PROGRESS: "直播未结束",
   AGY_MEDIA_READ: "agy 读不了视频", NETWORK: "网络中断，稍后重试", YTDLP_OUTDATED: "下载工具需更新",
   YOUTUBE_REFUSED: "YouTube 拒绝下载",
 };
+/** why a run failed, in a few words */
+export const ERRORS: Record<string, string> = {
+  PROVIDER_TIMEOUT: "模型超时", PROVIDER_FAILURE: "模型出错", PROVIDER_TRANSIENT: "模型暂时不可用", PROVIDER_OUTPUT_LIMIT: "输出超长",
+  CONTENT_SAFETY: "被内容安全过滤拦下", MODALITY_ROUTING_DEVIATION: "模型越界读文件", MEDIA_READ_FAILED: "读不了视频", CONTRACT: "输出不合规", DOWNLOAD: "下载失败",
+  TOO_MANY_RESTARTS: "反复重启", VIDEO_REMOVED: "视频已删除", VIDEO_PRIVATE: "视频设为私享", VIDEO_MEMBERS: "会员限定视频",
+  SOURCE_UNAVAILABLE: "视频看不了", STOPPED: "清空时停下", "?": "未分类",
+};
+/** what stands in the way of 补录 (ingest.backfill_stop) */
+export const BACKFILL_STOP: Record<string, string> = {
+  paused: "队列暂停中", queued: "先印新视频", trial: "先跑试跑", weekly: "周额度留给新视频", "5h": "5 小时额度留给新视频",
+  YOUTUBE_AUTH: "等 YouTube 登录", YOUTUBE_REFUSED: "YouTube 拒绝下载", DISK_LOW: "磁盘不足", YTDLP_OUTDATED: "下载工具需更新",
+};
+/** those that need the user; the others pass by themselves */
+export const BACKFILL_BAD = ["YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "YTDLP_OUTDATED"];
+
+/** The open alerts as they are shown: CookieCloud not answering and the login it costs are one thing to fix. */
+export function mergeAlerts(alerts: any[]): any[] {
+  const cc = alerts.find((a) => a.key === "cookiecloud"), auth = alerts.find((a) => a.key === "YOUTUBE_AUTH");
+  if (!cc || !auth) return alerts;
+  return alerts.filter((a) => a !== cc).map((a) => (a === auth ? { ...a, title: "读不到 CookieCloud，要登录的视频在等", body: cc.body } : a));
+}
+
+const HOUR = 3600e3;
+const EAST8 = 8 * HOUR;  // the box's clock (notify.TZ), whatever the browser is set to
+const hh = (n: number) => String(n).padStart(2, "0");
+/** the box's hour and minute now */
+export function hourMinute8(): [number, number] {
+  const d = new Date(Date.now() + EAST8);
+  return [d.getUTCHours(), d.getUTCMinutes()];
+}
+/** when, on the box's clock: "09:00", "明天 09:00", "后天 09:00", "11月9日 09:00" */
+export function at8(iso: string): string {
+  const d = new Date(+new Date(iso) + EAST8);
+  const days = Math.floor(+d / (24 * HOUR)) - Math.floor((Date.now() + EAST8) / (24 * HOUR));
+  const hm = `${hh(d.getUTCHours())}:${hh(d.getUTCMinutes())}`;
+  return days <= 0 ? hm : days === 1 ? `明天 ${hm}` : days === 2 ? `后天 ${hm}` : `${d.getUTCMonth() + 1}月${d.getUTCDate()}日 ${hm}`;
+}
+/** the nth whole hour from now, as the box takes a time */
+export function nextHour(n: number): string {
+  const t = (Math.floor(Date.now() / HOUR) + n) * HOUR;
+  return new Date(t).toISOString().replace(/\.\d+Z$/, "+00:00");
+}
+/** [23, 0, 1, 13] → "13:00–14:00、23:00–02:00": stretches of hours, read across midnight (knobs.hours_text) */
+export function hoursText(hours: number[]): string {
+  const on = new Set(hours);
+  if (on.size === 24) return "全天";
+  const out: string[] = [];
+  for (const h of [...on].sort((a, b) => a - b)) {
+    if (on.has((h + 23) % 24)) continue;
+    let end = h;
+    while (on.has((end + 1) % 24)) end = (end + 1) % 24;
+    out.push(`${hh(h)}:00–${hh((end + 1) % 24)}:00`);
+  }
+  return out.join("、");
+}
 /** a video no login opens: why, for 视频不可用 (a15) */
 export const UNAVAILABLE: Record<string, string> = {
   VIDEO_REMOVED: "已删除", VIDEO_PRIVATE: "私享", VIDEO_MEMBERS: "会员限定", SOURCE_UNAVAILABLE: "看不了",
 };
 /** the waits that stop production (vermilion); the others pass by themselves (a live still on air, the network) */
-export const STOPS = ["AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "AGY_MEDIA_READ", "YTDLP_OUTDATED"];
+export const STOPS = ["AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "PROVIDER_MODEL", "YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "AGY_MEDIA_READ", "YTDLP_OUTDATED"];
 export const DELIVERY: Record<string, string> = {
   NOT_STARTED: "待交付", BLOCKED: "Notion 未配置", DELIVERING: "交付中", DELIVERED: "已入 Notion",
   STALE: "待更新", FAILED: "交付失败", REGISTERED: "库里已有", HELD: "等跑完",

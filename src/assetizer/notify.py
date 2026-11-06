@@ -24,7 +24,7 @@ TZ = ZoneInfo("Asia/Shanghai")
 DIGEST_RETRY = 900  # seconds between two tries of a digest Telegram did not take
 # pushed the moment they are raised: each stops production or delivery until someone acts (a17); any other alert
 # waits ALERT_WAIT first, and one gone again by then (a network hiccup, CookieCloud's flapping) sends nothing at all
-URGENT = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "AGY_MEDIA_READ", "YOUTUBE_AUTH", "YOUTUBE_REFUSED", "YTDLP_OUTDATED",
+URGENT = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "PROVIDER_MODEL", "AGY_MEDIA_READ", "YOUTUBE_AUTH", "YOUTUBE_REFUSED", "YTDLP_OUTDATED",
           "notion-auth"}
 ALERT_WAIT = 600  # seconds
 LIMIT = 4000        # Telegram rejects messages over 4096 characters
@@ -146,7 +146,7 @@ def run_failed(run_id: str, kind: str, error: str) -> None:
 
 
 def alert_raised(severity: str, title: str, body: str) -> None:
-    send(f"{'🔴' if severity == 'critical' else '🟠'} {title}\n{body[:1500]}\n{link()}".strip())
+    send(f"{ {'critical': '🔴', 'info': 'ℹ️'}.get(severity, '🟠') } {title}\n{body[:1500]}\n{link()}".strip())
 
 
 def send_due_alerts() -> None:

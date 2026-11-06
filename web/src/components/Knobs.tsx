@@ -37,15 +37,13 @@ export function Stepper({ k, value, lo, hi, step = 1, fmt = String, save, label 
 }
 
 const days = (v: number) => `${v} 天`;
-const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 export function ParallelKnobs({ kn, save }: { kn: any; save: Save }) {
   return (
-    <div className="inst">
-      <span className="label">并行</span>
+    <>
       <div className="kn-line"><span>同时印</span><Stepper k="worker_slots" value={kn.worker_slots} lo={1} hi={16} save={save} label="同时印" /></div>
       <div className="kn-line"><span>同时下载</span><Stepper k="download_slots" value={kn.download_slots} lo={1} hi={4} save={save} label="同时下载" /></div>
-    </div>
+    </>
   );
 }
 
@@ -59,38 +57,6 @@ export function DiskKnobs({ kn, save }: { kn: any; save: Save }) {
         <Stepper k="playback_max_gb" value={kn.playback_max_gb} lo={0} hi={50} fmt={(v) => `${v} GB`} save={save} label="低清版上限" />
       </div>
     </>
-  );
-}
-
-const PROVIDER: Record<string, string> = { agy: "Gemini", magpie: "ChatGPT", tuzi: "Gemini（兔子）" };
-
-/** 分工: which provider each model stage uses (stage_providers over llm_provider), and what 补录 leaves to new videos */
-export function Routing({ kn, steps, label, save }: { kn: any; steps: string[]; label: Record<string, string>; save: Save }) {
-  const main = kn.llm_provider;
-  const options = (cur: string) => ["agy", "magpie", ...(cur === "tuzi" ? ["tuzi"] : [])];
-  const seg = (cur: string, pick: (p: string) => void, name: string) => (
-    <span className="seg" role="radiogroup" aria-label={name}>
-      {options(cur).map((p) => <button key={p} role="radio" aria-checked={cur === p} className={cur === p ? "on" : ""} onClick={() => cur !== p && pick(p)}>{PROVIDER[p]}</button>)}
-    </span>
-  );
-  return (
-    <details className="fold mini kn-route">
-      <summary><i className="plus" aria-hidden /><span>分工与补录</span></summary>
-      <div className="kn-grid">
-        {steps.map((k) => (
-          <div key={k} className="kn-line"><span>{label[k]}</span>
-            {seg(kn.stage_providers[k] || main, (p) => save({ stage_providers: { ...kn.stage_providers, [k]: p } }), label[k])}
-          </div>
-        ))}
-        <div className="kn-line"><span>其余</span>{seg(main, (p) => save({ llm_provider: p }), "其余")}</div>
-      </div>
-      <div className="kn-grid">
-        <div className="kn-line"><span>补录留给新视频 · 每周</span>
-          <Stepper k="backfill_min_weekly" value={kn.backfill_min_weekly} lo={0} hi={0.9} step={0.1} fmt={pct} save={save} label="补录留给新视频的周额度" /></div>
-        <div className="kn-line"><span>补录留给新视频 · 5 小时</span>
-          <Stepper k="backfill_min_5h" value={kn.backfill_min_5h} lo={0} hi={0.9} step={0.1} fmt={pct} save={save} label="补录留给新视频的 5 小时额度" /></div>
-      </div>
-    </details>
   );
 }
 
@@ -126,7 +92,6 @@ export function AsrCard({ a, reload }: { a: any; reload: () => void }) {
   const t = a.test;
   return (
     <div className="inst">
-      <span className="label">GPU 转写</span>
       {a.last && <div className="sub">上一期用{a.last.device === "gpu" ? " GPU" : a.last.fell_back ? "了 CPU（GPU 没接上）" : " CPU"} · {ago(a.last.at)}</div>}
       {t && <div className={`sub${t.ok ? "" : " zhu"}`}>测试{t.ok ? `通过${t.model ? ` · ${t.model}` : ""}` : `没通过：${ASR_CODE[t.code] || t.code}`} · {ago(t.at)}</div>}
       <div className="kn-form">
@@ -156,7 +121,6 @@ export function TelegramCard({ tg, save, reload }: { tg: any; save: Save; reload
   const on = tg.token && tg.chat;
   return (
     <div className="inst">
-      <span className="label">Telegram 通知</span>
       {on ? <div className="sub">接到{tg.linked?.chat ? `「${tg.linked.chat}」` : "对话"}{tg.linked?.bot ? ` · @${tg.linked.bot}` : ""}</div>
         : tg.token ? <div className="sub">在 Telegram 里给 bot 发一句话，再点「接通」</div> : null}
       <div className="kn-form">

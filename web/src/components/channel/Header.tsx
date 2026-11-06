@@ -19,8 +19,15 @@ function status(c: Channel): { text: string; tone: "" | "ink" | "zhu" } {
 
 const ALERT_TEXT: Record<string, string> = { "notion-auth": "Notion 未连接", YOUTUBE_AUTH: "YouTube 需要登录", AGY_AUTH_REQUIRED: "模型需要登录", DISK_LOW: "磁盘空间不足" };
 
-export function Avatar({ c, size = 38 }: { c: { name: string }; size?: number }) {
-  return <span className="ch-ava" style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden>{c.name.replace(/^[@＠]/, "").slice(0, 1)}</span>;
+export function Avatar({ c, size = 38 }: { c: { name: string; avatar?: string | null }; size?: number }) {
+  const [broken, setBroken] = useState<string | null>(null);  // the address that would not load: its first letter instead
+  return (
+    <span className="ch-ava" style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden>
+      {c.avatar && c.avatar !== broken
+        ? <img src={c.avatar} alt="" referrerPolicy="no-referrer" onError={() => setBroken(c.avatar!)} />
+        : c.name.replace(/^[@＠]/, "").slice(0, 1)}
+    </span>
+  );
 }
 
 /** The page title as a menu of every channel and the universal playbook. */

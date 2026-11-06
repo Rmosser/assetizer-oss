@@ -159,7 +159,8 @@ def _proxy(ctx: RunContext, pid: str, offset: float, length: float) -> tuple[Pat
     name = f"{pid}_{offset:.0f}_{length:.0f}_{s.chunk_minutes}_{s.chunk_overlap_minutes}"
     mp4, meta = cache / f"{name}.mp4", cache / f"{name}.json"
     from .. import providers
-    limit = getattr(providers.get(), "media_size_limit", ffmpeg.VIEW_FILE_LIMIT)
+    # the strictest of what may read it: agy has a file size limit, frames taken for a magpie model have none
+    limit = min((x for p in providers.in_use() if (x := getattr(p, "media_size_limit", ffmpeg.VIEW_FILE_LIMIT)) is not None), default=None)
     # a proxy made under an older, larger agy limit is encoded again
     if sha and mp4.exists() and meta.exists() and (limit is None or mp4.stat().st_size <= limit):
         m = read_json(meta)

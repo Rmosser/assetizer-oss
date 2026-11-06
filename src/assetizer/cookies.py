@@ -50,6 +50,7 @@ FIX: dict[str, str] = {
     "sync_source_not_configured": "CookieCloud 还没有同步源：在 Chrome 的 CookieCloud 插件里完成配对并同步一次。",
     "cookie_payload_missing": "Chrome 插件还没上传过 cookies：在插件里手动同步一次。",
     "no_youtube_cookies": "CookieCloud 里没有 YouTube 的 cookies：确认 Chrome 已登录 YouTube，并让插件同步一次。",
+    "payload_recovery_required": "CookieCloud 暂时不提供这份 cookies，重试后仍然如此：让插件同步一次；还不行就到 CookieCloud 设置页看恢复状态。",
 }
 # failures where CookieCloud accepted the token, so its name and domain whitelist help explain them
 _TOKEN_HINT = {"domain_not_allowed", "missing_scope", "sync_source_not_configured", "cookie_payload_missing",
@@ -57,6 +58,11 @@ _TOKEN_HINT = {"domain_not_allowed", "missing_scope", "sync_source_not_configure
 _REDIRECT = (301, 302, 303, 307, 308)
 # statuses Cloudflare itself answers with when it cannot reach the origin behind the tunnel
 _CLOUDFLARE_ORIGIN = {502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530}
+# CookieCloud refuses reads while the plugin's sync is being written; one such read used to send a members-only download
+# to the logged-out server Chromium, and the wait it caused held 补录 back for up to 30 minutes
+_SYNC_WRITE_WAITS = (2, 5, 10)
+KEPT_LOGIN = "youtube-cookies-last-good"
+KEPT_GRACE = 6 * 3600  # seconds CookieCloud may be down, with a kept login to go on, before it is worth an alert
 
 
 def _cloudflare_error(r) -> bool:
@@ -184,7 +190,11 @@ def fetch(timeout: float = 30) -> str:
     """Netscape cookie text for yt-dlp; raises CookieError with a code from FIX."""
     if not configured():
         raise CookieError("not_configured")
-    r = _get("/api/v3/cookies", {"format": "netscape", "domains": domains()}, timeout)
+    for wait in (*_SYNC_WRITE_WAITS, None):
+        r = _get("/api/v3/cookies", {"format": "netscape", "domains": domains()}, timeout)
+        if wait is None or r.status_code == 200 or _error_code(r) != "payload_recovery_required":
+            break
+        time.sleep(wait)
     if r.status_code != 200:
         code = _error_code(r)
         ip = egress_ip() if code == "ip_not_allowed" else None
@@ -217,8 +227,11 @@ def introspect(timeout: float = 15) -> dict | None:
 
 
 def _record(ok: bool, source: str, code: str | None = None, count: int | None = None, detail: str | None = None) -> None:
+    """The last read. `since`: when the reads started failing."""
+    was = db.setting("youtube_cookies_state") or {}
+    since = None if ok else (was.get("since") if not was.get("ok", True) else None) or now()
     db.set_setting("youtube_cookies_state", {"ok": ok, "source": source, "code": code, "count": count, "detail": detail,
-                                             "at": now()})
+                                             "at": now(), "since": since})
 
 
 def probe() -> dict:
@@ -281,6 +294,72 @@ def browser_args() -> list[str]:
     return ["--cookies-from-browser", f"chromium:{s.browser_profile}"] if s.browser_profile else []
 
 
+def _cookie_temp(text: str) -> str:
+    """A 0600 working copy for one yt-dlp call. Each call gets its own: yt-dlp writes the file back when it exits, and
+    several run at once."""
+    run_dir = config.get().secrets_dir / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.chmod(0o700)
+    fd, path = tempfile.mkstemp(prefix="yt-cookies-", suffix=".txt", dir=run_dir)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(path, 0o600)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    return path
+
+
+def _keep_login(text: str) -> None:
+    """Keep the latest cookies that carry a YouTube sign-in, in plain text (0600 in secrets/), for when CookieCloud
+    cannot be read. Failing to keep them is no reason to fail the read."""
+    d = config.get().secrets_dir
+    with contextlib.suppress(OSError):
+        d.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=f"{KEPT_LOGIN}.", dir=d)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            os.replace(tmp, d / KEPT_LOGIN)  # mkstemp made it 0600
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def _kept_login() -> str | None:
+    try:
+        return (config.get().secrets_dir / KEPT_LOGIN).read_text() or None
+    except OSError:
+        return None
+
+
+def _kept_at() -> str | None:
+    """When the kept login was read from CookieCloud (the file's time: nothing in it is looked at)."""
+    try:
+        t = (config.get().secrets_dir / KEPT_LOGIN).stat().st_mtime
+    except OSError:
+        return None
+    return _dt.datetime.fromtimestamp(t, _dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _down_alert(e: CookieError, kept: bool) -> None:
+    """A failed read with the kept login to go on is the lamp's business; an alert only once it has lasted. Without one
+    the downloads that need a login are in trouble now."""
+    body = f"{fix(e.code)}（错误码 {e.code}{f'，{e.detail}' if e.code in ('unreachable', 'ip_not_allowed') and e.detail else ''}）"
+    if not kept:
+        db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态，已改用服务器 Chromium", body)
+        return
+    since = (db.setting("youtube_cookies_state") or {}).get("since")
+    try:
+        long = (_dt.datetime.now(_dt.timezone.utc) - _dt.datetime.fromisoformat(since)).total_seconds() >= KEPT_GRACE
+    except (TypeError, ValueError):
+        long = False
+    if long:
+        db.raise_alert("cookiecloud", "info", f"CookieCloud 读不到已超过 {KEPT_GRACE // 3600} 小时，还在用上一份登录态", body)
+
+
 @contextlib.contextmanager
 def ytdlp_args() -> Iterator[list[str]]:
     """yt-dlp arguments carrying the login: fresh CookieCloud cookies in a 0600 file (removed afterwards),
@@ -291,34 +370,37 @@ def ytdlp_args() -> Iterator[list[str]]:
 
 @contextlib.contextmanager
 def ytdlp_login() -> Iterator[tuple[list[str], dict]]:
-    """ytdlp_args() and which login they carry: {"source": "cookiecloud" | "browser" | None, "signed_in": whether the
-    CookieCloud cookies carry a YouTube sign-in (None for the server Chromium: not looked at), "code": the CookieCloud
-    failure the server Chromium stands in for}."""
+    """ytdlp_args() and which login they carry: {"source": "cookiecloud" | "saved" | "browser" | None, "signed_in": whether
+    the cookies carry a YouTube sign-in (None for the server Chromium: not looked at), "code": the CookieCloud failure
+    the saved copy or the server Chromium stands in for}."""
     path, args = None, None
     how: dict = {"source": None, "signed_in": None, "code": None}
     if configured():
         try:
             text = fetch()
-            run_dir = config.get().secrets_dir / "run"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            run_dir.chmod(0o700)
-            fd, path = tempfile.mkstemp(prefix="yt-cookies-", suffix=".txt", dir=run_dir)
-            with os.fdopen(fd, "w") as f:
-                f.write(text)
-            os.chmod(path, 0o600)
-            args = ["--cookies", path]
             lines = _cookie_lines(text)
-            how.update(source="cookiecloud", signed_in=_signed_in(lines))
+            signed_in = _signed_in(lines)
+            path = _cookie_temp(text)
+            args = ["--cookies", path]
+            how.update(source="cookiecloud", signed_in=signed_in)
             _record(True, "cookiecloud", count=len(lines))
             db.resolve_alert("cookiecloud")
+            if signed_in:
+                _keep_login(text)
         except CookieError as e:
             how["code"] = e.code
             _record(False, "cookiecloud", e.code, detail=e.detail)
-            db.raise_alert("cookiecloud", "warning", "读不到 CookieCloud 的 YouTube 登录态，已改用服务器 Chromium",
-                           f"{fix(e.code)}（错误码 {e.code}{f'，{e.detail}' if e.code in ('unreachable', 'ip_not_allowed') and e.detail else ''}）")
+            kept = _kept_login()
+            with contextlib.suppress(OSError):
+                if kept:
+                    path = _cookie_temp(kept)
+                    args = ["--cookies", path]
+                    # "saved", not "cookiecloud": a refusal may mean this copy has gone stale, not that the video is shut
+                    how.update(source="saved", signed_in=True)
+            _down_alert(e, bool(args))
         except OSError:
-            # Preparation can fail after mkstemp (write/chmod or the status update). Remove the
-            # plaintext cookie file before falling back, and never hand yt-dlp a partial file.
+            # Preparation can fail after the file is made (the status update). Remove the plaintext cookie file before
+            # falling back, and never hand yt-dlp a partial file.
             if path:
                 with contextlib.suppress(OSError):
                     os.unlink(path)
@@ -468,6 +550,8 @@ def save_credentials(body) -> None:
             _remove_secret(name)
         else:
             db.set_setting("cookiecloud_origin", None)
+    with contextlib.suppress(OSError):
+        (config.get().secrets_dir / KEPT_LOGIN).unlink(missing_ok=True)  # may be another account's
     # the last read and the last video test used the old credentials; keep only the test video's address
     db.set_setting("youtube_cookies_state", None)
     last = db.setting("youtube_video_test") or {}
@@ -498,4 +582,5 @@ def status() -> dict:
     return {"cookiecloud": {"configured": configured(), "origin": origin(), "domains": domains(),
                             "access_token": bool(s.secret("cf-access-client-id") and s.secret("cf-access-client-secret")),
                             "fields": {f: _field(name) for f, (_, name) in FIELDS.items() if name}},
-            "state": db.setting("youtube_cookies_state"), "video_test": db.setting("youtube_video_test"), "fix": FIX}
+            "state": db.setting("youtube_cookies_state"), "kept_at": _kept_at(),
+            "video_test": db.setting("youtube_video_test"), "fix": FIX}

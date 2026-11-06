@@ -48,16 +48,18 @@ STAGES: list[tuple[str, object, bool]] = [
 ]
 STAGE_NAMES = [s[0] for s in STAGES]
 ALWAYS_RERUN = {"PLAYBOOK"}
-PAUSE_KINDS = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"}
+PAUSE_KINDS = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "PROVIDER_MODEL"}
 RETRIED_WAITS = ("YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "LIVE_IN_PROGRESS", "NETWORK", "YTDLP_OUTDATED")  # put back every 30 minutes
 MEDIA_CHECK_EVERY = 600      # seconds: while idle, look this often whether agy updated itself
 MEDIA_RECHECK_PAUSED = 3600  # seconds: while paused for AGY_MEDIA_READ, repeat the media self-test this often
 QUOTA_EVERY = 900            # seconds between two reads of agy's quota while it is in use (no turn, no quota spent)
+MAGPIE_EVERY = 300           # seconds between two reads of magpie's subscriptions and models (asks no vendor)
 
 ALERT_TEXT = {
     "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
                           "在「机房」点「登录 agy」，用 Google 授权后贴回授权码；登录后队列自动继续。"),
     "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
+    "PROVIDER_MODEL": ("工序用的模型已不在 magpie，生产已暂停", "在 magpie 里重新勾选，或在「分工」里换一个模型；系统每 10 分钟探测一次，恢复后自动继续。"),
     "YOUTUBE_AUTH": ("YouTube 需要登录或会员权限",
                      "确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次；还没配置 CookieCloud 时，"
                      "在「机房」→「YouTube 会话」里配置。修好后在那里做一次视频测试，通过就立刻继续；否则系统每 30 分钟自动重试。"),
@@ -89,7 +91,7 @@ def submit(url: str, priority: int = 0, playbook_id: int | None = None, origin: 
                VALUES (?,?,?,?,?,?,?,?,?)""", rid, vid, "PRODUCTION", playbook_id, "QUEUED", priority, origin,
             prev and prev["current_run_id"], now())
     # a run asked for after 定稿 is meant to replace the issue, whatever was pinned while tuning
-    db.exec("UPDATE sources SET adopt_pinned=0 WHERE id=? AND channel_id IN (SELECT id FROM channels WHERE stage='LOCKED')", vid)
+    db.exec("UPDATE sources SET adopt_pinned=0, lock_pinned=0 WHERE id=? AND channel_id IN (SELECT id FROM channels WHERE stage='LOCKED')", vid)
     for i, name in enumerate(STAGE_NAMES):
         db.exec("INSERT OR IGNORE INTO stages(run_id, name, ord, status) VALUES (?,?,?,'PENDING')", rid, name, i)
     db.event("submit", f"已加入队列：{url}", rid)
@@ -346,7 +348,7 @@ def _summary(run_id: str) -> dict:
             "model": m}
 
 
-KEYED = {"magpie": "ChatGPT（magpie）", "tuzi": "兔子 API"}  # providers signed in with a key file, not by logging in
+KEYED = {"magpie": "magpie", "tuzi": "兔子 API"}  # providers signed in with a key file, not by logging in
 
 
 def provider_of(e: ProviderError) -> str:
@@ -358,12 +360,24 @@ def provider_of(e: ProviderError) -> str:
 def auth_alert(provider: str = "agy") -> None:
     """The sign-in alert, worded for what fixes it: agy signs in from the 机房 page; magpie and 兔子 need their key file.
     Its action says which provider it is about, so only agy's offers 登录 agy."""
-    if provider in KEYED:
+    if provider == "magpie" and (out := _magpie_signed_out()):
+        title, body = f"{'、'.join(out)} 账号要重新登录，生产已暂停", "在 magpie 的「供应商」里重新登录，恢复后队列自动继续。"
+    elif provider in KEYED:
         title, body = "模型密钥失效，生产已暂停", (f"{KEYED[provider]} 的密钥缺失或失效：把有效的密钥放进 `secrets/{provider}-api-key`"
                                                "（放法见 docs/operations.md），恢复后队列自动继续。")
     else:
         title, body = ALERT_TEXT["AGY_AUTH_REQUIRED"]
     db.raise_alert("AGY_AUTH_REQUIRED", "critical", title, body, {"provider": provider})
+
+
+def _magpie_signed_out() -> list[str]:
+    """The subscriptions in use that magpie says have to sign in again (a 401 through magpie may be that, not the key)."""
+    from ..providers.magpie_state import read, signed_out_in_use
+    try:
+        read()  # what it says now: a refusal is when it matters
+    except Exception:  # noqa: BLE001
+        pass
+    return signed_out_in_use()
 
 
 def auth_alert_provider() -> str | None:
@@ -404,9 +418,10 @@ def alert_text(reason: str) -> tuple[str, str]:
     title, body = ALERT_TEXT[reason]
     if reason == "PROVIDER_QUOTA":
         import datetime as dt
+        from ..providers.magpie_state import windows_in_use
         q = db.setting("agy_quota") or {}
         g = next((g for g in q.get("groups") or [] if g.get("name") == q.get("production_group")), None)
-        back = max((b["reset_at"] for b in (g or {}).get("buckets", [])
+        back = max((b["reset_at"] for b in [*(g or {}).get("buckets", []), *windows_in_use()]
                     if b.get("remaining") == 0 and b.get("reset_at") and not b.get("disabled")), default=None)
         try:
             d = dt.datetime.fromisoformat(back).astimezone(notify.TZ) if back else None
@@ -432,6 +447,9 @@ def _requeue(run_id: str, why: str) -> str:
                        error=CASE WHEN attempts>=5 THEN ? ELSE error END WHERE id=? AND production='RUNNING'""",
                     "多次中断后停止自动续跑；请在机房重试。", run_id)
             db.event("run", why, run_id, "warn")
+            if db.one("SELECT 1 FROM runs WHERE id=? AND production='FAILED'", run_id):
+                from ..tuning import release_hold
+                release_hold(run_id)
             return "QUEUED"
         except sqlite3.OperationalError:
             time.sleep(2 ** i)
@@ -466,9 +484,14 @@ def pause_queue(reason: str) -> None:
 
 
 # ---------------------------------------------------------------- agy media reads (agy updates itself)
+def media_provider():
+    """Whose video reading to test: agy's, when any stage uses it (the default route may be a magpie model)."""
+    return next((p for p in providers.in_use() if p.name == "agy"), providers.get())
+
+
 def media_self_test() -> dict:
     """Run agy's media self-test and keep the result for the 机房; a pass remembers the agy version it passed on."""
-    h = providers.get().media_health()
+    h = media_provider().media_health()
     db.set_setting("agy_media_health", h)
     if h.get("ok"):
         db.set_setting("agy_media_version", h.get("version"))
@@ -481,7 +504,7 @@ def media_alert(h: dict) -> None:
         # the self-test never reached the media (2026-10-27: Antigravity's weekly quota ran out right after an
         # update check): pause for that reason, which the health probe lifts, not as if agy could not read video
         if h["error"] == "AGY_AUTH_REQUIRED":
-            auth_alert(providers.get().name)
+            auth_alert(media_provider().name)
         else:
             db.raise_alert(h["error"], "warning", *alert_text(h["error"]))
         pause_queue(h["error"])
@@ -515,7 +538,7 @@ def _hold_if_agy_cannot_read_media(run_id: str, e: ProviderError) -> bool:
     if h.get("ok"):
         return False
     if h.get("error") in ("PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT") or (
-            h.get("error") == "AGY_AUTH_REQUIRED" and not signed_out(providers.get().name)):
+            h.get("error") == "AGY_AUTH_REQUIRED" and not signed_out(media_provider().name)):
         # the self-test itself hit the network (2026-10-25 prodbox: a flaky uplink, not an agy change), or one
         # passing 401: hold this run like any outage instead of pausing all production for an hour
         _wait(run_id, "NETWORK", str(e))
@@ -618,7 +641,8 @@ class Worker:
         self.poll = poll
         self.stop = False
         self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
-                     "memory": 0.0, "digest": 0.0, "playback": 0.0, "quota": 0.0, "alerts": 0.0}
+                     "memory": 0.0, "digest": 0.0, "playback": 0.0, "quota": 0.0, "magpie": 0.0, "alerts": 0.0, "icons": 0.0}
+        self.asking_avatars: threading.Thread | None = None
         self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it
         self.finished: dict[str, str] = {}             # run id → final state, until reap() picks it up
         self.signed_out = 0                            # quota reads in a row that found agy signed out
@@ -632,6 +656,8 @@ class Worker:
             else:
                 db.exec("UPDATE runs SET production='FAILED', error_class='TOO_MANY_RESTARTS', error=? WHERE id=?",
                         "Worker 多次在该期生产中重启，已停止自动续跑；请在机房重试。", r["id"])
+                from ..tuning import release_hold
+                release_hold(r["id"])
             db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status='RUNNING'", r["id"])
             db.event("run", "Worker 重启，从断点继续", r["id"], "warn")
         db.exec("UPDATE sources SET delivery='NOT_STARTED' WHERE delivery='DELIVERING'")
@@ -676,7 +702,7 @@ class Worker:
             self.last["media"] = t
             # runs still held for it (the queue was resumed by hand meanwhile) are tested for as well as an agy update
             held = db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason='AGY_MEDIA_READ'")
-            if held or providers.get().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
+            if held or media_provider().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
                 h = media_self_test()
                 db.event("worker", f"agy {h.get('version')} 读视频自检{'通过' if h.get('ok') else '没通过'}",
                          level="info" if h.get("ok") else "warn")
@@ -711,6 +737,10 @@ class Worker:
                 auth_alert("agy")
             elif q.get("ok"):
                 agy_answers()
+        if t - self.last["magpie"] > MAGPIE_EVERY:
+            self.last["magpie"] = t  # the 机房 page's subscriptions and models; agy's calls told to magpie's Usage page
+            from ..providers import magpie_state
+            magpie_state.tick()
         if t - self.last["retry"] > 1800:
             self.last["retry"] = t
             db.exec(f"UPDATE runs SET production='QUEUED' WHERE production='WAITING' "
@@ -725,6 +755,17 @@ class Worker:
                 playback.tick()  # 原片栏的低清版: release what tuning no longer needs, make the next one
             except Exception as e:  # noqa: BLE001
                 db.event("worker", f"原片低清版异常：{e}", level="warn")
+        if t - self.last["icons"] > 60:
+            self.last["icons"] = t
+            from .. import channel_icons, delivery
+            if not self.asking_avatars or not self.asking_avatars.is_alive():
+                self.asking_avatars = threading.Thread(target=channel_icons.refresh, daemon=True, name="avatars")
+                self.asking_avatars.start()
+            try:
+                if n := delivery.client():
+                    channel_icons.sync(n)
+            except Exception as e:  # noqa: BLE001
+                db.event("worker", f"换频道头像异常：{e}", level="warn")
         from ..ingest import EVERY as INGEST_EVERY
         if t - self.last["ingest"] > INGEST_EVERY:
             self.last["ingest"] = t

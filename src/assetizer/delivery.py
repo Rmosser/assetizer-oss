@@ -25,7 +25,7 @@ import traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, db
+from . import channel_icons, config, db
 from .notion import blocks as B
 from .notion import mapping as M
 from .notion.client import Notion, NotionError
@@ -478,10 +478,13 @@ def registered_in_target(source: dict) -> dict | None:
         return None
 
 
-def _icon(n: Notion, cfg: dict) -> dict | None:
+def _icon(n: Notion, cfg: dict, channel_id: str | None) -> dict | None:
     ic = cfg.get("icon") or "none"
     if ic == "none":
         return None
+    if ic == "channel":
+        url = channel_icons.kept(channel_id) if channel_id else None
+        return channel_icons.external(url) if url else None
     if ic != "parent":
         return {"type": "emoji", "emoji": ic}
     rel = next((m["value"][0] for m in (cfg.get("properties") or {}).values()
@@ -530,7 +533,7 @@ def deliver(source_id: str) -> dict:
             ch = db.one("SELECT * FROM channels WHERE id=?", source["channel_id"])
             make_props = lambda: M.properties(target, schema, M.context(  # noqa: E731
                 db.one("SELECT * FROM sources WHERE id=?", source_id), run_id, ch))
-            icon = _icon(n, target)
+            icon = _icon(n, target, source["channel_id"])
         else:
             database = ensure_database(n)
             ensure_props(n, database)
@@ -576,6 +579,7 @@ def deliver(source_id: str) -> dict:
                     return {"status": "HELD"}
         if not page_id:
             pg = _create(n, database, make_props(), icon)
+            channel_icons.note(source_id, pg)
             page_id = pg["id"]
             db.exec("UPDATE sources SET notion_page_id=?, notion_url=?, notion_synced_run=?, notion_database_id=? WHERE id=?",
                     page_id, pg["url"], run_id, database, source_id)
@@ -594,6 +598,7 @@ def deliver(source_id: str) -> dict:
                 pass
             db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
             pg = _create(n, database, make_props(), icon)
+            channel_icons.note(source_id, pg)
             page_id = pg["id"]
             db.exec("UPDATE sources SET notion_page_id=?, notion_url=?, notion_database_id=? WHERE id=?",
                     page_id, pg["url"], database, source_id)

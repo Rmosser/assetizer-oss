@@ -188,7 +188,7 @@ export function NotionPane({ preview, error, loading, head, cmp, secOf, propKey,
                   ))}
                 </div>
               )}
-              {p.icon && <div className="nic">{p.icon.emoji || <img src={p.icon.url} alt="" />}</div>}
+              {p.icon && <div className="nic">{p.icon.emoji || <img src={p.icon.url} alt="" referrerPolicy="no-referrer" onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />}</div>}
               <h1 className="nti lt-bg" data-k={titleKey} data-side="dst">{p.title.length ? <Parts parts={p.title} fieldOf={fieldOf} /> : "Untitled"}</h1>
               <div className="props">
                 {p.properties.filter((r) => r.type !== "title").map((r) => (

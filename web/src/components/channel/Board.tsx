@@ -4,7 +4,8 @@ import { IssueTitle } from "../../cjk";
 import { linkProps } from "../../router";
 import { usePoll } from "../../hooks";
 import { Row } from "../../pages/Issues";
-import { parseDay, WAIT } from "../../util";
+import { BACKFILL_BAD, BACKFILL_STOP, parseDay, WAIT } from "../../util";
+import { paceText } from "../BackfillPanel";
 import { about, big, Columns, hrs, Kpi, pct, ymd } from "../Figures";
 import { Sheet, type SheetHandle } from "../Sheet";
 import { Fault } from "../States";
@@ -145,11 +146,14 @@ function Backfill({ ch, mode, b, onOpen, onCancel, onDone }: {
       <h3>补录</h3>
       {!can ? <p className="q">定稿后可补录</p> : (
         <>
-          {(bf.pending > 0 || bf.running) && (
+          {(bf.pending > 0 || bf.running.length > 0) && (
             <div className="ch-bst">
-              {bf.running && <p>正在补 <IssueTitle title={bf.running.title || bf.running.id} />{bf.running.wait_reason ? ` · ${WAIT[bf.running.wait_reason] || bf.running.wait_reason}` : ""}</p>}
+              {bf.running.length > 1 && <p>正在补 {bf.running.length} 期</p>}
+              {bf.running.map((r) => (
+                <p key={r.id} className={bf.running.length > 1 ? "one" : ""}>{bf.running.length === 1 && "正在补 "}<IssueTitle title={r.title || r.id} />{r.wait_reason ? ` · ${WAIT[r.wait_reason] || r.wait_reason}` : ""}</p>
+              ))}
               {bf.pending > 0 && <p>排队 {bf.pending} 期 · 视频 {hrs(bf.seconds)} 小时</p>}
-              {bf.held && <p>{bf.held === "5h" ? "5 小时额度不足 20%" : "周额度不足 30%"}，等额度恢复再补</p>}
+              {bf.pending > 0 && <p className={bf.stop && BACKFILL_BAD.includes(bf.stop) ? "z" : ""}>{bf.stop ? BACKFILL_STOP[bf.stop] || bf.stop : paceText(bf)}</p>}
             </div>
           )}
           <div className="ch-bacts">

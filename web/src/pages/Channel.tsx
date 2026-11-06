@@ -494,7 +494,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
                   <TitleCard view={nv} cfg={cfg} setProp={setProp} ctx={preview?.context || {}} />
                   <PropsCard view={nv} cfg={cfg} setProp={setProp} preview={preview} titles={titles} addTitles={(t) => setTitles((x) => ({ ...x, ...t }))}
                     testCopy={testCopy} open={open} setOpen={setOpen} onRetarget={() => setTarget(true)} />
-                  <StructureCard view={nv} cfg={cfg} update={update} ctx={preview?.context || {}} />
+                  <StructureCard cid={ch.id} view={nv} cfg={cfg} update={update} ctx={preview?.context || {}} />
                 </>
               ) : notionQ.data && !notionQ.data.configured ? (
                 <section className="ch-card"><div className="ch-cardh"><span className="cn">贰</span><h3>Notion</h3></div>
@@ -529,7 +529,7 @@ function ChannelView({ ch, list, reloadList, sub }: { ch: Channel; list: Channel
       )}
       {sheet && lockPb && (
         <LockSheet cid={ch.id} defaultPb={lockPb.id} onClose={() => setSheet(false)}
-          onLocked={(r) => { setSheet(false); reloadList(); flash(`已定稿 v${r.version} · 写入 ${r.write} 期${r.backfill ? ` · 补录 ${r.backfill} 期` : ""}${r.ingest?.enabled ? " · 自动收录已开启" : ""}`, true); }}
+          onLocked={(r) => { setSheet(false); reloadList(); flash(`已定稿 v${r.version} · 写入 ${r.write} 期${r.rerun ? ` · 重跑 ${r.rerun} 期` : ""}${r.backfill ? ` · 补录 ${r.backfill} 期` : ""}${r.ingest?.enabled ? " · 自动收录已开启" : ""}`, true); }}
           onConflict={(c) => { setSheet(false); openMs("manuscript", `cl:${c}`); }} onRetarget={() => { setSheet(false); setTarget(true); }}
           onTrial={async (pid) => { await act.trial([pid]); }} />
       )}

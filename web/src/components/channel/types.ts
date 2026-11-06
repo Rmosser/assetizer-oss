@@ -23,7 +23,7 @@ export type ChannelStats = {
   last: { id: string; title: string | null; headline: string | null; published_at: string | null; delivery: string; finished_at: string | null } | null;
 };
 export type Channel = {
-  id: string; name: string; stage: "TUNING" | "LOCKED"; mode: "TRACKED" | "DISCOVERY"; youtube_channel_id: string | null; why: string | null;
+  id: string; name: string; stage: "TUNING" | "LOCKED"; mode: "TRACKED" | "DISCOVERY"; youtube_channel_id: string | null; why: string | null; avatar?: string | null;
   playbooks: Playbook[]; prompts: Prompt[]; sources: number; last_source: string | null; ingest: Ingest;
   notion: { configured: boolean; database_title?: string | null; template?: string | null; test_copy?: boolean };
   samples: number; samples_busy: number; compile: { state: "done" | "running" | "failed"; error?: string; since?: string } | null;
@@ -32,8 +32,8 @@ export type Channel = {
 export type Board = {
   stats: ChannelStats; issues: any[]; ingest: Ingest;
   backfill: {
-    pending: number; seconds: number; running: { id: string; production: string; wait_reason: string | null; title: string | null } | null;
-    held: "weekly" | "5h" | null;  // the quota window that holds the waiting 补录 back
+    pending: number; seconds: number; running: { id: string; production: string; wait_reason: string | null; title: string | null }[];
+    active: number; slots: number; lanes: number; fast: boolean; until: string | null; next: string | null; stop: string | null;
   };
   pace: number; runway: { per_issue: number; issues: number; remaining: number; reset_at: string | null } | null;
 };
@@ -86,8 +86,9 @@ export type NotionView = {
   configured: boolean; database: { id: string; url: string; title: string }; config: { template: string; heading: string; icon: string };
   rows: NotionRow[]; problems: number; warnings: Record<string, string>; page_titles: Record<string, string | null>;
   templates: Record<string, string>; source_labels: Record<string, string>; template_vars: Record<string, string>; access_labels: Record<string, string>;
-  repick?: string[]; dropped?: string[]; rev?: number;
+  repick?: string[]; dropped?: string[]; rev?: number; avatar?: AvatarState;
 };
+export type AvatarState = { url: string | null; total: number; left: number; refused: boolean };
 export type Draft = { properties: Record<string, Mapping>; template: string; heading: string; icon: string };
 
 export type Unit = { id: string; title: string; start: number; end: number; learning_priority?: number; tickers?: string[] };

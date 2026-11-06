@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -1193,6 +1194,88 @@ def test_a_dropped_connection_is_tried_once_more_and_the_failure_is_named(home, 
     with pytest.raises(cookies.CookieError):
         cookies.fetch()
     assert len(calls) == 1  # a timeout is not tried again: it already waited 30 seconds
+
+
+def test_a_read_during_a_plugin_sync_waits_for_the_write(home, monkeypatch):
+    from assetizer import cookies, db
+    _cc(home, monkeypatch, None)
+    slept = []
+    monkeypatch.setattr(cookies.time, "sleep", slept.append)
+    busy = _Resp(503, "", "application/json", {"code": "payload_recovery_required"})
+    answers = [busy, busy, _Resp(200, NETSCAPE)]
+    monkeypatch.setattr(cookies.httpx, "get", lambda url, **kw: answers.pop(0))
+    with cookies.ytdlp_login() as (args, how):
+        assert how["source"] == "cookiecloud" and args[0] == "--cookies"
+    assert slept == [2, 5] and db.setting("youtube_cookies_state")["ok"]
+    assert not db.one("SELECT 1 FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")
+
+    answers[:] = [busy] * 4 + [_Resp(200, NETSCAPE)]  # still refused after the waits: said, not retried for ever
+    slept.clear()
+    with pytest.raises(cookies.CookieError) as e:
+        cookies.fetch()
+    assert e.value.code == "payload_recovery_required" and slept == [2, 5, 10] and len(answers) == 1
+
+
+def test_an_unreadable_cookiecloud_falls_back_on_the_last_login_that_worked(home, monkeypatch):
+    import os
+    from assetizer import config, cookies, db, youtube
+    _cc(home, monkeypatch, None)
+    kept = config.get().secrets_dir / cookies.KEPT_LOGIN
+    signed_in = NETSCAPE + ".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tx\n"
+    down = _Resp(503, "", "application/json", {"code": "cookie_payload_missing"})
+    answers = []
+    monkeypatch.setattr(cookies.httpx, "get", lambda url, **kw: answers.pop(0))
+
+    answers[:] = [down]
+    with cookies.ytdlp_login() as (args, how):  # nothing kept yet
+        assert how["source"] != "saved" and "--cookies" not in args
+    assert db.one("SELECT severity FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")["severity"] == "warning"
+    assert cookies.status()["kept_at"] is None
+    answers[:] = [_Resp(200, signed_in)]
+    with cookies.ytdlp_login() as (args, how):
+        assert how["source"] == "cookiecloud" and how["signed_in"] is True
+    assert "SAPISID" in kept.read_text() and kept.stat().st_mode & 0o777 == 0o600
+
+    answers[:] = [_Resp(200, NETSCAPE)]
+    with cookies.ytdlp_login() as (_, how):
+        assert how["signed_in"] is False
+    assert "SAPISID" in kept.read_text()  # a signed-out sync does not replace the login
+
+    answers[:] = [down]
+    with cookies.ytdlp_login() as (args, how):
+        assert how["source"] == "saved" and how["code"] == "cookie_payload_missing" and args[0] == "--cookies"
+        used = args[1]
+        assert open(used).read() == kept.read_text()
+    assert not os.path.exists(used) and kept.exists()
+    assert cookies.status()["kept_at"] and "x" not in cookies.status()["kept_at"]
+    # going on with the kept login is the lamp's business, until it has lasted
+    state = db.setting("youtube_cookies_state")
+    assert not state["ok"] and state["since"] and not db.one("SELECT 1 FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")
+    answers[:] = [down]
+    with cookies.ytdlp_login():
+        pass
+    assert db.setting("youtube_cookies_state")["since"] == state["since"]  # still the first failure
+    db.set_setting("youtube_cookies_state", {**state, "since": "2020-01-01T00:00:00+00:00"})
+    answers[:] = [down]
+    with cookies.ytdlp_login():
+        pass
+    a = db.one("SELECT severity, title FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")
+    assert a["severity"] == "info" and "还在用上一份登录态" in a["title"]
+    answers[:] = [_Resp(200, signed_in)]
+    with cookies.ytdlp_login():
+        pass
+    assert db.setting("youtube_cookies_state")["since"] is None
+    assert not db.one("SELECT 1 FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")
+    # a refusal under the saved copy may be a stale copy: it waits, it does not call the video shut
+    assert youtube.classify("ERROR: Join this channel to get access to members-only content", how["source"] == "cookiecloud") == "AUTH_REQUIRED"
+
+    answers[:] = [_Resp(200, signed_in)]
+    with cookies.ytdlp_login():
+        pass
+    assert not db.one("SELECT 1 FROM alerts WHERE key='cookiecloud' AND resolved_at IS NULL")
+
+    cookies.save_credentials({"origin": "https://other.example.net"})
+    assert not kept.exists()  # new credentials may be another account
 
 
 def test_a_flapping_tunnel_gets_one_more_try(home, monkeypatch):
@@ -2699,11 +2782,14 @@ def fake_magpie(home, monkeypatch):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             state["requests"].append({"path": self.path, "auth": self.headers.get("Authorization"),
+                                      "session": self.headers.get("X-Magpie-Session"), "agent": self.headers.get("User-Agent"),
                                       "body": json.loads(self.rfile.read(int(self.headers["Content-Length"])))})
             status, payload = state["reply"]
             data = payload.encode()
             self.send_response(status)
             self.send_header("Content-Length", str(len(data)))
+            for k, v in state.get("headers", {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
 
@@ -2767,6 +2853,17 @@ def test_magpie_sends_frames_and_speech_in_place_of_the_video(fake_magpie, home)
     ((429, '{"error": {"message": "You have hit your usage limit. Try again in 3 hours."}}'), "PROVIDER_QUOTA"),
     ((200, _events({"type": "response.output_text.delta", "delta": '{"cut'})), "PROVIDER_TRANSIENT"),
     ((401, '{"error": {"message": "invalid gateway key"}}'), "AGY_AUTH_REQUIRED"),
+    ((429, '{"error": {"message": "usage cap reached: every account that serves \\"x\\" is held at the usage cap set on it in magpie"}}'), "PROVIDER_QUOTA"),
+    # as the real gateway says it, 2026-11-05
+    ((400, '{"error":{"code":"model_not_found","message":"Codex: The \'x\' model is not supported when using Codex with a ChatGPT account."}}'), "PROVIDER_MODEL"),
+    ((200, _events({"type": "response.failed", "response": {"status": "failed", "error": {
+        "code": "server_error", "message": "Claude Code: There's an issue with the selected model (x). It may not exist or you may not have access to it."}}})), "PROVIDER_MODEL"),
+    ((404, '{"error":{"code":null,"message":"Grok: The model x does not exist or your team y does not have access to it."}}'), "PROVIDER_MODEL"),
+    ((404, '{"error":{"code":null,"message":"magpie knows no model \\"nonsense/x\\""}}'), "PROVIDER_MODEL"),
+    ((200, _events({"type": "response.failed", "response": {"status": "failed", "error": {
+        "code": "server_error", "message": "Claude Code: Claude Code ended without an answer (502: you can retry your request)"}}})), "PROVIDER_TRANSIENT"),
+    ((200, _events({"type": "response.failed", "response": {"status": "failed", "error": {
+        "code": "rate_limit_error", "message": "Claude Code: usage limit reached|1794379682"}}})), "PROVIDER_QUOTA"),
 ])
 def test_magpie_failures_map_to_the_pipeline_kinds(fake_magpie, home, reply, kind):
     from assetizer.providers.agy import ProviderError
@@ -2775,6 +2872,19 @@ def test_magpie_failures_map_to_the_pipeline_kinds(fake_magpie, home, reply, kin
     with pytest.raises(ProviderError) as e:
         MagpieProvider().call(home / "call", "hi", kind="t")
     assert e.value.kind == kind
+
+
+def test_frames_stay_within_what_a_call_can_carry(home):
+    from assetizer.providers.magpie import within
+    shots = []
+    for i in range(10):
+        f = home / f"{i}.jpg"
+        f.write_bytes(b"x" * (100 if i % 2 else 300))
+        shots.append((float(i), f))
+    assert within(shots, 2000) == shots
+    kept = within(shots, 1000)
+    assert sum(f.stat().st_size for _, f in kept) <= 1000 and len(kept) >= 3
+    assert [t for t, _ in kept] == sorted(t for t, _ in kept) and kept[-1][0] >= 5  # still across the whole video
 
 
 def test_a_frame_reading_provider_takes_the_sharpest_proxy_in_one_encode(home, monkeypatch):
@@ -3258,7 +3368,7 @@ def test_engine_stats_count_by_window_and_by_model_family(home):
     assert week["latency_median"] == 7200  # in at -3 h, in Notion at -1 h
     m = week["calls"]
     assert (m["n"], m["failed"], m["tokens"]) == (3, 1, 1800) and m["by_family"]["chatgpt"] == {"n": 1, "tokens": 500, "wall": 10.0}
-    assert [(x["key"], round(x["share"], 2)) for x in m["gemini_by_stage"]] == [("understanding", 0.77), ("article", 0.23)]
+    assert [(x["key"], round(x["share"], 2)) for x in m["by_stage"]["gemini"]] == [("understanding", 0.77), ("article", 0.23)]
     assert len(s["days"]) == 30 and sum(d["done"] for d in s["days"]) == 3 and sum(d["failed"] for d in s["days"]) == 1
     assert sum(d["video_seconds"] for d in s["days"]) == 6000 and s["runway"] is None
     # the weekly quota fell 0.21 (a reading that wavers up is not quota coming back), was reset, fell 0.5 more
@@ -3586,7 +3696,8 @@ def test_board_scan_and_backfill_through_the_api(home, monkeypatch):
     assert r == {"queued": 1, "have": 1}  # lined up, not queued for production yet
     assert _listed(c, "/api/channels/t/backfill/candidates", h).json()["candidates"][3]["queued"]
     assert not db.one("SELECT 1 FROM runs WHERE source_id='DDDDDDDDDDD'")
-    assert c.get("/api/channels/t/board", headers=h).json()["backfill"] == {"pending": 1, "seconds": 2400, "running": None, "held": None}
+    b = c.get("/api/channels/t/board", headers=h).json()["backfill"]
+    assert (b["pending"], b["seconds"], b["running"], b["slots"], b["fast"], b["stop"]) == (1, 2400, [], 1, False, "queued")  # the scan's run first
     # 试这一期: right away, normal priority, outside the 补录 line
     r = c.post("/api/channels/t/backfill", headers=h, json={"videos": [{"id": "EEEEEEEEEEE", "title": "try"}], "now": True}).json()
     assert r["queued"] == 1 and db.one("SELECT priority, origin FROM runs WHERE id=?", r["run_id"]) == {"priority": 0, "origin": "manual"}
@@ -3625,6 +3736,109 @@ def test_backfill_goes_one_at_a_time_when_idle_and_the_quota_has_room(home, monk
     assert ingest.dispatch_backfill() is None  # already in the library: skipped, and no 已登记 row floods 往期
     assert db.one("SELECT status FROM backfill_queue WHERE source_id='GGGGGGGGGGG'")["status"] == "SKIPPED"
     assert not db.one("SELECT 1 FROM sources WHERE id='GGGGGGGGGGG'")
+
+
+def test_backfill_runs_side_by_side_only_until_the_fast_pace_ends(home, monkeypatch):
+    from assetizer import db, ingest, knobs
+    _board_fixture(home, monkeypatch)
+    ingest.enqueue_backfill("t", [{"id": c * 11, "title": c} for c in "DGHJ"])
+    knobs.save({"worker_slots": 4, "backfill_fast_slots": 2, "backfill_burst": {"until": "2999-01-01T09:00:00+08:00"}})
+    first = ingest.dispatch_backfill()
+    assert first and ingest.dispatch_backfill() is None  # still queued: the worker starts it before the next one
+    db.exec("UPDATE runs SET production='RUNNING' WHERE id=?", first)
+    second = ingest.dispatch_backfill()
+    assert second and second != first
+    db.exec("UPDATE runs SET production='RUNNING' WHERE id=?", second)
+    assert ingest.dispatch_backfill() is None  # two slots, both taken
+    db.set_setting("backfill_burst", {"until": "2020-01-01T09:00:00+08:00"})
+    assert ingest.backfill_pace()["slots"] == 1
+    db.exec("UPDATE runs SET production='COMPLETE' WHERE id=?", first)
+    assert ingest.dispatch_backfill() is None  # past the end: what runs finishes, nothing new until it is one at a time
+    db.exec("UPDATE runs SET production='COMPLETE' WHERE id=?", second)
+    assert ingest.dispatch_backfill()
+    db.set_setting("backfill_burst", {"until": "not a time"})
+    assert ingest.backfill_pace()["slots"] == 1
+
+
+def _pace_at(monkeypatch, hour, minute=30):
+    """backfill_pace at this time of 2026-11-06, 东八区."""
+    from datetime import datetime
+    from assetizer import ingest
+    from assetizer.notify import TZ
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 6, hour, minute, tzinfo=TZ).astimezone(tz)
+    monkeypatch.setattr(ingest, "datetime", Clock)
+    return ingest.backfill_pace()
+
+
+def test_the_painted_hours_set_the_pace_across_midnight(home, monkeypatch):
+    from assetizer import knobs
+    knobs.save({"worker_slots": 8, "backfill_hours": [23, 0, 1, 13], "backfill_fast_slots": 6})
+    p = _pace_at(monkeypatch, 22)
+    assert (p["slots"], p["fast"], p["until"]) == (1, False, None) and p["next"].startswith("2026-11-06T23:00")
+    p = _pace_at(monkeypatch, 23)
+    assert (p["slots"], p["fast"], p["next"]) == (6, True, None) and p["until"].startswith("2026-11-07T02:00")
+    p = _pace_at(monkeypatch, 2)
+    assert (p["slots"], p["fast"]) == (1, False) and p["next"].startswith("2026-11-06T13:00")
+    knobs.save({"backfill_hours": list(range(24))})
+    p = _pace_at(monkeypatch, 12)
+    assert (p["slots"], p["until"], p["next"]) == (6, None, None)  # all day: no end by the clock
+    knobs.save({"backfill_hours": None})
+    assert _pace_at(monkeypatch, 23) == {"slots": 1, "lanes": 6, "fast": False, "until": None, "next": None}
+    knobs.save({"worker_slots": 4, "backfill_burst": {"until": None}})
+    assert _pace_at(monkeypatch, 23)["slots"] == 4  # as far as the box prints at once
+
+
+def test_a_burst_goes_fast_now_and_the_painted_hours_can_outlast_it(home, monkeypatch):
+    from assetizer import knobs
+    knobs.save({"worker_slots": 8, "backfill_burst": {"until": None}, "backfill_fast_slots": 3})
+    p = _pace_at(monkeypatch, 10)
+    assert (p["slots"], p["fast"], p["until"]) == (3, True, None)  # until it is switched off
+    knobs.save({"backfill_burst": {"until": "2999-01-01T00:00:00+08:00"}})
+    assert _pace_at(monkeypatch, 10)["until"] == "2999-01-01T00:00:00+08:00"
+    knobs.save({"backfill_hours": [10, 11]})
+    assert _pace_at(monkeypatch, 10)["until"] == "2999-01-01T00:00:00+08:00"
+    knobs.save({"backfill_burst": None})
+    assert _pace_at(monkeypatch, 10)["until"].startswith("2026-11-06T12:00")
+
+
+def test_the_fast_settings_refuse_what_cannot_be(home):
+    from assetizer import db, knobs
+    for bad in ({"backfill_hours": [24]}, {"backfill_hours": [True]}, {"backfill_hours": "23"}, {"backfill_fast_slots": 0},
+                {"backfill_burst": {"until": "2020-01-01T00:00:00+08:00"}}, {"backfill_burst": {"until": "soon"}},
+                {"backfill_burst": {"until": None, "slots": 8}}, {"backfill_burst": True}):
+        with pytest.raises(knobs.KnobError):
+            knobs.save(bad)
+    assert knobs.save({"backfill_hours": [3, 1, 1]})["backfill_hours"] == [1, 3]
+    assert knobs.save({"backfill_hours": []})["backfill_hours"] == [] and not db.setting("backfill_hours")  # none stored
+    assert knobs.hours_text([23, 0, 1, 13]) == "13:00–14:00、23:00–02:00" and knobs.hours_text(list(range(24))) == "全天"
+
+
+def test_backfill_says_what_stands_in_its_way(home, monkeypatch):
+    from assetizer import db, ingest
+    from assetizer.util import now
+    _board_fixture(home, monkeypatch)
+    assert ingest.backfill_view("t")["stop"] is None  # nothing lined up: nothing to stand in the way of
+    ingest.enqueue_backfill("t", [{"id": "DDDDDDDDDDD", "title": "d", "duration": 60}])
+    assert ingest.backfill_view()["stop"] is None and ingest.backfill_view("nobody")["pending"] == 0
+    db.set_setting("queue_paused", True)
+    assert ingest.backfill_view("t")["stop"] == "paused" and ingest.dispatch_backfill() is None
+    db.set_setting("queue_paused", False)
+    db.exec("INSERT INTO sources(id, url, channel_id, created_at, updated_at) VALUES ('w', 'u', 't', 'x', 'x')")
+    db.exec("INSERT INTO runs(id, source_id, production, wait_reason, created_at) VALUES ('w-r1', 'w', 'WAITING', 'DISK_LOW', ?)", now())
+    assert ingest.backfill_view("t")["stop"] == "DISK_LOW" and ingest.dispatch_backfill() is None
+    db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL")
+    assert ingest.backfill_view("t")["stop"] == "queued"
+    db.exec("UPDATE runs SET production='COMPLETE'")
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, status, created_at) VALUES ('t','w',1,'PENDING',?)", now())
+    assert ingest.backfill_view("t")["stop"] == "trial"
+    db.exec("DELETE FROM trial_queue")
+    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+        {"window": "weekly", "remaining": 0.1, "reset_at": None, "disabled": False, "note": None}]}]})
+    assert ingest.backfill_view("t")["stop"] == "weekly"
 
 
 def test_a_cancel_while_backfill_asks_the_library_leaves_the_one_already_taken(home, monkeypatch):
@@ -5470,3 +5684,675 @@ def test_transcript_mode_end_to_end(home, tmp_path, monkeypatch):
     assert "家具" in checked and "没问题" in checked  # the sections without a video are checked too
     comp = finish.compose(ctx)
     assert comp["videos"] == 1
+
+
+# ---------------------------------------------------------------- channel avatar as the Notion page icon
+def _avatar_channel(home, pages=3):
+    from assetizer import db
+    from assetizer.notion import mapping as M
+    db.exec("INSERT INTO channels(id, name, youtube_channel_id, created_at, updated_at) VALUES ('c', 'C', 'UCc', 'x', 'x')")
+    M.save("c", {"database_id": "d1", "icon": "channel", "properties": {}})
+    for i in range(pages):
+        db.exec("""INSERT INTO sources(id, url, channel_id, notion_page_id, notion_database_id, created_at, updated_at)
+                   VALUES (?, 'u', 'c', ?, 'd1', 'x', 'x')""", f"v{i}", f"p{i}")
+
+
+class _IconNotion:
+    def __init__(self, fail=None):
+        self.patched, self.fail = [], fail or {}
+
+    def _req(self, method, path, idempotent=None, **kw):
+        assert method == "PATCH" and idempotent and set(kw["json"]) == {"icon"}  # the icon and nothing else
+        pid = path.rsplit("/", 1)[1]
+        if pid in self.fail:
+            raise self.fail[pid]
+        self.patched.append((pid, kw["json"]["icon"]["external"]["url"]))
+        return {}
+
+
+def test_channel_avatar_is_the_largest_square_picture(home, monkeypatch):
+    import json as J, subprocess
+    from assetizer import youtube
+    pics = [{"id": "0", "width": 2560, "height": 424, "url": "banner"}, {"id": "7", "width": 900, "height": 900, "url": "big"},
+            {"id": "8", "width": 88, "height": 88, "url": "small"}, {"id": "avatar_uncropped", "url": "raw"}]
+    answer = {"thumbnails": pics}
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, J.dumps(answer), ""))
+    assert youtube.channel_avatar("UCc") == "big"
+    answer["thumbnails"] = [pics[0], pics[3]]
+    assert youtube.channel_avatar("UCc") == "raw"
+    answer["thumbnails"] = [pics[0]]
+    assert youtube.channel_avatar("UCc") is None
+
+
+def test_avatar_is_kept_for_a_week_and_survives_youtube_not_answering(home, monkeypatch):
+    from assetizer import channel_icons as CI, db, youtube
+    _avatar_channel(home, 0)
+    asked = []
+
+    def ask(cid):
+        asked.append(cid)
+        return "a1"
+    monkeypatch.setattr(youtube, "channel_avatar", ask)
+    assert CI.avatar("c") == "a1" and CI.avatar("c") == "a1" and asked == ["UCc"]
+
+    def down(cid):
+        raise RuntimeError("no")
+    kept = db.setting("channel_avatar:c")
+    db.set_setting("channel_avatar:c", {**kept, "tried": 0})
+    monkeypatch.setattr(youtube, "channel_avatar", down)
+    assert CI.avatar("c") == "a1"
+    assert db.setting("channel_avatar:c")["tried"] > 0  # not asked again at every sync
+
+
+def test_existing_pages_get_the_avatar_a_few_at_a_time(home, monkeypatch):
+    from assetizer import channel_icons as CI, db, youtube
+    _avatar_channel(home)
+    db.exec("""INSERT INTO sources(id, url, channel_id, notion_page_id, notion_database_id, created_at, updated_at)
+               VALUES ('moved', 'u', 'c', 'old', 'd0', 'x', 'x')""")  # in a database this channel no longer writes to
+    monkeypatch.setattr(youtube, "channel_avatar", lambda cid: "a1")
+    n = _IconNotion()
+    assert CI.sync(n) == 0 and not n.patched  # no address yet, and it does not go and ask
+    CI.refresh()
+    assert CI.sync(n, batch=2) == 2 and CI.sync(n, batch=2) == 1 and CI.sync(n, batch=2) == 0
+    assert sorted(p for p, _ in n.patched) == ["p0", "p1", "p2"]  # each once, and never "old"
+
+    db.set_setting("channel_avatar:c", {"url": "a2", "tried": time.time()})  # the channel changed its avatar
+    n.patched.clear()
+    assert CI.sync(n) == 3 and {u for _, u in n.patched} == {"a2"}
+
+
+def test_the_pages_settings_see_the_avatar_and_how_far_the_pages_are(home, monkeypatch):
+    from assetizer import channel_icons as CI, db, youtube
+    _avatar_channel(home)
+    cfg = {"database_id": "d1"}
+    assert CI.state("c", cfg) == {"url": None, "total": 3, "left": 3, "refused": False}
+    monkeypatch.setattr(youtube, "channel_avatar", lambda cid: "a1")
+    CI.refresh()
+    assert CI.kept("c") == "a1" and CI.state("c", cfg) == {"url": "a1", "total": 3, "left": 3, "refused": False}
+    CI.sync(_IconNotion(), batch=2)
+    assert CI.state("c", cfg)["left"] == 1
+    db.set_setting("channel_avatar:c", {**db.setting("channel_avatar:c"), "refused": "a1"})
+    assert CI.state("c", cfg)["refused"] and CI.state("c", {"database_id": "elsewhere"})["total"] == 0
+    assert CI.state("c", None)["total"] == 0
+
+
+def test_a_channel_on_another_icon_setting_is_left_alone(home, monkeypatch):
+    from assetizer import channel_icons as CI, youtube
+    from assetizer.notion import mapping as M
+    _avatar_channel(home)
+    M.save("c", {"database_id": "d1", "icon": "none", "properties": {}})
+
+    def not_asked(cid):
+        raise AssertionError("YouTube should not be asked")
+    monkeypatch.setattr(youtube, "channel_avatar", not_asked)
+    n = _IconNotion()
+    assert CI.sync(n) == 0 and not n.patched
+
+
+def test_page_failures_while_changing_the_icon(home, monkeypatch):
+    from assetizer import channel_icons as CI, db, youtube
+    from assetizer.notion.client import NotionError
+    _avatar_channel(home)
+    monkeypatch.setattr(youtube, "channel_avatar", lambda cid: "a1")
+    CI.refresh()
+
+    n = _IconNotion({"p0": NotionError(404, "gone")})  # a deleted page is not tried again
+    assert CI.sync(n) == 2 and CI.sync(n) == 0
+    assert db.one("SELECT notion_icon i FROM sources WHERE id='v0'")["i"] == "a1"
+
+    db.exec("UPDATE sources SET notion_icon=NULL")
+    n = _IconNotion({"p0": NotionError(500, "busy")})  # Notion having a moment: tried again
+    with pytest.raises(NotionError):
+        CI.sync(n)
+    assert db.one("SELECT notion_icon i FROM sources WHERE id='v0'")["i"] is None
+
+    n = _IconNotion({"p0": NotionError(400, '{"message":"body.icon.external.url is invalid"}')})
+    assert CI.sync(n) == 0  # an address Notion refuses is not sent again
+    n = _IconNotion()
+    assert CI.sync(n) == 0 and not n.patched
+    db.set_setting("channel_avatar:c", {"url": "a2", "tried": time.time()})
+    assert CI.sync(n) == 3  # until it changes
+
+
+def test_a_new_page_starts_with_the_avatar_and_remembers_it(home, monkeypatch):
+    from assetizer import channel_icons as CI, db, delivery, preview, youtube
+    _avatar_channel(home, 1)
+
+    def not_asked(cid):
+        raise AssertionError("a page does not wait for YouTube")
+    monkeypatch.setattr(youtube, "channel_avatar", not_asked)
+    assert delivery._icon(None, {"icon": "channel"}, "c") is None and preview.icon(None, {"icon": "channel"}, "c") is None
+    db.set_setting("channel_avatar:c", {"url": "a1", "tried": time.time()})
+    icon = delivery._icon(None, {"icon": "channel"}, "c")
+    assert icon == {"type": "external", "external": {"url": "a1"}}
+    assert preview.icon(None, {"icon": "channel"}, "c") == {"url": "a1"}
+    CI.note("v0", {"icon": icon})
+    n = _IconNotion()
+    assert CI.sync(n) == 0 and not n.patched  # already has it
+    CI.note("v0", {"icon": None})  # Notion made the page without one: the sync brings it
+    assert CI.sync(n) == 1
+    assert delivery._icon(None, {"icon": "📘"}, "c") == {"type": "emoji", "emoji": "📘"}
+    assert db.one("SELECT notion_icon i FROM sources WHERE id='v0'")["i"] == "a1"
+
+
+def test_a_new_channel_uses_its_avatar_as_the_page_icon_by_default():
+    from assetizer.notion import mapping as M
+    assert M.preset("some-new-channel", "lib", {}, None)["icon"] == "channel"
+    assert M.preset("wang-haibin", "lib", {}, None)["icon"] == "channel"
+
+
+# ---------------------------------------------------------------- 定稿单：按定稿版本重跑后写入
+def _rerun_fixture():
+    """_lock_fixture plus two samples whose ids the worker can run: AAAAAAAAAAA adopted v1, BBBBBBBBBBB adopted v1 on a page of ours."""
+    from assetizer import db
+    from assetizer.util import now
+    v1, v2, v3 = _lock_fixture()
+    t = now()
+    for sid, page in [("AAAAAAAAAAA", None), ("BBBBBBBBBBB", "pg-b")]:
+        db.exec("INSERT INTO sources(id, channel_id, title, notion_page_id, current_run_id, delivery, created_at, updated_at) VALUES (?,'w',?,?,?,?,?,?)",
+                sid, f"样片{sid[0]}", page, f"{sid}-r1", "STALE" if page else "NOT_STARTED", t, t)
+        db.exec("INSERT INTO samples(channel_id, source_id, added_at) VALUES ('w',?,?)", sid, t)
+        db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at) VALUES (?,?,?,'COMPLETE','2026-11-01')", f"{sid}-r1", sid, v1)
+    return v1, v2, v3
+
+
+def test_lock_rerun_queues_the_locked_version_and_the_worker_takes_it_to_the_new_version(home, monkeypatch):
+    from assetizer import db, delivery, tuning
+    from assetizer.pipeline import runner
+    v1, v2, v3 = _rerun_fixture()
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, status, created_at) VALUES ('w','AAAAAAAAAAA',?,'PENDING','2026-10-26')", v2)
+    r = tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}, {"source_id": "BBBBBBBBBBB", "action": "rerun"}])
+    assert (r["rerun"], r["wait"]) == (2, 0)
+    assert db.one("SELECT stage FROM channels WHERE id='w'")["stage"] == "LOCKED"
+    assert db.one("SELECT status FROM trial_queue WHERE source_id='AAAAAAAAAAA'")["status"] == "CANCELLED"  # the same run is not queued twice
+    assert db.one("SELECT COUNT(*) n FROM runs WHERE source_id='AAAAAAAAAAA' AND production='QUEUED'")["n"] == 1
+    new = db.one("SELECT * FROM runs WHERE source_id='AAAAAAAAAAA' AND production='QUEUED'")
+    assert (new["playbook_id"], new["origin"], new["revision_of"]) == (v2, "lock", "AAAAAAAAAAA-r1")
+    s = db.one("SELECT * FROM sources WHERE id='AAAAAAAAAAA'")
+    assert (s["delivery"], s["deliver_after_run"], s["adopt_pinned"], s["current_run_id"]) == ("HELD", new["id"], 0, "AAAAAAAAAAA-r1")
+    # held: nothing goes to Notion yet, the others do
+    picked = []
+    db.set_setting("notion_database_id", "x")
+    monkeypatch.setattr(delivery, "client", lambda: object())
+    monkeypatch.setattr(delivery, "deliver", lambda sid: picked.append(sid) or {"status": "DELIVERED"})
+    delivery.deliver_pending()
+    assert picked and "AAAAAAAAAAA" not in picked
+
+    # the channel is LOCKED: the worker still takes the queued run; it runs the playbook asked for and becomes the version
+    from assetizer import config
+    config.get().secrets_dir.mkdir(parents=True, exist_ok=True)
+    (config.get().secrets_dir / "notion-token").write_text("t")
+    monkeypatch.setattr(runner, "STAGES", [])
+    monkeypatch.setattr(runner.Worker, "housekeeping", lambda self: None)
+    monkeypatch.setattr(runner, "apply_nudges", lambda: False)
+    db.set_setting("worker_slots", 2)
+    w = runner.Worker()
+    assert w.tick()
+    for t in list(w.active.values()):
+        t.join(5)
+    assert db.one("SELECT production FROM runs WHERE id=?", new["id"])["production"] == "COMPLETE"
+    s = db.one("SELECT * FROM sources WHERE id='AAAAAAAAAAA'")
+    assert (s["current_run_id"], s["delivery"], s["deliver_after_run"]) == (new["id"], "NOT_STARTED", None)
+    b = db.one("SELECT * FROM sources WHERE id='BBBBBBBBBBB'")
+    assert b["current_run_id"].endswith("-r2") and b["delivery"] == "STALE"  # its own page gets replaced by the new version
+
+
+def test_lock_rerun_that_fails_falls_back_to_the_adopted_version_and_says_so(home, sent):
+    from fastapi.testclient import TestClient
+    from assetizer import db, tuning
+    from assetizer.pipeline import runner
+    from assetizer.web import app as web
+    v1, v2, v3 = _rerun_fixture()
+    tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}, {"source_id": "BBBBBBBBBBB", "action": "rerun"}])
+    a = db.one("SELECT deliver_after_run r FROM sources WHERE id='AAAAAAAAAAA'")["r"]
+    b = db.one("SELECT deliver_after_run r FROM sources WHERE id='BBBBBBBBBBB'")["r"]
+    runner._fail(a, RuntimeError("片段超时"))
+    runner._fail(b, RuntimeError("片段超时"))
+    assert db.one("SELECT current_run_id, delivery, deliver_after_run FROM sources WHERE id='AAAAAAAAAAA'") == \
+        {"current_run_id": "AAAAAAAAAAA-r1", "delivery": "NOT_STARTED", "deliver_after_run": None}
+    assert db.one("SELECT delivery FROM sources WHERE id='BBBBBBBBBBB'")["delivery"] == "STALE"
+    # seen: in the log, on Telegram and among what needs you on the 刊 (the issue has units of its adopted version)
+    assert "v1" in db.one("SELECT message FROM events WHERE run_id=? AND message LIKE '定稿等的%'", a)["message"]
+    assert any("片段超时" in m for m in sent)
+    issue = next(i for i in TestClient(web.app).get("/api/overview", headers={"host": "127.0.0.1"}).json()["issues"] if i["id"] == "AAAAAAAAAAA")
+    assert (issue["production"], issue["origin"], issue["latest_run"]) == ("FAILED", "lock", a)
+    # 重试 is the way back to the new version
+    db.exec("UPDATE runs SET production='COMPLETE' WHERE id=?", a)
+    runner.adopt_completed(db.one("SELECT * FROM sources WHERE id='AAAAAAAAAAA'"), a)
+    assert db.one("SELECT current_run_id FROM sources WHERE id='AAAAAAAAAAA'")["current_run_id"] == a
+
+
+def test_a_hold_is_released_when_restarts_give_up_on_the_run_too(home, monkeypatch):
+    from assetizer import db, tuning
+    from assetizer.pipeline import runner
+    monkeypatch.setattr(runner, "kill_orphans", lambda: 0)
+    v1, v2, v3 = _rerun_fixture()
+    tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}, {"source_id": "BBBBBBBBBBB", "action": "rerun"}])
+    a = db.one("SELECT deliver_after_run r FROM sources WHERE id='AAAAAAAAAAA'")["r"]
+    b = db.one("SELECT deliver_after_run r FROM sources WHERE id='BBBBBBBBBBB'")["r"]
+    db.exec("UPDATE runs SET production='RUNNING', attempts=5 WHERE id=?", a)
+    runner.Worker().recover()
+    assert db.one("SELECT delivery, deliver_after_run FROM sources WHERE id='AAAAAAAAAAA'") == {"delivery": "NOT_STARTED", "deliver_after_run": None}
+    db.exec("UPDATE runs SET production='RUNNING', attempts=5 WHERE id=?", b)
+    runner._requeue(b, "数据库忙")
+    assert db.one("SELECT delivery, deliver_after_run FROM sources WHERE id='BBBBBBBBBBB'") == {"delivery": "STALE", "deliver_after_run": None}
+
+
+def test_lock_rerun_leaves_what_it_should_not_touch(home):
+    from assetizer import db, tuning
+    v1, v2, v3 = _rerun_fixture()
+    count = lambda: db.one("SELECT COUNT(*) n FROM runs")["n"]  # noqa: E731
+    before = count()
+    # pinned: refused, nothing changed — and with no decision to rerun it the pinned version goes in, no run
+    db.exec("UPDATE sources SET adopt_pinned=1 WHERE id='AAAAAAAAAAA'")
+    with pytest.raises(tuning.LockRefused, match="钉住"):
+        tuning.lock("w", v2, [{"source_id": "BBBBBBBBBBB", "action": "rerun"}, {"source_id": "AAAAAAAAAAA", "action": "rerun"}])
+    assert count() == before and db.one("SELECT stage FROM channels WHERE id='w'")["stage"] == "TUNING"
+    # another version under way on the video: one active run per video
+    db.exec("UPDATE sources SET adopt_pinned=0 WHERE id='AAAAAAAAAAA'")
+    db.exec("INSERT INTO runs(id, source_id, playbook_id, production, created_at) VALUES ('live','AAAAAAAAAAA',?,'QUEUED','2026-11-01')", v3)
+    with pytest.raises(tuning.LockRefused, match="别的版本在跑"):
+        tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}])
+    # this version under way: wait for it, no second run · adopted this version since the sheet opened: write · a queued trial is no run yet
+    db.exec("UPDATE runs SET playbook_id=?, origin='trial' WHERE id='live'", v2)
+    db.exec("UPDATE sources SET adopt_pinned=1 WHERE id='BBBBBBBBBBB'")
+    before = count()
+    r = tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}, {"source_id": "s1", "action": "rerun"},
+                              {"source_id": "s4", "action": "keep"}, {"source_id": "BBBBBBBBBBB", "action": "write"}])
+    assert count() == before and r["rerun"] == 0 and r["wait"] == 1 and r["keep"] == 1
+    assert db.one("SELECT delivery, deliver_after_run FROM sources WHERE id='AAAAAAAAAAA'") == {"delivery": "HELD", "deliver_after_run": "live"}
+    assert db.one("SELECT origin FROM runs WHERE id='live'")["origin"] == "lock"  # its failure is reported now
+    assert db.one("SELECT adopt_pinned, deliver_after_run FROM sources WHERE id='s1'") == {"adopt_pinned": 1, "deliver_after_run": None}
+    b = db.one("SELECT current_run_id, adopt_pinned, deliver_after_run FROM sources WHERE id='BBBBBBBBBBB'")
+    assert b == {"current_run_id": "BBBBBBBBBBB-r1", "adopt_pinned": 1, "deliver_after_run": None}
+    assert db.one("SELECT delivery FROM sources WHERE id='s4'")["delivery"] == "REGISTERED"
+
+
+def test_lock_with_reruns_is_all_or_nothing(home, monkeypatch):
+    from assetizer import db, tuning
+    from assetizer.pipeline import runner
+    v1, v2, v3 = _rerun_fixture()
+    db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, status, created_at) VALUES ('w','s1',?,'PENDING','2026-10-26')", v3)
+    state = lambda: (db.q("SELECT id, delivery, deliver_after_run, adopt_pinned FROM sources ORDER BY id"),  # noqa: E731
+                     db.q("SELECT id, production FROM runs ORDER BY id"), db.q("SELECT id, status FROM playbooks ORDER BY id"),
+                     db.q("SELECT status FROM trial_queue"), db.one("SELECT stage FROM channels WHERE id='w'"))
+    before = state()
+    real, calls = runner.submit, []
+
+    def submit(*a, **kw):  # the second one breaks after the first went in
+        calls.append(a)
+        if len(calls) == 2:
+            raise RuntimeError("数据库坏了")
+        return real(*a, **kw)
+    monkeypatch.setattr(runner, "submit", submit)
+    with pytest.raises(RuntimeError):
+        tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}, {"source_id": "BBBBBBBBBBB", "action": "rerun"}])
+    assert len(calls) == 2 and state() == before
+    # a run dispatched between the checks and the transaction refuses the whole sheet the same way
+    monkeypatch.setattr(runner, "submit", lambda *a, **kw: {"source_id": "AAAAAAAAAAA", "run_id": "x", "existing": True})
+    with pytest.raises(tuning.LockRefused, match="请重新打开"):
+        tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}])
+    assert state() == before
+
+
+def test_retune_lifts_the_pins_of_the_lock_and_leaves_the_users(home):
+    from assetizer import db, tuning
+    v1, v2, v3 = _rerun_fixture()
+    tuning.adopt("BBBBBBBBBBB", "BBBBBBBBBBB-r1", True)
+    tuning.lock("w", v1, [{"source_id": "AAAAAAAAAAA", "action": "write"}, {"source_id": "BBBBBBBBBBB", "action": "keep"}])
+    pins = lambda: {r["id"]: (r["adopt_pinned"], r["lock_pinned"]) for r in db.q("SELECT id, adopt_pinned, lock_pinned FROM sources WHERE id IN ('AAAAAAAAAAA','BBBBBBBBBBB')")}
+    assert pins() == {"AAAAAAAAAAA": (1, 1), "BBBBBBBBBBB": (1, 0)}
+    tuning.retune("w")
+    assert pins() == {"AAAAAAAAAAA": (0, 0), "BBBBBBBBBBB": (1, 0)}
+    # the lock after it can rerun what the last one had pinned
+    assert tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}])["rerun"] == 1
+
+
+def test_pins_on_locked_channels_are_taken_for_the_locks_once_when_the_column_comes(home):
+    import sqlite3
+    from assetizer import config, db
+    db.exec("INSERT INTO channels(id, name, stage, created_at, updated_at) VALUES ('a', 'A', 'LOCKED', 'x', 'x'), ('b', 'B', 'TUNING', 'x', 'x')")
+    for sid, ch in (("x", "a"), ("y", "b")):
+        db.exec("INSERT INTO sources(id, url, channel_id, adopt_pinned, created_at, updated_at) VALUES (?, 'u', ?, 1, 'x', 'x')", sid, ch)
+    conn = db.connect()
+    conn.execute("ALTER TABLE sources DROP COLUMN lock_pinned")
+    conn.commit()
+    db._migrate(conn)
+    conn.commit()
+    assert {r["id"]: r["lock_pinned"] for r in db.q("SELECT id, lock_pinned FROM sources")} == {"x": 1, "y": 0}
+
+
+def test_retune_drops_the_hold_of_a_rerun_and_clear_stops_the_run(home):
+    from assetizer import db, tuning
+    v1, v2, v3 = _rerun_fixture()
+    tuning.lock("w", v2, [{"source_id": "AAAAAAAAAAA", "action": "rerun"}])
+    run = db.one("SELECT deliver_after_run r FROM sources WHERE id='AAAAAAAAAAA'")["r"]
+    tuning.retune("w")
+    assert db.one("SELECT delivery, deliver_after_run FROM sources WHERE id='AAAAAAAAAAA'") == {"delivery": "NOT_STARTED", "deliver_after_run": None}
+    assert db.one("SELECT production FROM runs WHERE id=?", run)["production"] == "QUEUED"  # like a wait: the run goes on …
+    tuning.stop_trials("w")
+    assert db.one("SELECT production FROM runs WHERE id=?", run)["production"] == "CANCELLED"  # … until 清空
+
+
+# ---------------------------------------------------------------- magpie: read what the gateway says, route by its models
+from assetizer import db  # noqa: E402
+
+QUOTAS = {"object": "list", "data": [
+    {"provider": "codex", "name": "Codex", "kind": "subscription", "plan": "prolite", "user": "A@example.com", "balance": "1 credits",
+     "windows": [{"name": "7 days", "used": 27, "remaining": 73, "resetsAt": "2026-11-11T14:48:02+08:00"}],
+     "readAt": "2026-11-05T15:30:06.915722193+08:00", "lastServedAt": "2026-11-05T07:31:10.354813119Z"},
+    {"provider": "claude", "name": "Claude Code", "kind": "subscription", "plan": "pro",
+     "windows": [{"name": "7 days", "used": 3, "remaining": 97, "resetsAt": "2026-11-06T15:00:00+08:00"},
+                 {"name": "5 hours", "used": 0, "remaining": 100}, {"name": "Extra usage", "used": 100, "text": True}]},
+    {"provider": "grok", "name": "Grok", "kind": "subscription", "windows": [], "error": "Grok is signed out; sign in again"},
+]}
+MODELS = {"object": "list", "data": [
+    {"id": "codex/gpt-6.1-terra", "display_name": "GPT-6.1 Terra", "magpie_label": "GPT-6.1 Terra · Codex", "owned_by": "codex",
+     "context_window": 500000, "modalities": {"input": ["text", "image"]}, "reasoning_levels": ["low", "medium", "high", "xhigh"]},
+    {"id": "codex/gpt-6-astra", "display_name": "GPT-6-Astra", "magpie_label": "GPT-6-Astra · Codex", "owned_by": "codex",
+     "context_window": 110000, "modalities": {"input": ["text", "image"]}, "reasoning_levels": ["xhigh", "max"]},
+    {"id": "grok/plain", "display_name": "Plain", "owned_by": "grok", "reasoning_levels": []},
+    {"id": "group/text", "display_name": "文本", "owned_by": "claude", "reasoning_levels": ["high"]},
+]}
+
+
+@pytest.fixture
+def gateway(home):
+    """magpie's read routes, answering what a test sets: {"GET /v1/models": (status, body)}; a route not set answers 404."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    state = {"routes": {"GET /v1/magpie/me": (200, {"name": "Home LAN", "limits": [], "readOnly": False, "version": "v1", "usage": {"7d": {"calls": 3}}}),
+                        "GET /v1/models": (200, MODELS), "GET /v1/magpie/quotas": (200, QUOTAS),
+                        "GET /v1/magpie/quotas/history": (200, {"data": []}),
+                        "POST /v1/magpie/quotas/refresh": (200, {"data": []}),
+                        "POST /v1/magpie/usage/requests": (200, {"accepted": 1})},
+             "seen": [], "posted": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def _answer(self, method):
+            path = self.path.split("?")[0]
+            state["seen"].append(f"{method} {self.path}")
+            status, body = state["routes"].get(f"{method} {path}", (404, {"error": {"message": "no"}}))
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):  # noqa: N802
+            self._answer("GET")
+
+        def do_POST(self):  # noqa: N802
+            state["posted"].append(json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"null"))
+            self._answer("POST")
+
+        def log_message(self, *a):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    db.set_setting("magpie_url", f"http://127.0.0.1:{httpd.server_address[1]}")
+    (home / "secrets").mkdir(exist_ok=True)
+    (home / "secrets" / "magpie-api-key").write_text("sk-magpie-test")
+    state["port"] = httpd.server_address[1]
+    yield state
+    httpd.shutdown()
+
+
+def test_magpie_rate_limits_read_with_the_field_names_the_gateway_sends():
+    from assetizer.providers.magpie import quota_view
+    q = quota_view({"at": "2026-11-05T02:00:00+00:00", "plan_type": "prolite",
+                    "rate_limits": {"primary": {"used_percent": 26, "window_minutes": 10080, "reset_at": 1794379682, "reset_after_seconds": 519405},
+                                    "secondary": None}})
+    assert q["buckets"][0]["window"] == "weekly" and q["buckets"][0]["reset_at"].startswith("2026-11-")
+    q = quota_view({"at": "2026-11-05T02:00:00+00:00", "rate_limits": {"primary": {"used_percent": 1, "window_minutes": 300, "reset_after_seconds": 60}}})
+    assert q["buckets"][0]["reset_at"] == "2026-11-05T02:01:00+00:00"
+
+
+def test_the_understanding_stage_goes_by_its_settings_key():
+    from assetizer.providers import stage_key
+    assert stage_key("understand-CH01") == "understanding" and stage_key("knowledge-detail-03") == "knowledge"
+
+
+def test_a_stage_can_be_sent_to_a_model_the_gateway_lists(home):
+    from assetizer import db, knobs, providers
+    from assetizer.providers.agy import AgyProvider
+    from assetizer.providers.magpie import MagpieProvider
+    db.set_setting("stage_providers", {"understanding": "claude/claude-sonnet-5-5", "knowledge": "magpie", "selection": "codex/gpt-6.1-sol",
+                                       "article": "group/text"})
+    p = providers.for_stage("understand-CH01")
+    assert isinstance(p, MagpieProvider) and p.model == "claude/claude-sonnet-5-5"
+    assert providers.for_stage("knowledge-detail-01").model == "codex/gpt-6.1-terra"  # "magpie" stays the gateway's default model
+    assert providers.for_stage("article-outline").model == "group/text"
+    assert isinstance(providers.for_stage("merge"), AgyProvider)
+    # one provider per subscription: two of Codex's models draw on one quota; a group is asked for itself
+    assert sorted(getattr(p, "model", "agy") for p in providers.in_use()) == ["agy", "claude/claude-sonnet-5-5", "codex/gpt-6.1-terra", "group/text"]
+    assert knobs.get("stage_providers")["selection"] == "codex/gpt-6.1-sol"
+    knobs.save({"stage_providers": {"knowledge": "grok/grok-4.7@500k"}, "llm_provider": "group/text"})
+    assert db.setting("llm_provider") == "group/text" and db.setting("stage_providers") == {"knowledge": "grok/grok-4.7@500k"}
+    for bad in ("nope", "a b/c;", "", "/x"):
+        with pytest.raises(knobs.KnobError):
+            knobs.save({"stage_providers": {"knowledge": bad}})
+
+
+def test_the_gateway_read_keeps_subscriptions_and_models_and_never_a_turn(gateway):
+    from assetizer.providers import magpie_state
+    st = magpie_state.read()
+    assert st["ok"] and st["error"] is None and st["key"] == {"name": "Home LAN", "limited": False, "read_only": False}
+    codex, claude, grok = st["subs"]
+    assert codex["windows"][0] == {"window": "weekly", "label": "每周", "remaining": 0.73, "reset_at": "2026-11-11T06:48:02+00:00", "disabled": False}
+    assert codex["read_at"] == "2026-11-05T07:30:06+00:00" and codex["last_served_at"] == "2026-11-05T07:31:10+00:00"
+    assert [w["window"] for w in claude["windows"]] == ["5h", "weekly"]  # a window told as words is left out, the shortest comes first
+    assert grok["signed_out"] and grok["windows"] == []
+    held_back = magpie_state.sub_view({"provider": "codex", "error": "not read yet: magpie reads allowances only when you ask (Settings → Usage)"})
+    assert held_back["error"] is None and not held_back["signed_out"]
+    assert [m["id"] for m in st["models"]] == [m["id"] for m in MODELS["data"]] and st["models"][0]["context"] == 500000
+    assert st["models"][3]["group"] and st["models"][2]["inputs"] == ["text"]
+    assert all(s.startswith("GET ") for s in gateway["seen"]) and any("kept=1" in s for s in gateway["seen"])
+    magpie_state.read(vendors=True)
+    assert "POST /v1/magpie/quotas/refresh" in gateway["seen"]
+
+
+def test_a_failed_gateway_read_keeps_the_last_numbers_and_says_why(gateway):
+    from assetizer.providers import magpie_state
+    magpie_state.read()
+    gateway["routes"]["GET /v1/magpie/quotas"] = (403, {"error": {"code": "gateway_key_held"}})
+    st = magpie_state.read()
+    assert st["error"] == "HELD" and not st["ok"] and len(st["subs"]) == 3 and st["models"]
+    gateway["routes"]["GET /v1/magpie/me"] = (401, {"error": {"message": "bad key"}})
+    assert magpie_state.read()["error"] == "BAD_KEY"
+    gateway["routes"]["GET /v1/magpie/me"] = (502, {"error": "bad gateway"})
+    assert magpie_state.read()["error"] == "UNREACHABLE"
+    db.set_setting("magpie_url", "http://127.0.0.1:9")
+    st = magpie_state.read()
+    assert st["error"] == "UNREACHABLE" and len(st["subs"]) == 3
+
+
+def test_without_a_key_the_view_says_so(home):
+    from assetizer.providers import magpie_state
+    assert magpie_state.view()["state"]["error"] == "NO_KEY"
+    assert magpie_state.read()["error"] == "NO_KEY"
+
+
+def test_the_view_tells_which_subscriptions_routes_draw_on_and_which_routes_are_off_the_list(gateway):
+    from assetizer.providers import magpie_state
+    db.set_setting("stage_providers", {"knowledge": "magpie", "selection": "codex/gone", "article": "group/text", "review": "grok/plain"})
+    magpie_state.read()
+    v = magpie_state.view()
+    assert v["vendors"] == ["codex", "claude", "grok"]  # a group draws on its first member's, as the catalog says
+    assert v["missing"] == ["codex/gone"] and v["routes"]["stages"]["knowledge"] == "codex/gpt-6.1-terra"
+    assert magpie_state.signed_out_in_use() == ["Grok"]
+
+
+def test_a_call_asks_what_the_model_takes_and_records_who_answered(fake_magpie, home):
+    from assetizer.providers import magpie_state
+    from assetizer.providers.magpie import MagpieProvider, spread
+    db.set_setting("magpie_state", {"models": [magpie_state.model_view(m) for m in MODELS["data"]]})
+    done = _events({"type": "response.output_text.delta", "delta": "好"}, {"type": "response.completed", "response": {"status": "completed", "usage": {}}})
+    fake_magpie["reply"] = (200, done)
+    fake_magpie["headers"] = {"X-Magpie-Model": "claude/claude-opus-5-5", "X-Magpie-Provider": "claude"}
+    p = MagpieProvider(model="group/text")
+    p.session = "abc-r1"
+    r = p.call(home / "c1", "hi", kind="t", effort="low")
+    req = fake_magpie["requests"][0]
+    assert req["body"]["reasoning"] == {"effort": "high"} and req["session"] == "abc-r1" and req["agent"] == "assetizer"
+    assert r.receipt["actual_model"] == "claude/claude-opus-5-5" and r.receipt["served_by"] == "claude"
+    MagpieProvider(model="grok/plain").call(home / "c2", "hi", kind="t")  # a model that does not think is asked no level
+    assert "reasoning" not in fake_magpie["requests"][1]["body"]
+    MagpieProvider(model="codex/not-listed").call(home / "c3", "hi", kind="t", effort="medium")  # nothing known: asked as asked
+    assert fake_magpie["requests"][2]["body"]["reasoning"] == {"effort": "medium"}
+    assert MagpieProvider(model="codex/gpt-6.1-terra")._level("high") == "high"
+    assert MagpieProvider(model="codex/gpt-6-astra")._level("high") == "xhigh"  # the nearest it has
+    assert MagpieProvider(model="codex/gpt-6-astra")._frame_cap() == 60 and MagpieProvider(model="codex/gpt-6.1-terra")._frame_cap() == 272
+    assert MagpieProvider(model="nope/x")._frame_cap() == 300
+    assert spread(list(range(10)), 5) == [0, 2, 4, 6, 8] and spread([1, 2], 5) == [1, 2]
+
+
+def test_a_model_taken_off_the_gateway_pauses_production_until_the_route_is_changed(fake_magpie, home):
+    from assetizer.providers.agy import ProviderError
+    from assetizer.providers.magpie import MagpieProvider
+    from assetizer.pipeline import runner
+    fake_magpie["reply"] = (404, '<html>not found</html>')
+    with pytest.raises(ProviderError) as e:
+        MagpieProvider(model="codex/gone").call(home / "c0", "hi", kind="t")
+    assert e.value.kind != "PROVIDER_MODEL"  # a 404 from something else in the way says nothing about the model
+    fake_magpie["reply"] = (404, '{"error": {"message": "unknown model codex/gone"}}')
+    with pytest.raises(ProviderError) as e:
+        MagpieProvider(model="codex/gone").call(home / "c", "hi", kind="t")
+    assert e.value.kind == "PROVIDER_MODEL" and not e.value.transient and "PROVIDER_MODEL" in runner.PAUSE_KINDS
+    assert runner.ALERT_TEXT["PROVIDER_MODEL"][0].startswith("工序用的模型")
+
+
+def test_quota_alert_and_backfill_go_by_magpie_subscriptions_in_use(gateway):
+    from assetizer import ingest
+    from assetizer.pipeline import runner
+    from assetizer.providers import magpie_state
+    db.set_setting("stage_providers", {"knowledge": "codex/gpt-6.1-terra"})
+    out = {"object": "list", "data": [{"provider": "codex", "name": "Codex", "windows": [
+        {"name": "7 days", "used": 100, "remaining": 0, "resetsAt": "2026-11-11T14:48:02+08:00"}]},
+        {"provider": "grok", "name": "Grok", "windows": [{"name": "7 days", "used": 100, "remaining": 0, "resetsAt": "2026-12-01T00:00:00+08:00"}]}]}
+    gateway["routes"]["GET /v1/magpie/quotas"] = (200, out)
+    magpie_state.read()
+    assert [w["remaining"] for w in magpie_state.windows_in_use()] == [0.0]  # Grok is out too, but no stage draws on it
+    assert "周三 14:48 恢复" in runner.alert_text("PROVIDER_QUOTA")[1]
+    assert ingest.backfill_held() == "weekly"
+    db.set_setting("stage_providers", {})
+    assert ingest.backfill_held() is None
+
+
+def test_claude_takes_no_stage_that_watches_video(gateway, home):
+    from assetizer import knobs
+    from assetizer.providers import magpie_state
+    claude = "claude/claude-haiku-5-5"
+    with pytest.raises(knobs.KnobError, match="理解要看视频"):
+        knobs.save({"stage_route": {"understanding": claude}})
+    with pytest.raises(knobs.KnobError, match="边界要看视频"):
+        knobs.save({"stage_route": {"boundary": claude}})
+    knobs.save({"stage_route": {"knowledge": claude}})
+    assert knobs.get("stage_providers")["knowledge"] == claude
+    knobs.save({"stage_route": {"boundary": "grok/grok-4.6"}})
+    knobs.save({"llm_provider": claude})  # 其余: what had no route of its own and watches video stays where it was going
+    stages = knobs.get("stage_providers")
+    assert stages["understanding"] == "agy" and stages["boundary"] == "grok/grok-4.6" and "knowledge" not in stages
+    view = {m["id"]: m["watches"] for m in map(magpie_state.model_view, [
+        {"id": claude, "modalities": {"input": ["text", "image"]}}, {"id": "grok/grok-4.6", "modalities": {"input": ["text", "image"]}},
+        {"id": "x/text-only", "modalities": {"input": ["text"]}}])}
+    assert view == {claude: False, "grok/grok-4.6": True, "x/text-only": False}
+
+
+def test_agy_calls_are_told_to_magpie_once_and_its_own_are_not(gateway, home):
+    from assetizer.providers import magpie_state
+    from assetizer.util import now
+    add = lambda model, ver, status="SUCCESS": db.exec(  # noqa: E731
+        """INSERT INTO model_calls(run_id, stage, model, agy_version, status, error_class, wall_seconds, input_tokens, output_tokens, thinking_tokens, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""", "r1", "merge", model, ver, status, None if status == "SUCCESS" else "PROVIDER_FAILURE", 2.5, 10, 20, 5, now())
+    add("gemini-3.8-flash-high", "1.5.0")
+    add("codex/gpt-6.1-terra", "magpie:codex/gpt-6.1-terra")
+    add("gemini-3.8-flash-high", "1.5.0", "FAILED")
+    assert magpie_state.report() == 2
+    a, b = gateway["posted"][-1]
+    assert a["provider"] == "agy" and a["model"] == "gemini-3.8-flash" and a["effort"] == "high"  # what magpie has a price for
+    assert a["agent"] == "assetizer" and a["session"] == "r1"
+    assert (a["in"], a["out"], a["reasoning"], a["ms"], a["status"]) == (10, 20, 5, 2500, 200) and a["t"].endswith("Z") and a["rid"].startswith("assetizer-")
+    assert b["status"] == 500 and b["err"] == "PROVIDER_FAILURE"
+    # the fields magpie takes: any other refuses the whole post (usage_ingest.go, ingestFields)
+    assert set(a) | set(b) <= {"t", "agent", "provider", "model", "in", "out", "reasoning", "ms", "status", "rid", "effort", "session", "err"}
+    assert db.setting("magpie_report")["total"] == 2 and magpie_state.report() == 0  # nothing new
+    add("gemini-3.8-flash-high", "1.5.0")
+    gateway["routes"]["POST /v1/magpie/usage/requests"] = (403, {"error": {"code": "gateway_key_held"}})
+    assert magpie_state.report() == 0 and db.setting("magpie_report")["error"] == "HELD"
+    gateway["routes"]["POST /v1/magpie/usage/requests"] = (200, {"accepted": 1})
+    assert magpie_state.report() == 1 and db.setting("magpie_report")["total"] == 3  # what failed goes with the next one
+
+
+def test_the_engine_page_gets_magpie_and_a_runway_per_subscription(gateway, cc_api):
+    from datetime import datetime, timedelta, timezone
+    from assetizer.providers import magpie_state
+    db.set_setting("stage_providers", {"knowledge": "magpie"})
+    t = lambda h: (datetime.now(timezone.utc) - timedelta(hours=h)).isoformat(timespec="seconds")  # noqa: E731
+    gateway["routes"]["GET /v1/magpie/quotas/history"] = (200, {"data": [{"provider": "codex", "user": "a@example.com", "lines": [
+        {"name": "7 days", "points": [{"at": t(50), "left": 90}, {"at": t(20), "left": 80}, {"at": t(1), "left": 73}]}]}]})
+    magpie_state.read()
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('v', ?, ?)", t(40), t(40))
+    for i in range(3):
+        db.exec("INSERT INTO runs(id, source_id, production, created_at, finished_at) VALUES (?, 'v', 'COMPLETE', ?, ?)", f"v-r{i}", t(30), t(10))
+    e = cc_api.get("/api/engine").json()
+    assert e["magpie"]["vendors"] == ["codex"] and e["providers"]["stages"] == {"knowledge": "codex/gpt-6.1-terra"}
+    assert e["magpie"]["state"]["subs"][0]["trend"] and e["providers"]["in_use"] == ["agy", "magpie"]
+    r = cc_api.get("/api/engine/stats").json()["runways"]["codex|a@example.com"]
+    assert r["issues"] == int(0.73 / (0.17 / 3))
+    assert cc_api.post("/api/magpie/refresh", json={}).status_code == 200
+    assert cc_api.post("/api/magpie/refresh", json={}).status_code == 429  # one at a time
+
+
+def test_stats_tell_tokens_per_subscription(home):
+    from assetizer.web.app import _family
+    assert [_family(m) for m in ("gemini-3.8-flash-high", "codex/gpt-6.1-terra", "claude/claude-opus-5-5", "grok/grok-4.7", "x/y", None)] == \
+        ["gemini", "chatgpt", "claude", "grok", "other", "other"]
+
+
+def test_one_stage_pick_goes_on_what_is_stored(home):
+    from assetizer import knobs
+    knobs.save({"stage_providers": {"knowledge": "magpie", "selection": "magpie"}})
+    assert knobs.save({"stage_route": {"knowledge": "codex/gpt-6.1-sol"}})["stage_providers"] == {"knowledge": "codex/gpt-6.1-sol", "selection": "magpie"}
+    assert knobs.save({"stage_route": {"selection": "group/text-fast"}})["stage_providers"] == {"knowledge": "codex/gpt-6.1-sol", "selection": "group/text-fast"}
+    assert knobs.save({"stage_route": {"selection": "agy"}})["stage_providers"] == {"knowledge": "codex/gpt-6.1-sol"}  # where the default goes anyway
+    logged = [e["message"] for e in db.q("SELECT message FROM events WHERE kind='config' ORDER BY id")]
+    assert logged[-1] == "机房设置：选片 group/text-fast → agy"  # the stage that moved, not every stage twice over
+    for bad in ({"nope": "agy"}, {"merge": "no such"}, "merge"):
+        with pytest.raises(knobs.KnobError):
+            knobs.save({"stage_route": bad})
+
+
+def test_a_vendor_slow_to_answer_a_refresh_does_not_read_as_magpie_being_down(gateway):
+    from assetizer.providers import magpie_state
+    gateway["routes"]["POST /v1/magpie/quotas/refresh"] = (502, {"error": {"message": "codex: upstream timeout"}})
+    st = magpie_state.read(vendors=True)
+    assert st["ok"] and st["error"] is None and st["subs"]  # what magpie has kept still reads
+    gateway["routes"]["POST /v1/magpie/quotas/refresh"] = (403, {"error": {"code": "gateway_key_held"}})
+    assert magpie_state.read(vendors=True)["error"] == "HELD"  # about the key: that does count
+
+
+def test_a_call_made_while_reporting_waits_for_the_next_round(gateway, home, monkeypatch):
+    from assetizer.providers import magpie_state
+    from assetizer.util import now
+    add = lambda: db.exec(  # noqa: E731
+        "INSERT INTO model_calls(run_id, stage, model, agy_version, status, wall_seconds, created_at) VALUES ('r1','merge','gemini-3.8-flash-high','1.5.0','SUCCESS',1,?)", now())
+    add()
+    real = db.one
+    pending = [add, add]  # one just before the newest id is read, one just after
+
+    def racing(sql, *args):
+        if "MAX(id)" not in sql or " WHERE id > " not in sql or not pending:
+            return real(sql, *args)
+        pending.pop()()
+        row = real(sql, *args)
+        pending.pop()()
+        return row
+    monkeypatch.setattr(db, "one", racing)
+    told = magpie_state.report()
+    told += magpie_state.report()
+    assert told == 3  # every call told, none skipped by the cursor and none twice
+    rids = [r["rid"] for batch in gateway["posted"] for r in batch]
+    assert len(rids) == len(set(rids)) == 3

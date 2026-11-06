@@ -8,7 +8,7 @@ type Base = "write" | "keep" | "replace";
 
 /** 定稿单: lock on one version and decide, per sample, what goes to Notion — then the 「定」 stamp. */
 export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRetarget, onTrial }: {
-  cid: string; defaultPb: number; onClose: () => void; onLocked: (r: { version: number; write: number; keep: number; wait: number; ingest: any; backfill?: number }) => void;
+  cid: string; defaultPb: number; onClose: () => void; onLocked: (r: { version: number; write: number; keep: number; wait: number; rerun?: number; ingest: any; backfill?: number }) => void;
   onConflict: (clauseId: string) => void; onRetarget: () => void; onTrial: (pbId: number) => Promise<void>;
 }) {
   const [pbId, setPbId] = useState(defaultPb);
@@ -16,6 +16,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
   const [err, setErr] = useState<string | null>(null);
   const [base, setBase] = useState<Record<string, Base>>({});
   const [wait, setWait] = useState<Record<string, boolean>>({});
+  const [rerun, setRerun] = useState<Set<string>>(new Set());
   const [ing, setIng] = useState<{ enabled: boolean; min: number } | null>(null);
   const [skip, setSkip] = useState<Set<string>>(new Set());  // posted while tuned, unticked: not taken in
   const [busy, setBusy] = useState(false);
@@ -24,7 +25,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
   const close = (then?: () => void) => (sheet.current ? sheet.current.close(then) : (then || onClose)());
   useEffect(() => {
     let alive = true;
-    setLp(null); setErr(null);
+    setLp(null); setErr(null); setRerun(new Set()); setWait({});  // chosen for that version
     get<LockPreview>(`/api/channels/${cid}/lock-preview?playbook_id=${pbId}`)
       .then((d) => { if (!alive) return; setLp(d); setIng((x) => x || { enabled: true, min: d.ingest.min_minutes ?? 10 }); })
       .catch((e) => alive && setErr((e as Error).message));
@@ -32,7 +33,12 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
   }, [cid, pbId]);
   const baseOf = (r: LockRow): Base => base[r.source_id] || (r.library ? "keep" : "write");
   const canWait = (r: LockRow) => !!r.running && !r.adopted?.pinned && baseOf(r) !== "keep";
-  const action = (r: LockRow) => (baseOf(r) === "keep" ? "keep" : canWait(r) && wait[r.source_id] ? "wait" : baseOf(r));
+  const v = lp?.playbook.version;
+  // pins stay, a video has one active run at a time, and a page Assetizer did not write is only ever kept
+  const canRerun = (r: LockRow) => !!r.adopted && !r.adopted.pinned && r.adopted.version !== v && !r.running && (!r.library || r.can_replace);
+  const reruns = (r: LockRow) => rerun.has(r.source_id) && canRerun(r);
+  const action = (r: LockRow) => (reruns(r) ? "rerun" : baseOf(r) === "keep" ? "keep" : canWait(r) && wait[r.source_id] ? "wait" : baseOf(r));
+  const setRerunOf = (r: LockRow, on: boolean) => setRerun((x) => { const n = new Set(x); if (on) n.add(r.source_id); else n.delete(r.source_id); return n; });
   const lock = async () => {
     if (!lp) return;
     setBusy(true); setErr(null);
@@ -46,11 +52,23 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
       window.setTimeout(() => close(() => onLocked(r)), 700);
     } catch (e) { setErr((e as Error).message); setBusy(false); }
   };
-  const v = lp?.playbook.version;
   // 定稿 writes what each sample adopts, whichever version made it: what is going in that this version did not make
-  const written = (r: LockRow) => { const a = action(r); return a === "keep" ? null : a === "wait" || !r.adopted ? r.running?.version ?? null : r.adopted.version; };
-  const others = (lp?.samples || []).map(written).filter((x): x is number => x != null && x !== v);
+  const written = (r: LockRow) => { const a = action(r); return a === "keep" ? null : a === "rerun" ? v ?? null : a === "wait" || !r.adopted ? r.running?.version ?? null : r.adopted.version; };
+  const samples = lp?.samples || [];
+  // what is not on this version first; by what each one has, so a row does not jump while it is being chosen for
+  const rows = [...samples].sort((a, b) => Number(a.adopted?.version === v) - Number(b.adopted?.version === v));
+  const others = samples.map(written).filter((x): x is number => x != null && x !== v);
   const tally = [...new Set(others)].sort((a, b) => b - a).map((x) => `v${x} × ${others.filter((o) => o === x).length}`).join("、");
+  const toRun = samples.filter((r) => canRerun(r) && baseOf(r) !== "keep");
+  // this version is under way on the video already: waiting for it is the same, without a second run
+  const toWait = samples.filter((r) => r.adopted && r.adopted.version !== v && canWait(r) && r.running!.version === v);
+  const allOn = toRun.every(reruns) && toWait.every((r) => wait[r.source_id]);
+  const nRerun = samples.filter(reruns).length;
+  const toggleAll = () => {
+    setRerun(allOn ? new Set() : new Set([...rerun, ...toRun.map((r) => r.source_id)]));
+    setWait({ ...wait, ...Object.fromEntries(toWait.map((r) => [r.source_id, !allOn])) });
+  };
+  const pinnedOff = (r: LockRow) => r.adopted?.pinned && r.adopted.version !== v && <span className="n">钉住</span>;
   return (
     <Sheet ref={sheet} onClose={onClose}>
       <div className="ch-sheet">
@@ -65,38 +83,20 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
         {!lp && !err && <p className="q">正在核对样片和 Notion……</p>}
         {lp && (
           <>
-            <div className="sgrp">
-              <div className="gh">写入 Notion</div>
-              {lp.samples.map((r) => (
-                <div key={r.source_id}>
-                  <div className="srow">
-                    <span className="t" title={r.title}>{r.title}</span>
-                    {!r.adopted && !r.running ? <span className="n z">还没有完成的版本</span>
-                      : r.library && !r.can_replace ? <span className="n" title="库里那一页不是课代表写的">库里已有 · 保留</span>
-                      : r.library ? (<><span className="n">库里已有</span>
-                        <Seg small label={`${r.title}：库里已有`} value={baseOf(r)} onChange={(x) => setBase({ ...base, [r.source_id]: x })}
-                          options={[{ value: "keep", label: "保留库里的页" }, { value: "replace", label: `换成 v${r.adopted?.version ?? "?"}`, title: "旧页移到 Notion 归档，不删除" }]} /></>)
-                      : r.adopted ? (<><span className="n">将写入</span><span className="v">v{r.adopted.version}</span><span className="ok"><Icon name="check" size={10} /></span></>)
-                      : <span className="n">等 v{r.running?.version} 跑完</span>}
-                  </div>
-                  {r.adopted && canWait(r) && (
-                    <div className="srow sub">
-                      <span className="t">v{r.running!.version} 还在跑</span>
-                      <Seg small label={`${r.title}：还在跑`} value={wait[r.source_id] ? "wait" : "now"} onChange={(x) => setWait({ ...wait, [r.source_id]: x === "wait" })}
-                        options={[{ value: "now", label: `现在写 v${r.adopted.version}` }, { value: "wait", label: `等 v${r.running!.version} 跑完`, title: `v${r.running!.version} 失败就写 v${r.adopted.version}` }]} />
-                    </div>
-                  )}
-                  {r.queued.length > 0 && <div className="srow sub quiet"><span className="t">v{r.queued.join("、v")} 还在排队，定稿后取消</span></div>}
-                </div>
-              ))}
-            </div>
+            {(!lp.tested || others.length > 0 || nRerun > 0 || lp.conflicts.length > 0 || !lp.target.configured || lp.target.test_copy || !lp.library_checked) && (
             <div className="sgrp">
               <div className="gh">留意</div>
               {!lp.tested && (
                 <div className="srow cf"><span className="t">v{v} 还没在样片上跑过</span>
                   <button className="ch-btn sm" onClick={async () => { try { await onTrial(pbId); close(); } catch (e) { setErr((e as Error).message); } }}>去试跑</button></div>
               )}
-              {others.length > 0 && <div className="srow"><span className="t">{others.length} 期不是 v{v}：{tally}</span></div>}
+              {(others.length > 0 || nRerun > 0) && (
+                <div className="srow tally"><span className="t">{others.length > 0 ? `${others.length} 期不是 v${v}：${tally}` : `${nRerun} 期按 v${v} 重跑后写入`}</span>
+                  {lp.tested && toRun.length + toWait.length + nRerun > 0 && (
+                    <button className={`ch-btn sm${allOn ? " ghost" : ""}`} aria-pressed={allOn} onClick={toggleAll}>{allOn ? "取消重跑" : `按 v${v} 重跑后写入`}</button>
+                  )}
+                </div>
+              )}
               {lp.conflicts.length > 0 && (
                 <button className="srow cf" onClick={() => close(() => onConflict(lp.conflicts[0].clause_id))}>
                   <span className="t">v{v} 有 {lp.conflicts.length} 处与「只依据视频」冲突，执行时按原则</span><span className="n z">看原句 →</span>
@@ -108,6 +108,37 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
                 <div className="srow"><span className="t">写入「{lp.target.title}」</span><button className="ch-btn sm ghost" onClick={() => close(onRetarget)}>换成正式库</button></div>
               ) : null}
               {!lp.library_checked && <div className="srow quiet"><span className="t">没能核对库里已有的页：{short(lp.library_error || "", 40)}</span></div>}
+            </div>
+            )}
+            <div className="sgrp">
+              <div className="gh">写入 Notion</div>
+              {rows.map((r) => (
+                <div key={r.source_id}>
+                  <div className="srow">
+                    <span className="t" title={r.title}>{r.title}</span>
+                    {!r.adopted && !r.running ? <span className="n z">还没有完成的版本</span>
+                      : r.library && !r.can_replace ? <span className="n" title="库里那一页不是课代表写的">库里已有 · 保留</span>
+                      : r.library ? (<><span className="n">库里已有</span>
+                        <Seg<string> small label={`${r.title}：库里已有`} value={reruns(r) ? "rerun" : baseOf(r)}
+                          onChange={(x) => { setRerunOf(r, x === "rerun"); if (x !== "rerun") setBase({ ...base, [r.source_id]: x as Base }); }}
+                          options={[{ value: "keep", label: "保留库里的页" }, { value: "replace", label: `换成 v${r.adopted?.version ?? "?"}`, title: "旧页移到 Notion 归档，不删除" },
+                            ...(canRerun(r) ? [{ value: "rerun", label: `换成 v${v} 重跑`, title: `v${v} 失败就换成 v${r.adopted!.version}` }] : [])]} />{pinnedOff(r)}</>)
+                      : r.adopted && canRerun(r) ? (<><span className="n">将写入</span>
+                        <Seg small label={`${r.title}：将写入`} value={reruns(r) ? "rerun" : "now"} onChange={(x) => setRerunOf(r, x === "rerun")}
+                          options={[{ value: "now", label: `v${r.adopted.version}` }, { value: "rerun", label: `v${v} 重跑`, title: `v${v} 失败就写 v${r.adopted.version}` }]} /></>)
+                      : r.adopted ? (<><span className="n">将写入</span><span className="v">v{written(r)}</span>{pinnedOff(r)}<span className="ok"><Icon name="check" size={10} /></span></>)
+                      : <span className="n">等 v{r.running?.version} 跑完</span>}
+                  </div>
+                  {r.adopted && canWait(r) && (
+                    <div className="srow sub">
+                      <span className="t">v{r.running!.version} 还在跑</span>
+                      <Seg small label={`${r.title}：还在跑`} value={wait[r.source_id] ? "wait" : "now"} onChange={(x) => setWait({ ...wait, [r.source_id]: x === "wait" })}
+                        options={[{ value: "now", label: `现在写 v${r.adopted.version}` }, { value: "wait", label: `等 v${r.running!.version} 跑完`, title: `v${r.running!.version} 失败就写 v${r.adopted.version}` }]} />
+                    </div>
+                  )}
+                  {r.queued.some((q) => !reruns(r) || q !== v) && <div className="srow sub quiet"><span className="t">v{r.queued.filter((q) => !reruns(r) || q !== v).join("、v")} 还在排队，定稿后取消</span></div>}
+                </div>
+              ))}
             </div>
             {(lp.missed?.length || lp.missed_error) ? (
               <div className="sgrp">
@@ -139,7 +170,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
         {err && <p className="ch-err" role="alert">{err}</p>}
         <div className="sfoot">
           <button className="ch-btn" onClick={() => close()}>取消</button>
-          <button className="ch-btn solid" disabled={!lp || !lp.tested || busy} onClick={lock}>{stamped ? "已定稿" : `定稿 v${v ?? ""}`}</button>
+          <button className="ch-btn solid" disabled={!lp || !lp.tested || busy} onClick={lock}>{stamped ? "已定稿" : `定稿 v${v ?? ""}${nRerun ? ` · 重跑 ${nRerun} 期` : ""}`}</button>
         </div>
       </div>
     </Sheet>

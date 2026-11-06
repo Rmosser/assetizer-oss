@@ -1,12 +1,14 @@
-"""An image model in place of the video model: GPT-6.1 Terra through magpie, the subscription gateway on prodbox.
+"""An image model in place of the video model: any model magpie lists (GPT-6.1 Terra by default), through magpie, the
+subscription gateway on prodbox. What the gateway says about its subscriptions and models is in magpie_state.
 
-Terra reads images and text, not video or audio, so a video handed to ``call`` is turned into what a viewer would
+These models read images and text, not video or audio, so a video handed to ``call`` is turned into what a viewer would
 need instead: frames taken when the picture changes (and at least every MAX_GAP seconds), each labelled with its time
 in that video, plus the speech of the same video transcribed by whisper (the GPU box when ``asr_url`` is set), with
 times. The stages and prompts stay as they are; their timecodes keep meaning "time in this video".
 
-Same contract as AgyProvider.call. Requests go to magpie's OpenAI Responses endpoint, streamed; the gateway's
-``codex.rate_limits`` event is kept in the receipt so the subscription's headroom shows in every call.
+Same contract as AgyProvider.call. Requests go to magpie's OpenAI Responses endpoint, streamed; the gateway translates
+for the vendors that do not speak it. Codex's ``codex.rate_limits`` event is kept in the receipt so the subscription's
+headroom shows in every call, and the reply's ``X-Magpie-Model`` says who really answered (a routing group picks).
 """
 from __future__ import annotations
 
@@ -31,9 +33,13 @@ from .tuzi import IDLE_TIMEOUT, _effort, _http_kind  # noqa: F401
 
 DEFAULT_URL = "https://magpie.prodbox.heiyu.space"
 DEFAULT_MODEL = "codex/gpt-6.1-terra"
+USER_AGENT = "assetizer"  # magpie names the caller by this on its Usage page
 MIN_GAP, MAX_GAP = 3.0, 15.0  # seconds between frames: on a change at most this often, and at least this often
 SCENE = 0.06                  # ffmpeg scene score that counts as a change (charts redraw a small part of the frame)
-MAX_FRAMES = 300              # ~1,100 tokens each at 1280 wide: stays well inside the 500K context
+MAX_FRAMES = 300              # ~1,100 tokens each at 1280 wide: stays well inside a 500K context
+FRAME_TOKENS, FRAME_SHARE = 1100, 0.6  # a smaller context gets fewer frames, at most this share of it
+FRAME_BYTES = 36 * 1024 * 1024  # of frames in one call, about 48 MB once in base64: Codex takes 52 MB and refuses 71 (tried 2026-11-05)
+LEVELS = ("low", "medium", "high", "xhigh", "max")
 FRAME_WIDTH = 1280
 MEDIA_NOTE = ("\n\n【视频的给法】上文要求读取的视频没有直接给你，而是换成了下面两样：按画面变化截取的帧（每帧前标注它在本视频中的时间），"
               "以及同一段的语音转写（同样是本视频中的时间）。把它们当作那段视频来理解：画面看帧，说话看转写。"
@@ -94,15 +100,53 @@ def transcript(video: Path, out: Path) -> list[dict]:
     return segs
 
 
+def spread(items: list, most: int) -> list:
+    """At most `most` of them, evenly spread."""
+    if len(items) <= most:
+        return items
+    step = len(items) / most
+    return [items[int(i * step)] for i in range(most)]
+
+
+def within(shots: list[tuple[float, Path]], budget: int) -> list[tuple[float, Path]]:
+    """As many as `budget` bytes hold, evenly spread: a busy video's frames weigh more."""
+    while (total := sum(f.stat().st_size for _, f in shots)) > budget:
+        shots = spread(shots, int(len(shots) * budget / total))
+    return shots
+
+
 class MagpieProvider:
     name = "magpie"
     media_size_limit = None  # frames are taken from the proxy, so proxies need not fit a model's file size limit
+    session: str | None = None  # the run this call belongs to: magpie's Usage page tells it as a session
 
-    def __init__(self, settings: config.Settings | None = None):
+    def __init__(self, settings: config.Settings | None = None, model: str | None = None):
         self.s = settings or config.get()
-        self.model = db.setting("magpie_model") or DEFAULT_MODEL
+        self.model = model or db.setting("magpie_model") or DEFAULT_MODEL
         self.url = (db.setting("magpie_url") or DEFAULT_URL).rstrip("/")
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # magpie is on the same box
+
+    def _catalog_entry(self) -> dict:
+        return next((m for m in (db.setting("magpie_state") or {}).get("models") or [] if m.get("id") == self.model), {})
+
+    def _frame_cap(self) -> int:
+        context = self._catalog_entry().get("context")
+        return min(MAX_FRAMES, max(30, int(context * FRAME_SHARE / FRAME_TOKENS))) if context else MAX_FRAMES
+
+    def _level(self, level: str) -> str | None:
+        """The level this model takes: the one asked, else the nearest it has; None for one that does not think.
+        A model the catalog does not (yet) tell of is asked as asked."""
+        e = self._catalog_entry()
+        if "levels" not in e:
+            return level
+        have = e["levels"]
+        if not have:
+            return None
+        if level in have:
+            return level
+        at = LEVELS.index(level) if level in LEVELS else 2
+        known = sorted(((abs(LEVELS.index(x) - at), LEVELS.index(x), x) for x in have if x in LEVELS))
+        return known[0][2] if known else have[0]
 
     def version(self) -> str:
         return f"magpie:{self.model}"
@@ -118,7 +162,7 @@ class MagpieProvider:
         for m in media:
             v = Path(m)
             cache = self.s.home / "cache" / "magpie-media" / _media_id(v)
-            shots = frames(v, cache / "frames")
+            shots = within(spread(frames(v, cache / "frames"), self._frame_cap()), FRAME_BYTES // len(media))
             speech = transcript(v, cache)
             for t, f in shots:
                 parts.append({"type": "input_text", "text": f"画面 [{fmt_tc(t)}]"})
@@ -154,18 +198,22 @@ class MagpieProvider:
             extra, info = self._media_parts(media)
             content += extra
             receipt.update(info, media_prep_seconds=round(time.monotonic() - t0, 1))
-        body: dict = {"model": self.model, "stream": True, "reasoning": {"effort": level},
-                      "input": [{"role": "user", "content": content}]}
+        body: dict = {"model": self.model, "stream": True, "input": [{"role": "user", "content": content}]}
+        if (asked := self._level(level)) is not None:
+            body["reasoning"] = {"effort": asked}
         if schema is not None:
             body["text"] = {"format": {"type": "json_schema", "name": re.sub(r"\W", "_", kind)[:60] or "out",
                                        "schema": gemini_schema(schema), "strict": False}}
             write_json(call_dir / "schema.json", schema)
         limit = _seconds(timeout or self.s.agy_print_timeout)
-        text, final, rate, error = "", None, None, None
+        text, final, rate, error, served, answered = "", None, None, None, None, None
+        headers = {"Authorization": f"Bearer {self._key()}", "Content-Type": "application/json", "User-Agent": USER_AGENT}
+        if self.session:
+            headers["X-Magpie-Session"] = self.session
         try:
-            req = urllib.request.Request(f"{self.url}/v1/responses", data=json.dumps(body).encode(), method="POST",
-                                         headers={"Authorization": f"Bearer {self._key()}", "Content-Type": "application/json"})
+            req = urllib.request.Request(f"{self.url}/v1/responses", data=json.dumps(body).encode(), method="POST", headers=headers)
             with self.opener.open(req, timeout=IDLE_TIMEOUT) as resp, (call_dir / "raw-output.jsonl").open("w") as raw:
+                answered, served = resp.headers.get("X-Magpie-Model"), resp.headers.get("X-Magpie-Provider")
                 for line in resp:
                     if time.monotonic() - t0 > limit:
                         error = ("PROVIDER_TIMEOUT", f"over the {limit:.0f} s budget")
@@ -198,13 +246,15 @@ class MagpieProvider:
         elif error is None and status == "incomplete":
             why = ((final.get("incomplete_details") or {}).get("reason") or "")
             error = ("PROVIDER_OUTPUT_LIMIT" if "token" in why else "PROVIDER_FAILURE", f"incomplete: {why}")
-        elif error is None and status != "completed":
-            error = ("PROVIDER_TRANSIENT", f"response {status}: {json.dumps(final.get('error'))[:300]}")
+        elif error is None and status != "completed":  # Claude's refusals come this way, after a 200
+            why = json.dumps(final.get("error"), ensure_ascii=False)[:300]
+            error = (_magpie_kind(500, why), f"response {status}: {why}")
         elif error is None and not text.strip():
             error = ("PROVIDER_TRANSIENT", "empty response")
         u = (final or {}).get("usage") or {}
         receipt.update(
-            finished_utc=now(), wall_seconds=round(time.monotonic() - t0, 3), actual_model=self.model, rate_limits=rate,
+            finished_utc=now(), wall_seconds=round(time.monotonic() - t0, 3), actual_model=answered or self.model,
+            served_by=served, rate_limits=rate,
             usage={"input_tokens": u.get("input_tokens"),
                    "output_tokens": (u.get("output_tokens") or 0) - ((u.get("output_tokens_details") or {}).get("reasoning_tokens") or 0)
                    if u else None,
@@ -259,8 +309,8 @@ class MagpieProvider:
 
 def quota_view(q: dict | None) -> dict | None:
     """The last `codex.rate_limits` (setting magpie_quota) as buckets shaped like agy's /usage. Codex reports a primary
-    and a secondary window, each with used_percent, window_minutes (300 = 5 hours, 10080 = a week) and resets_at (unix
-    seconds; older gateways: resets_in_seconds, counted from the call)."""
+    and a secondary window, each with used_percent, window_minutes (300 = 5 hours, 10080 = a week) and reset_at (unix
+    seconds) or reset_after_seconds, counted from the call; older gateways: resets_at, resets_in_seconds."""
     if not q:
         return None
     src = q["rate_limits"] if isinstance(q.get("rate_limits"), dict) else q
@@ -276,17 +326,25 @@ def quota_view(q: dict | None) -> dict | None:
         mins = w.get("window_minutes")
         window = {300: "5h", 10080: "weekly"}.get(mins) or (f"{mins}m" if mins else "5h" if key == "primary" else "weekly")
         reset = None
-        if isinstance(w.get("resets_at"), (int, float)):
-            reset = datetime.fromtimestamp(w["resets_at"], timezone.utc)
-        elif isinstance(w.get("resets_in_seconds"), (int, float)):
-            reset = at + timedelta(seconds=w["resets_in_seconds"])
+        stamp = next((w[k] for k in ("reset_at", "resets_at") if isinstance(w.get(k), (int, float))), None)
+        after = next((w[k] for k in ("reset_after_seconds", "resets_in_seconds") if isinstance(w.get(k), (int, float))), None)
+        if stamp is not None:
+            reset = datetime.fromtimestamp(stamp, timezone.utc)
+        elif after is not None:
+            reset = at + timedelta(seconds=after)
         buckets.append({"window": window, "remaining": max(0.0, min(1.0, 1 - w["used_percent"] / 100)),
                         "reset_at": reset.isoformat(timespec="seconds") if reset else None, "disabled": False, "note": None})
     return {"at": q["at"], "buckets": buckets} if buckets else None
 
 
+# what each says of a model it does not have: Codex (400 model_not_found), Claude (a failed stream), magpie itself (404)
+MODEL_GONE = re.compile(r"unknown model|model_not_found|knows no model|issue with the selected model", re.I)
+
+
 def _magpie_kind(code: int, detail: str) -> str:
-    # the Codex subscription's own limit: production waits for it like any quota
-    if re.search(r"usage limit|rate limit reached|limit reached|try again (in|at)", detail, re.I):
+    # a subscription's own limit: production waits for it like any quota
+    if re.search(r"usage (limit|cap)|rate limit reached|limit reached|try again (in|at)", detail, re.I):
         return "PROVIDER_QUOTA"
+    if MODEL_GONE.search(detail) or (code == 404 and "model" in detail.lower()):  # taken off the gateway while a stage uses it
+        return "PROVIDER_MODEL"
     return _http_kind(code, detail)

@@ -69,7 +69,7 @@ class RunContext:
                     r.get("agy_version"), r.get("status"), r.get("error_class"), r.get("wall_seconds"),
                     u.get("input_tokens"), u.get("output_tokens"), u.get("thinking_tokens"), r.get("peak_rss_kib"),
                     r.get("view_file_count"), now())
-        return LLM(recorder=record)
+        return LLM(recorder=record, session=self.id)
 
     # artifacts --------------------------------------------------------------
     def save(self, rel: str, obj: Any) -> Path:

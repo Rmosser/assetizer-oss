@@ -44,9 +44,10 @@ const SAMPLES = [
 ];
 const playbook = (id, version, status) => ({ id, prompt_id: id, version, status, origin: "COMPILED", created_at: now, activated_at: null, facets: [], audit: null,
   rules: [{ id: "r1", label: "保留逻辑衔接", rule: "保留主讲人论证中的逻辑衔接。", clause_ids: ["c1"] }, { id: "r2", label: `第 ${version} 版的规则`, rule: "术语第一次出现时给出解释。", clause_ids: ["c2"] }] });
-const PBS = [playbook(3, 3, "DRAFT"), playbook(2, 2, "RETIRED"), playbook(1, 1, "RETIRED")];
+const PBS = [playbook(3, 3, "NEEDS_CONFIRMATION"), playbook(2, 2, "RETIRED"), playbook(1, 1, "RETIRED")];
+const AVATAR = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="176" height="176"><rect width="176" height="176" fill="#2f5d62"/><circle cx="88" cy="70" r="30" fill="#f2e6cf"/><path d="M28 176c6-46 30-68 60-68s54 22 60 68z" fill="#f2e6cf"/></svg>')}`;
 const CHANNEL = {
-  id: "mock", name: "模拟频道", stage: "TUNING", mode: "TRACKED", youtube_channel_id: "UCmock", why: "看长期逻辑", playbooks: PBS, sources: 2, last_source: now,
+  id: "mock", name: "模拟频道", avatar: AVATAR, stage: "TUNING", mode: "TRACKED", youtube_channel_id: "UCmock", why: "看长期逻辑", playbooks: PBS, sources: 2, last_source: now,
   prompts: PBS.map((p) => ({ id: p.id, version: p.version, note: null, created_at: now, text: "保留逻辑衔接。\n术语第一次出现时给出解释。" })),
   ingest: { enabled: false, min_minutes: 15, scans: [] }, notion: { configured: true, database_title: "模拟知识库", template: "chapters", test_copy: false },
   samples: 2, samples_busy: 0, compile: { state: "done" }, pending_playbook: null, blocked: 0, held: 0,
@@ -102,6 +103,27 @@ const notion = {
   rows: rows("run-v3").map((r) => ({ ...r, options: Object.keys(r.colors), sources: [r.mapping?.source].filter(Boolean), sample: r.value })),
   templates: { chapters: "章节" }, source_labels: { template: "模板", published: "发布日期", channel: "频道", url: "视频链接", access: "会员/公开", version: "规程版本" }, template_vars: { title: "标题" }, access_labels: {},
 };
+// the page icon as saved here: 频道头像 and 还差几页 can be tried (保存 keeps it in memory)
+notion.avatar = { url: AVATAR, total: 62, left: 62, refused: false };
+const iconOf = (ic) => ic === "channel" ? { url: AVATAR } : ic === "parent" ? { emoji: "📚" } : !ic || ic === "none" ? null : { emoji: ic };
+const row = (source_id, title, adopted, more = {}) => ({ source_id, title, delivery: "NOT_STARTED", queued: [], running: null, library: null, can_replace: false,
+  adopted: adopted ? { run_id: `${source_id}-v${adopted}`, version: adopted, pinned: false } : null, ...more });
+// 定稿单: seven samples on whichever version they last finished, as a channel has them after a few rounds of tuning
+const lockPreview = (id) => {
+  const pb = PBS.find((x) => x.id === id) || PBS[0];
+  return {
+    channel: { id: "mock", name: "模拟频道", stage: "TUNING" }, playbook: { id: pb.id, version: pb.version, status: pb.status }, tested: true,
+    candidates: PBS.map((x) => ({ id: x.id, version: x.version, status: x.status, tested: true })), conflicts: [],
+    samples: [
+      row("s1", "谈谈债务问题（模拟）", 3), row("s2", "只跑过一版的样片（模拟）", 3), row("s3", "地方隐性债务的来龙去脉", 3),
+      row("s4", "与九十年代日本的对照", 2), row("s5", "家庭资产负债表与消费意愿", 2),
+      row("s6", "内需与购买力平价：外贸顺差为什么还在扩大", 1, { library: { url: "https://example.com", title: "内需与购买力平价", owned: true }, can_replace: true }),
+      row("s7", "周期判断与政策底", 1),
+    ],
+    target: { configured: true, title: "模拟知识库", test_copy: false }, ingest: { available: true, enabled: true, min_minutes: 15 }, library_checked: true,
+    missed: [{ id: "m1", title: "调试期间发的一期", published: "2026-11-03T09:00:00+00:00", duration: 3200 }, { id: "m2", title: "调试期间发的另一期", published: "2026-11-04T09:00:00+00:00", duration: 2800 }],
+  };
+};
 const annotations = (id) => {
   const p = PBS.find((x) => x.id === id) || PBS[0];
   return { playbook: { id: p.id, version: p.version, status: p.status, origin: p.origin }, prompt: { id: p.id, version: p.version, note: null, text: "保留逻辑衔接。\n术语第一次出现时给出解释。" }, has_provenance: true, has_labels: true,
@@ -116,8 +138,14 @@ function api(url, body) {
   if (p === "/api/channels") return { channels: [CHANNEL], universal: null, decisions: [] };
   if (p === "/api/status") return { alerts: [], running: [], queue: [], counts: {} };
   if (p === "/api/channels/mock/workbench") return WB;
+  if (p === "/api/channels/mock/notion" && body) { notion.config = { ...notion.config, template: body.template, heading: body.heading, icon: body.icon }; return notion; }
   if (p === "/api/channels/mock/notion") return notion;
-  if (p === "/api/channels/mock/notion/preview") return UNITS[body?.run_id] ? preview(body.run_id) : { configured: true, empty: true };
+  if (p === "/api/channels/mock/avatar") {  // once saved, the worker brings the pages up to it a batch at a time
+    if (notion.config.icon === "channel") notion.avatar.left = Math.max(0, notion.avatar.left - 20);
+    return notion.avatar;
+  }
+  if (p === "/api/channels/mock/lock-preview") return lockPreview(Number(url.searchParams.get("playbook_id")));
+  if (p === "/api/channels/mock/notion/preview") return UNITS[body?.run_id] ? { ...preview(body.run_id), icon: iconOf(body.config?.icon ?? body.icon ?? notion.config.icon) } : { configured: true, empty: true };
   if (p === "/api/compare") return compare(url.searchParams.get("a"), url.searchParams.get("b"));
   if (m(/^\/api\/playbooks\/(\d+)\/annotations$/)) return annotations(Number(m(/(\d+)/)[1]));
   if (m(/^\/api\/sources\/([^/]+)$/)) return detail(decodeURIComponent(m(/^\/api\/sources\/([^/]+)$/)[1]), url.searchParams.get("run"));

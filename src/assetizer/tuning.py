@@ -13,7 +13,7 @@ from . import db
 from .util import now
 
 ACTIVE_RUN = ("QUEUED", "RUNNING", "WAITING", "INTERRUPTED")
-LOCK_ACTIONS = ("write", "keep", "replace", "wait")
+LOCK_ACTIONS = ("write", "keep", "replace", "wait", "rerun")
 # seconds of work per minute of video, by stage (ETA of a running issue; a first guess before a channel has history)
 STAGE_COST = {"RESOLVE": 0.1, "PLAYBOOK": 0, "ACQUIRE": 3, "CHUNK": 0.3, "UNDERSTAND": 12, "MERGE": 2, "KNOWLEDGE": 8,
               "ARTICLE": 8, "SELECT": 1, "SCREENSHOTS": 0.5, "BOUNDARY": 14, "CLIPS": 30, "SUBTITLES": 10, "MEDIA_QA": 2,
@@ -353,7 +353,7 @@ def adopt(source_id: str, run_id: str | None = None, pinned: bool = True) -> dic
         from .notion.mapping import run_headline
         db.exec("""UPDATE sources SET current_run_id=?, headline=?, delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END,
                    delivery_reason=NULL, updated_at=? WHERE id=?""", target, run_headline(target), now(), source_id)
-    db.exec("UPDATE sources SET adopt_pinned=? WHERE id=?", int(pinned), source_id)
+    db.exec("UPDATE sources SET adopt_pinned=?, lock_pinned=0 WHERE id=?", int(pinned), source_id)
     return {"run_id": target, "pinned": pinned}
 
 
@@ -379,7 +379,7 @@ def confirm(playbook_id: int, clear_pins: bool = True, intake: bool = True) -> d
     if ch:
         db.exec("UPDATE channels SET stage='LOCKED', updated_at=? WHERE id=?", now(), ch["id"])
         if clear_pins:  # pins only matter while tuning: after 定稿 a rerun replaces the issue as usual
-            db.exec("UPDATE sources SET adopt_pinned=0 WHERE id IN (SELECT source_id FROM samples WHERE channel_id=?)", ch["id"])
+            db.exec("UPDATE sources SET adopt_pinned=0, lock_pinned=0 WHERE id IN (SELECT source_id FROM samples WHERE channel_id=?)", ch["id"])
         if intake and ch["mode"] == "TRACKED" and ch["youtube_channel_id"]:
             set_enabled(ch["id"], True)
     return {"ok": True}
@@ -432,9 +432,12 @@ def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None,
     keep    → the library already has it: 已登记, nothing written
     replace → rewrite the page Assetizer wrote before (pages the user made themselves are never replaced)
     wait    → hold delivery until the run still in progress ends; if it fails, deliver the adopted version
+    rerun   → like wait, on a run of this version queued here. A pinned version is not rerun, a video with another version
+              under way cannot be (one active run per video): both refused. This version under way already: waits for it
 
     ``backfill``: videos the channel posted while intake was paused for tuning, lined up for 补录 (a11)."""
     from .ingest import enqueue_backfill, set_enabled
+    from .pipeline.runner import submit
     ch = db.one("SELECT * FROM channels WHERE id=?", channel_id)
     if not ch or ch["stage"] != "TUNING":
         raise ValueError("频道不在调试中")
@@ -455,30 +458,50 @@ def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None,
         if act == "replace" and not s.get("notion_page_id"):
             raise LockRefused(f"「{name}」库里那一页不是课代表写的，只能保留")
         run_id = None
+        live = db.one(f"SELECT id, playbook_id FROM runs WHERE source_id=? AND production IN {ACTIVE_RUN} ORDER BY created_at DESC LIMIT 1", sid)
+        if act == "rerun":
+            if s["adopt_pinned"] and s["current_run_id"]:
+                raise LockRefused(f"「{name}」钉住了版本，不重跑；要重跑先改回跟随最新完成")
+            if live and live["playbook_id"] != playbook_id:
+                raise LockRefused(f"「{name}」还有别的版本在跑，跑完才能重跑")
+            cur = db.one("SELECT playbook_id FROM runs WHERE id=?", s["current_run_id"])
+            if live:
+                act = "wait"  # this version is under way already: not a second run
+            elif cur and cur["playbook_id"] == playbook_id:
+                act = "write"  # adopted since the sheet was opened: nothing to run
         if act == "wait":
-            r = db.one(f"SELECT id FROM runs WHERE source_id=? AND production IN {ACTIVE_RUN} ORDER BY created_at DESC LIMIT 1", sid)
-            if not r:
+            if not live:
                 raise LockRefused(f"「{name}」没有还在跑的版本可等")
-            run_id = r["id"]
-        plan[sid] = {"action": act, "run_id": run_id}
+            run_id = live["id"]
+        plan[sid] = {"action": act, "run_id": run_id, "name": name}
     counts = dict.fromkeys(LOCK_ACTIONS, 0)
     with db.tx():
+        if db.one("SELECT stage FROM channels WHERE id=?", channel_id)["stage"] != "TUNING":  # two tabs: no second set of reruns
+            raise ValueError("频道不在调试中")
         confirm(playbook_id, clear_pins=False, intake=False)
         # trials still waiting in line belong to tuning: cancel them now, so a later 回到调试期 does not revive them
         db.exec("UPDATE trial_queue SET status='CANCELLED' WHERE channel_id=? AND status='PENDING'", channel_id)
         for sid in samples:
             d = plan.get(sid, {"action": "write"})
             counts[d["action"]] += 1
-            if d["action"] == "wait":
-                db.exec("""UPDATE sources SET deliver_after_run=?, delivery='HELD', delivery_reason=?, adopt_pinned=0, updated_at=?
+            if d["action"] == "rerun":
+                # not through trial_queue, which is for channels in tuning: the worker takes any queued run
+                r = submit(f"https://www.youtube.com/watch?v={sid}", playbook_id=playbook_id, origin="lock")
+                if r["existing"]:  # one was dispatched since the checks above
+                    raise LockRefused(f"「{d['name']}」刚开始了另一次运行，请重新打开定稿单")
+                d = {**d, "run_id": r["run_id"]}
+            if d["action"] in ("wait", "rerun"):
+                # what goes into Notion hangs on this run now: its failure is reported like a production's, not a trial's
+                db.exec("UPDATE runs SET origin='lock' WHERE id=? AND COALESCE(origin, '')!='backfill'", d["run_id"])
+                db.exec("""UPDATE sources SET deliver_after_run=?, delivery='HELD', delivery_reason=?, adopt_pinned=0, lock_pinned=0, updated_at=?
                            WHERE id=?""", d["run_id"], f"等 {d['run_id']} 跑完", now(), sid)
             elif d["action"] == "keep":
-                db.exec("""UPDATE sources SET delivery='REGISTERED', delivery_reason='库里已有，定稿时选择保留', adopt_pinned=1, updated_at=?
+                db.exec("""UPDATE sources SET delivery='REGISTERED', delivery_reason='库里已有，定稿时选择保留', adopt_pinned=1, lock_pinned=CASE WHEN adopt_pinned=1 THEN lock_pinned ELSE 1 END, updated_at=?
                            WHERE id=?""", now(), sid)
             elif d["action"] == "replace":
-                db.exec("UPDATE sources SET delivery='STALE', delivery_reason=NULL, adopt_pinned=1, updated_at=? WHERE id=?", now(), sid)
+                db.exec("UPDATE sources SET delivery='STALE', delivery_reason=NULL, adopt_pinned=1, lock_pinned=CASE WHEN adopt_pinned=1 THEN lock_pinned ELSE 1 END, updated_at=? WHERE id=?", now(), sid)
             else:  # 写入: only where nothing is written yet; a page already there is replaced only when chosen (replace)
-                db.exec("""UPDATE sources SET adopt_pinned=1, delivery=CASE WHEN delivery='STALE' AND notion_page_id IS NOT NULL
+                db.exec("""UPDATE sources SET adopt_pinned=1, lock_pinned=CASE WHEN adopt_pinned=1 THEN lock_pinned ELSE 1 END, delivery=CASE WHEN delivery='STALE' AND notion_page_id IS NOT NULL
                            THEN 'DELIVERED' ELSE delivery END WHERE id=?""", sid)
         ing = None
         if ch["mode"] == "TRACKED" and ch["youtube_channel_id"]:
@@ -487,15 +510,20 @@ def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None,
     back = enqueue_backfill(channel_id, backfill)["queued"] if backfill else 0
     v = db.one("SELECT version FROM playbooks WHERE id=?", playbook_id)["version"]
     db.event("tuning", f"{ch['name']} 定稿 v{v}：写入 {counts['write'] + counts['replace']} 期，保留 {counts['keep']} 期，"
-             f"等待 {counts['wait']} 期" + (f"，补录调试期间发的 {back} 期" if back else ""))
+             f"等待 {counts['wait']} 期，重跑 {counts['rerun']} 期" + (f"，补录调试期间发的 {back} 期" if back else ""))
     return {"stage": "LOCKED", "version": v, "write": counts["write"] + counts["replace"], "keep": counts["keep"],
-            "wait": counts["wait"], "ingest": ing, "backfill": back}
+            "wait": counts["wait"], "rerun": counts["rerun"], "ingest": ing, "backfill": back}
 
 
 def release_hold(run_id: str) -> None:
-    """The run a 定稿 was waiting for ended without finishing: deliver the version adopted before."""
+    """The run a 定稿 was waiting for ended without finishing: deliver the version adopted before, and say so."""
+    held = db.q("SELECT current_run_id FROM sources WHERE deliver_after_run=? AND delivery='HELD'", run_id)
     db.exec("""UPDATE sources SET deliver_after_run=NULL, delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END,
                delivery_reason=NULL, updated_at=? WHERE deliver_after_run=? AND delivery='HELD'""", now(), run_id)
+    for s in held:
+        pb = db.one("SELECT p.version FROM runs r JOIN playbooks p ON p.id=r.playbook_id WHERE r.id=?", s["current_run_id"])
+        db.event("run", f"定稿等的这次运行没跑成，改写之前采用的 v{pb['version']}" if pb else "定稿等的这次运行没跑成，这一期没有可写的版本",
+                 run_id, "warn")
 
 
 def retune(channel_id: str) -> dict:
@@ -507,6 +535,7 @@ def retune(channel_id: str) -> dict:
     db.exec("UPDATE channels SET stage='TUNING', updated_at=? WHERE id=?", now(), channel_id)
     db.exec("""UPDATE sources SET deliver_after_run=NULL, delivery=CASE WHEN notion_page_id IS NULL THEN 'NOT_STARTED' ELSE 'STALE' END,
                delivery_reason=NULL WHERE channel_id=? AND delivery='HELD'""", channel_id)
+    db.exec("UPDATE sources SET adopt_pinned=0, lock_pinned=0 WHERE channel_id=? AND lock_pinned=1", channel_id)  # 定稿's: the user's stay
     cfg = db.setting(f"ingest:{channel_id}") or {}
     if cfg.get("enabled"):
         set_enabled(channel_id, False)

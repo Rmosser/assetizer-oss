@@ -40,6 +40,7 @@ try {
     });
     assert.equal(reset.status(), 200);
     await page.goto(`${url}/engine`);
+    await page.getByRole("region", { name: "系统" }).getByRole("button", { name: /^YouTube/ }).click();
     await page.getByRole("button", { name: "配置 CookieCloud", exact: true }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabel("App Token", { exact: true }).fill(token);

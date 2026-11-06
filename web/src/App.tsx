@@ -201,7 +201,7 @@ export default function App() {
     return () => removeEventListener("az:paste", on);
   }, []);
   const decisions = data?.decisions ?? 0;
-  const alerts = data?.alerts?.length ?? 0;
+  const alerts = (data?.alerts ?? []).filter((a: any) => a.severity !== "info").length;
   const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : "issues";
 
   useEffect(() => {

@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { get } from "../../api";
+import { usePoll } from "../../hooks";
 import { Fold } from "../Fold";
 import { hm, Icon, minRule, nextScan, Seg, short, Stepper, Switch, TYPE_ICON, useNarrow } from "./bits";
 import { draftOf, type Mode } from "./Header";
 import { keys } from "./lit";
 import { Opt } from "./NotionPane";
-import type { Annotations, Channel, Draft, Mapping, NotionRow, NotionView, Playbook, Preview } from "./types";
+import type { Annotations, AvatarState, Channel, Draft, Mapping, NotionRow, NotionView, Playbook, Preview } from "./types";
 
 /** Which YouTube field a value comes from: the key that ties a setting to the source pane. */
 export const FIELD_OF_SOURCE: Record<string, string> = {
@@ -376,10 +377,21 @@ export function PropsCard({ view, cfg, setProp, preview, titles, addTitles, test
 const SKEL: Record<string, string[]> = { chapters: ["v", "d", "h", "", "s", "q", "h"], "reading-guide": ["s", "h1", "q", "h", "v", "", "t"], default: ["c", "h", "v", "", "s", "h", "v"] };
 const TPL_LABEL: Record<string, string> = { chapters: "章节 + 原话参考", "reading-guide": "读图学习导航", default: "通用" };
 
-export function StructureCard({ view, cfg, update, ctx }: { view: NotionView; cfg: Draft; update: (p: Partial<Draft>) => void; ctx: Record<string, string> }) {
+/** What choosing the avatar does to the pages already there; nothing to say once they all carry it. */
+function AvatarNote({ cid, at, saved }: { cid: string; at?: AvatarState; saved: boolean }) {
+  const live = usePoll<AvatarState>(`/api/channels/${encodeURIComponent(cid)}/avatar`, 20000).data ?? at;
+  if (!live) return null;
+  const say = live.refused ? "Notion 不接受这个头像" : !live.url ? "还没读到头像，读到就换上"
+    : !live.left ? null : saved ? `换图标中 · 还差 ${live.left} 页` : `保存后 ${live.left} 页换图标`;
+  return say ? <div className={`ch-fld-note${live.refused ? " z" : ""}`}>{say}</div> : null;
+}
+
+export function StructureCard({ cid, view, cfg, update, ctx }: { cid: string; view: NotionView; cfg: Draft; update: (p: Partial<Draft>) => void; ctx: Record<string, string> }) {
   const [editing, setEditing] = useState(false);
+  const [noPic, setNoPic] = useState(false);
+  const pic = view.avatar?.url;
   const parts = (cfg.heading || "").split(/(\{\w+\})/).filter(Boolean);
-  const emoji = !["none", "parent"].includes(cfg.icon);
+  const emoji = !["none", "parent", "channel"].includes(cfg.icon);
   return (
     <Card n="肆" title="页面结构" sum={TPL_LABEL[cfg.template] || view.templates[cfg.template]}>
       <div className="ch-tpls" role="radiogroup" aria-label="正文模板">
@@ -411,10 +423,12 @@ export function StructureCard({ view, cfg, update, ctx }: { view: NotionView; cf
       <div className="ch-fld"><span>页面图标</span>
         <span className="row">
           <Seg small label="页面图标" value={emoji ? "emoji" : cfg.icon} onChange={(v) => update({ icon: v === "emoji" ? "📘" : v })}
-            options={[{ value: "parent", label: "上级页面的" }, { value: "none", label: "不设" }, { value: "emoji", label: "Emoji" }]} />
+            options={[{ value: "channel", label: <>{pic && !noPic && <img className="ch-seg-pic" src={pic} alt="" referrerPolicy="no-referrer" onError={() => setNoPic(true)} />}频道头像</> },
+              { value: "parent", label: "上级页面的" }, { value: "none", label: "不设" }, { value: "emoji", label: "Emoji" }]} />
           {emoji && <input className="ch-input emoji" value={cfg.icon} onChange={(e) => update({ icon: e.target.value || "none" })} aria-label="Emoji" />}
         </span>
       </div>
+      {cfg.icon === "channel" && <AvatarNote cid={cid} at={view.avatar} saved={view.config.icon === "channel"} />}
     </Card>
   );
 }

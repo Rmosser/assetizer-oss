@@ -90,6 +90,21 @@ def _base(s: config.Settings) -> list[str]:
     return cmd
 
 
+def channel_avatar(channel_id: str) -> str | None:
+    """The address of the channel's avatar: its largest square picture (banners are not square). No login needed."""
+    s = config.get()
+    r = subprocess.run(_base(s) + ["--flat-playlist", "--playlist-items", "0", "-J", "--skip-download", "--",
+                                   f"https://www.youtube.com/channel/{channel_id}"],
+                       capture_output=True, text=True, timeout=90)
+    if r.returncode != 0:
+        raise AcquireError(classify(r.stderr), r.stderr.strip()[-300:])
+    pics = json.loads(r.stdout).get("thumbnails") or []
+    square = [t for t in pics if t.get("url") and t.get("width") and t.get("width") == t.get("height")]
+    if square:
+        return max(square, key=lambda t: t["width"])["url"]
+    return next((t["url"] for t in pics if t.get("id") == "avatar_uncropped" and t.get("url")), None)
+
+
 def metadata(url: str) -> dict:
     s = config.get()
     with ytdlp_login() as (auth, how):

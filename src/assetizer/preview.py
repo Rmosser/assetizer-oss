@@ -12,7 +12,7 @@ import re
 import threading
 import time
 
-from . import db
+from . import channel_icons, db
 from .notion import mapping as M
 
 TTL = 60.0
@@ -170,10 +170,13 @@ def body(source: dict, run_id: str, cfg: dict) -> list[dict]:
     return out
 
 
-def icon(n, cfg: dict) -> dict | None:
+def icon(n, cfg: dict, channel_id: str | None = None) -> dict | None:
     ic = cfg.get("icon") or "none"
     if ic == "none":
         return None
+    if ic == "channel":
+        url = channel_icons.kept(channel_id) if channel_id else None
+        return {"url": url} if url else None
     if ic != "parent":
         return {"emoji": ic}
     rel = next((m["value"][0] for m in (cfg.get("properties") or {}).values()
@@ -229,7 +232,7 @@ def build(n, dbo: dict, cfg: dict, channel: dict, source: dict, run_id: str) -> 
         "run_id": run_id,
         "title": title_parts(cfg, schema, ctx),
         "heading": parts(cfg.get("heading") or "", ctx),
-        "icon": icon(n, cfg),
+        "icon": icon(n, cfg, source.get("channel_id")),
         "properties": properties(n, cfg, schema, ctx, probs),
         "problems": probs,
         "warnings": M.warnings(cfg, schema),

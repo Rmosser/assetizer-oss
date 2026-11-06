@@ -104,13 +104,17 @@ def validate(obj: Any, schema: dict) -> None:
 
 
 class LLM:
-    def __init__(self, provider: AgyProvider | None = None, recorder: Recorder | None = None):
+    def __init__(self, provider: AgyProvider | None = None, recorder: Recorder | None = None, session: str | None = None):
         self.fixed = provider  # an explicit provider answers every stage (bench, tests); otherwise `stage_providers` routes
         self.p = provider or providers.get()
         self.recorder = recorder
+        self.session = session
 
     def provider(self, stage: str):
-        return self.fixed or providers.for_stage(stage)
+        p = self.fixed or providers.for_stage(stage)
+        if self.session and hasattr(p, "session"):
+            p.session = self.session
+        return p
 
     def _record(self, stage: str, attempt: str, receipt: dict) -> None:
         if self.recorder:

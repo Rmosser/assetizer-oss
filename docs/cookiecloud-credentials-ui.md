@@ -55,10 +55,15 @@
 | 404 | 入口不开放这个路径，通常是 origin 填错 | `not_found` |
 | 530，Cloudflare 自己的错误页 | 连不上隧道：cloudflared 可能断了 | `tunnel_down` |
 | 502，Cloudflare 自己的错误页 | 隧道在线，连不上只读代理 | `proxy_down` |
+| 503，`payload_recovery_required` | 插件同步正在写入，或数据需要恢复。隔 2、5、10 秒重读，仍失败才报 | `payload_recovery_required` |
 | 其他 5xx，Cloudflare 自己的错误页；连接失败或超时 | 隧道或入口不通 | `unreachable` |
 | 502 / 504 JSON | 盒子上的 CookieCloud 没响应 | `upstream_unavailable`、`upstream_timeout` |
 | 其他 JSON `{error, code, message}` | CookieCloud 本身 | `token_not_found`、`token_revoked`、`missing_scope`、`domain_not_allowed`、`sync_source_not_configured`、`cookie_payload_missing` 等 |
 | 读到了，但没有 YouTube 的 cookie | 课代表自己判断 | `no_youtube_cookies` |
+
+读取失败时，下载和列表先用 `secrets/youtube-cookies-last-good`，这是最后一份读到且带 YouTube 登录的 cookies，明文保存，权限 0600，改 CookieCloud 凭据时删除。没有这份才改用服务器 Chromium。视频测试只用 CookieCloud 现读的 cookies，不用这份。
+
+这段时间机房的灯：用上一份时变黄，写「用上一份 · 多久前」；上一份也被 YouTube 拒绝时变红，写「上一份也失效了」。告警：有上一份且读不到不满 6 小时，不告警；满 6 小时是一条 `info`（不标红，导航不亮「!」）；没有上一份才是 warning。
 
 每个 code 的中文说明在 `cookies.py` 的 `FIX`，面板和告警都用它。
 

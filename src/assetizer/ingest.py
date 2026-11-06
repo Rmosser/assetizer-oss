@@ -3,8 +3,9 @@
 Off by default per channel (`auto_ingest`); when switched on, only videos published
 after that moment are queued — never a backlog — and shorts/live replays shorter
 than the channel's minimum duration are skipped after RESOLVE. Older videos come in
-only when picked on the channel's 看板 (补录), through their own line: one at a time,
-while nothing else waits and the quota has room (design §R6-5).
+only when picked on the channel's 看板 (补录), through their own line: one at a time, or
+side by side in the fast hours set in 机房, while nothing else waits and the quota has
+room (design §R6-5).
 
 The channel is read through yt-dlp's flat listing of its videos and streams tabs (and
 its shorts tab while the minimum lets shorts through), with the YouTube login: members-
@@ -265,37 +266,86 @@ def cancel_backfill(channel_id: str) -> int:
 
 
 def backfill_held() -> str | None:
-    """Which window of the production group has no room beyond what new videos need ("weekly", "5h"), or None: 补录
+    """Which window of the subscriptions in use has no room beyond what new videos need ("weekly", "5h"), or None: 补录
     may go on (unknown or stale quota does not hold it back: a quota that runs out pauses production on its own)."""
     from datetime import timedelta
     from .providers import in_use
-    if not any(p.name == "agy" for p in in_use()):
-        return None
-    q = db.setting("agy_quota") or {}
-    g = next((g for g in q.get("groups") or [] if g["name"] == q.get("production_group")), None)
-    try:
-        fresh = q.get("ok") and datetime.fromisoformat(q["checked_at"]) > datetime.now(timezone.utc) - timedelta(hours=2)
-    except (KeyError, TypeError, ValueError):
-        fresh = False
-    if not (fresh and g):
-        return None
-    left = {b["window"]: b["remaining"] for b in g["buckets"] if not b["disabled"] and b["remaining"] is not None}
+    from .providers.magpie_state import windows_in_use
+    buckets = list(windows_in_use())
+    if any(p.name == "agy" for p in in_use()):
+        q = db.setting("agy_quota") or {}
+        g = next((g for g in q.get("groups") or [] if g["name"] == q.get("production_group")), None)
+        try:
+            fresh = q.get("ok") and datetime.fromisoformat(q["checked_at"]) > datetime.now(timezone.utc) - timedelta(hours=2)
+        except (KeyError, TypeError, ValueError):
+            fresh = False
+        if fresh and g:
+            buckets += g["buckets"]
+    left = [(b["window"], b["remaining"]) for b in buckets if not b.get("disabled") and b.get("remaining") is not None]
     # the share of each window 补录 never dips into: it is for new videos (settings backfill_min_weekly / _5h)
-    if left.get("weekly", 1) < knobs.get("backfill_min_weekly"):
+    if any(w == "weekly" and v < knobs.get("backfill_min_weekly") for w, v in left):
         return "weekly"
-    return "5h" if left.get("5h", 1) < knobs.get("backfill_min_5h") else None
+    return "5h" if any(w == "5h" and v < knobs.get("backfill_min_5h") for w, v in left) else None
+
+
+def backfill_pace() -> dict:
+    """How fast 补录 may go right now: {"slots", "lanes", "fast", "until", "next"}. One at a time, or `lanes` at once
+    (`backfill_fast_slots`, as far as `worker_slots` goes) during the day's fast hours and a 临时高频. `until` is when the
+    fast pace ends (None: not by the clock), `next` when it next starts. Past the end what is running finishes, and no
+    new one starts until it is down to one at a time."""
+    from datetime import timedelta
+    from .notify import TZ
+    burst, hours = knobs.get("backfill_burst"), set(knobs.get("backfill_hours"))
+    t = datetime.now(TZ).replace(minute=0, second=0, microsecond=0)
+    ahead = [t + timedelta(hours=i) for i in range(1, 25)]
+    in_hours = t.hour in hours
+    end = next((x for x in ahead if x.hour not in hours), None) if in_hours else None  # None: all day
+    if burst:
+        until = None if burst["until"] is None or (in_hours and end is None) else (
+            max(datetime.fromisoformat(burst["until"]), end).isoformat() if end else burst["until"])
+    else:
+        until = end.isoformat() if end else None
+    fast = bool(burst) or in_hours
+    start = None if fast else next((x for x in ahead if x.hour in hours), None)
+    lanes = min(knobs.get("backfill_fast_slots"), knobs.get("worker_slots"))
+    return {"slots": lanes if fast else 1, "lanes": lanes, "fast": fast, "until": until, "next": start.isoformat() if start else None}
+
+
+ACTIVE_BACKFILL = "SELECT COUNT(*) n FROM runs WHERE origin='backfill' AND production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')"
+
+
+def backfill_stop() -> str | None:
+    """Why no new 补录 video starts now, a free slot aside: a wait of the kind below, "paused", "queued" (new videos and
+    定稿's reruns first), "trial", "weekly" or "5h" (backfill_held); None when nothing stands in its way."""
+    if db.setting("queue_paused"):
+        return "paused"
+    w = db.one("SELECT wait_reason r FROM runs WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','YOUTUBE_REFUSED','DISK_LOW','YTDLP_OUTDATED')")
+    if w:
+        return w["r"]
+    if db.one("SELECT 1 FROM runs WHERE production='QUEUED' AND COALESCE(origin, '')<>'backfill'"):
+        return "queued"
+    if db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'"):
+        return "trial"
+    return backfill_held()
+
+
+def backfill_view(channel_id: str | None = None) -> dict:
+    """补录 at a glance: what is lined up (the channel's, or all of it), how many are under way on the box, at what pace,
+    and what stands in its way."""
+    where, args = ("AND channel_id=?", (channel_id,)) if channel_id else ("", ())
+    line = db.one(f"SELECT COUNT(*) n, SUM(duration) seconds FROM backfill_queue WHERE status='PENDING' {where}", *args)
+    return {"pending": line["n"], "seconds": line["seconds"] or 0, "active": db.one(ACTIVE_BACKFILL)["n"], **backfill_pace(),
+            "stop": backfill_stop() if line["n"] else None}
 
 
 def dispatch_backfill() -> str | None:
-    """The next 补录 video, once nothing else is queued, no trial waits, no other 补录 run is under way and the quota
-    has room. The worker calls this only with a free slot."""
-    if db.one("SELECT 1 FROM runs WHERE production='QUEUED'") or db.one("SELECT 1 FROM trial_queue WHERE status='PENDING'"):
+    """The next 补录 video, once fewer 补录 runs are under way than the pace allows and nothing stands in its way
+    (backfill_stop). The worker calls this only with a free slot."""
+    if not db.one("SELECT 1 FROM backfill_queue WHERE status='PENDING'"):
         return None
-    if db.one("SELECT 1 FROM runs WHERE origin='backfill' AND production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')"):
+    if db.one("SELECT 1 FROM runs WHERE production='QUEUED'"):  # the worker starts what is queued before the next one is taken
         return None
-    if db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason IN ('YOUTUBE_AUTH','YOUTUBE_REFUSED','DISK_LOW','YTDLP_OUTDATED')"):
-        return None
-    if not db.one("SELECT 1 FROM backfill_queue WHERE status='PENDING'") or backfill_held():
+    if db.one(ACTIVE_BACKFILL)["n"] >= backfill_pace()["slots"] or backfill_stop():
         return None
     for e in db.q("SELECT * FROM backfill_queue WHERE status='PENDING' ORDER BY id"):
         c = db.one("SELECT * FROM channels WHERE id=?", e["channel_id"])

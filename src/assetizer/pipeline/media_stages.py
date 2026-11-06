@@ -295,7 +295,7 @@ def boundary(ctx: RunContext) -> dict:
                                P.BOUNDARY_SCHEMA, media=[str(win)], check=check, enforce=True)
             a, b = w0 + parse_tc(o["start"]), min(w1, w0 + parse_tc(o["end"]))
         except ProviderError as e:
-            if e.kind in ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA"):
+            if e.kind in ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "PROVIDER_MODEL"):
                 raise
             o, src = {"error": e.kind}, "fallback"
         except (ContractError, ffmpeg.MediaError) as e:

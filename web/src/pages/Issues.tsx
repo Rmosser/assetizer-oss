@@ -7,7 +7,7 @@ import { Fold } from "../components/Fold";
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDate, cnDay, cnMonth, cnNum, HELD, parseDay, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
+import { cnDate, cnDay, cnMonth, cnNum, ERRORS, HELD, mergeAlerts, parseDay, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
 
 type Stage = { name: string; label: string; status: string; started_at?: string };
 
@@ -201,7 +201,7 @@ function Dateline({ ready }: { ready: any[] }) {
 /** What needs the reader: system alerts (with what fixes them), videos whose production failed, issues that did not
  *  reach Notion, decisions. */
 function Attention({ data, issues, reload }: { data: any; issues: any[]; reload: () => void }) {
-  const failedRun = (i: any) => !i.tuning && i.production === "FAILED" && i.units == null && i.latest_run;
+  const failedRun = (i: any) => !i.tuning && i.production === "FAILED" && (i.units == null || i.origin === "lock") && i.latest_run;
   const gone = issues.filter((i) => failedRun(i) && UNAVAILABLE[i.error_class]);
   const broke = issues.filter((i) => failedRun(i) && !UNAVAILABLE[i.error_class]);
   const failed = issues.filter((i) => !i.tuning && i.delivery === "FAILED");
@@ -220,16 +220,18 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
     && !mapping.length && !data.decisions.length) return null;
   return (
     <section className="attn" aria-label="需要你">
-      {data.alerts.map((a: any) => {
+      {mergeAlerts(data.alerts).map((a: any) => {
         const act: [string, () => void] | null = agyAlert(a) ? ["登录 agy", openAgyLogin] : null;
+        const login = a.key === "cookiecloud" || a.key === "YOUTUBE_AUTH";
         return (
-          <div className="attn-row bad" key={a.key} role="alert">
+          <div className={`attn-row${a.severity === "info" ? "" : " bad"}`} key={a.key} role={a.severity === "info" ? "status" : "alert"}>
             <span className="mark" aria-hidden />
             <div className="attn-t">
               <h4>{a.title}</h4>
               {!act && <p>{(a.body || "").split(/`([^`]+)`/).map((part: string, i: number) => (i % 2 ? <code key={i}>{part}</code> : typeset(part)))}</p>}
             </div>
-            {act ? <button className="btn zhu" onClick={act[1]}>{act[0]}</button> : <a className="btn sm" {...linkProps("/engine")}>去机房</a>}
+            {act ? <button className="btn zhu" onClick={act[1]}>{act[0]}</button>
+              : <a className="btn sm" {...linkProps(login ? "/engine#cc" : "/engine")}>{login ? "配置与测试" : "去机房"}</a>}
           </div>
         );
       })}
@@ -241,6 +243,7 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
             <ul className="attn-list">
               {broke.slice(0, 3).map((i) => (
                 <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+                  {ERRORS[i.error_class] && <span className="muted">{ERRORS[i.error_class]}</span>}
                   <button className="btn sm" disabled={busy === i.id}
                     onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button></li>
               ))}

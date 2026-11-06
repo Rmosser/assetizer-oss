@@ -3,7 +3,7 @@
 A channel's config lives in the setting ``notion:{channel_id}``::
 
     {"database_id": "...", "template": "reading-guide", "heading": "{channel} - {date} …",
-     "icon": "parent" | "none" | "<emoji>",
+     "icon": "parent" | "channel" | "none" | "<emoji>",
      "properties": {"<property id>": {"name": "内容所属", "type": "select", "source": "fixed", "value": "@交易员汤姆",
                                       "option_ids": {"@交易员汤姆": "<option id>"}}}}
 
@@ -66,7 +66,7 @@ PRESETS: dict[str, dict] = {
                     "Re-上级 项目": ("fixed", "$parent"), "AI 摘要": ("key_levels", None), "视频链接|参考链接": ("video_url", None)},
     },
     "wang-haibin": {
-        "template": "chapters", "heading": "", "icon": "none",
+        "template": "chapters", "heading": "", "icon": "channel",
         "by_name": {"Name": ("template", "{video_title}"), "内容所属": ("fixed", "王海滨"),
                     "会员/公开": ("access", None), "内容发布日期": ("published_datetime", None),
                     "Re-上级 项目": ("fixed", "$parent"), "视频链接|参考链接": ("video_url", None)},
@@ -104,7 +104,7 @@ def norm_id(s: str) -> str:
 
 def preset(channel_id: str, database_id: str, schema: dict, parent: str | None) -> dict:
     """Build a config from PRESETS against the live schema (names → ids)."""
-    p = PRESETS.get(channel_id, {"template": "default", "heading": "", "icon": "none", "by_name": {}})
+    p = PRESETS.get(channel_id, {"template": "default", "heading": "", "icon": "channel", "by_name": {}})
     by_name = {v["name"]: (pid, v) for pid, v in schema.items()}
     props = {}
     for names, (source, value) in p["by_name"].items():

@@ -116,6 +116,14 @@ def _run_view(r: dict | None) -> dict | None:
 NOT_SAMPLE = "NOT (COALESCE(c.stage, '') = 'TUNING' AND s.delivery NOT IN ('DELIVERED','REGISTERED'))"
 
 
+def _error_class(run: dict) -> str | None:
+    """The run's error class. A model's safety filter reads as its own class: unlike its other failures, it is unlikely
+    to go away by trying again."""
+    if run["error_class"] == "PROVIDER_FAILURE" and "safety filter" in (run["error"] or "").lower():
+        return "CONTENT_SAFETY"
+    return run["error_class"]
+
+
 def _issues(where: str = "1=1", *args) -> list[dict]:
     """The issues (sources ``s``, oldest first) that match ``where``, for the caller to number: a few queries over all of
     them rather than a round per issue (2000 issues took 13,923 queries for one look at the 刊, a19)."""
@@ -153,7 +161,7 @@ def _issues(where: str = "1=1", *args) -> list[dict]:
             "units": summ.get("units"), "must": len(must), "notes": notes.get((s["id"], rid), 0), "cover": covers.get(rid),
             "clips": sum(v for k, v in (summ.get("assets") or {}).items() if k == "clip:GENERATED"), "musts": must[:3],
             "production": last["production"] if last else None, "stage": last["stage"] if last else None,
-            "error_class": last["error_class"] if last else None,
+            "error_class": _error_class(last) if last else None, "origin": last["origin"] if last else None,
             # 库里可能已有 (a05), 旧页上有你的改动 (a07): what the 刊 asks about
             "maybe": db.setting(f"maybe_have:{s['id']}") if s.get("delivery_reason") == "MAYBE_HAVE" else None,
             "yours": db.setting(f"yours_on_page:{s['id']}") if s.get("delivery_reason") == "YOURS_ON_PAGE" else None,
@@ -368,6 +376,7 @@ def _compile_state(cid: str, prompt: dict | None, pbs: list[dict]) -> dict | Non
 @app.get("/api/channels")
 def channels():
     from ..ingest import EVERY, next_round
+    from .. import channel_icons
     from ..notion import mapping as M
     out = []
     pending = {d["ref"]: d for d in db.q("SELECT * FROM decisions WHERE resolved_at IS NULL AND kind='CONFIRM_PLAYBOOK'")}
@@ -381,7 +390,7 @@ def channels():
                          WHERE r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')""", c["id"])["n"]
         held = db.one("""SELECT SUM(delivery='BLOCKED' AND delivery_reason LIKE 'NOTION_MAPPING%') blocked, SUM(delivery='HELD') held
                          FROM sources WHERE channel_id=?""", c["id"])
-        out.append({**c, "playbooks": pbs, "prompts": prompts, "sources": stats["n"], "last_source": stats["last"],
+        out.append({**c, "avatar": channel_icons.kept(c["id"]), "playbooks": pbs, "prompts": prompts, "sources": stats["n"], "last_source": stats["last"],
                     "ingest": {**(db.setting(f"ingest:{c['id']}") or {"enabled": False}), "every_minutes": EVERY // 60, "next_at": next_round()},
                     "blocked": held["blocked"] or 0, "held": held["held"] or 0,
                     "notion": {"configured": bool(ncfg.get("database_id")), "database_title": ncfg.get("database_title"),
@@ -452,16 +461,18 @@ def _dir_sizes(s) -> dict:
 
 
 def _providers() -> dict:
-    from ..providers import in_use
-    return {"default": db.setting("llm_provider") or "agy", "stages": db.setting("stage_providers") or {},
-            "in_use": [p.name for p in in_use()]}
+    from ..providers import in_use, resolve
+    return {"default": resolve(knobs.get("llm_provider")), "stages": {k: resolve(v) for k, v in knobs.get("stage_providers").items()},
+            "in_use": list(dict.fromkeys(p.name for p in in_use()))}
 
 
 @app.get("/api/engine")
 def engine():
+    from .. import ingest
     from ..pipeline.runner import worker_slots
-    from ..providers.magpie import quota_view
+    from ..providers import magpie_state
     s = config.get()
+    magpie_state.read_if_stale()
     du = shutil.disk_usage(s.home)
     runs = [_run_view(r) for r in db.q("SELECT * FROM runs ORDER BY created_at DESC LIMIT 30")]
     for r in runs:
@@ -474,13 +485,13 @@ def engine():
     return {
         "disk": {"total": du.total, "free": du.free, **_dir_sizes(s)},
         "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model,
-        "quota": {"agy": db.setting("agy_quota"), "agy_log": db.setting("agy_quota_log") or [],
-                  "magpie": quota_view(db.setting("magpie_quota"))},
+        "quota": {"agy": db.setting("agy_quota"), "agy_log": db.setting("agy_quota_log") or []},
+        "magpie": magpie_state.view(),
         "providers": _providers(), "slots": worker_slots(), "drain_seconds": _drain(),
         "counts": {k: counts[k] or 0 for k in ("running", "queued", "waiting")},
         "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
                    "parent": db.setting("notion_parent_page_id"), "title": db.setting("notion_database_title", "课代表")},
-        "knobs": knobs.view(), "asr": _asr_view(), "telegram": _telegram_view(),
+        "knobs": knobs.view(), "backfill": ingest.backfill_view(), "asr": _asr_view(), "telegram": _telegram_view(),
         "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
                     "profile_ok": bool(s.browser_profile and s.browser_profile.exists()), **_cookie_status()},
         "paused": db.setting("queue_paused"),
@@ -492,16 +503,20 @@ def engine():
 
 
 def _family(model: str | None) -> str:
-    """Which subscription a model call drew on, by its model id: Gemini (agy, or the 兔子 gateway) or ChatGPT (magpie)."""
+    """Which subscription a model call drew on, by its model id: Gemini (agy, or the 兔子 gateway), or magpie's."""
     m = (model or "").lower()
-    return "gemini" if "gemini" in m else "chatgpt" if "gpt" in m or m.startswith("codex") else "other"
+    if "gemini" in m:
+        return "gemini"
+    if "gpt" in m or m.startswith("codex"):
+        return "chatgpt"
+    return next((k for k in ("claude", "grok") if k in m), "other")
 
 
 @app.get("/api/engine/stats")
 def engine_stats():
     """How production went over the last 7 and 30 days, with a bar per day: issues done and failed, hours of video,
     the median time from intake to Notion, what failed most, the median minutes per hour of video of each stage, and
-    the model calls by subscription (Gemini / ChatGPT) with where Gemini's tokens went (its quota is the bottleneck).
+    the model calls by subscription (Gemini, ChatGPT, …) with where each one's tokens went (Gemini's quota is the bottleneck).
     Days are the server's local time (TZ=Asia/Shanghai in the package). Imported and experiment runs are left out; a
     run's stages are counted without TRANSCRIBE (it runs in the background) and CLEANUP."""
     from datetime import datetime, timedelta, timezone
@@ -521,7 +536,7 @@ def engine_stats():
 
     def blank() -> dict:
         return {"done": 0, "partial": 0, "failed": 0, "video_seconds": 0.0, "reasons": {}, "latency": [], "per_hour": {},
-                "calls": {"n": 0, "failed": 0, "wall": 0.0, "tokens": 0, "by_family": {}, "gemini_by_stage": {}}}
+                "calls": {"n": 0, "failed": 0, "wall": 0.0, "tokens": 0, "by_family": {}, "by_stage": {}}}
     win = {k: blank() for k in cuts}
     kinds = "r.kind NOT IN ('IMPORT','EXPERIMENT')"
 
@@ -579,45 +594,43 @@ def engine_stats():
             f["n"] += 1
             f["tokens"] += tok
             f["wall"] += c["wall_seconds"] or 0
-            if fam == "gemini":
-                k = stage_key(c["stage"] or "?")
-                m["gemini_by_stage"][k] = m["gemini_by_stage"].get(k, 0) + tok
+            stages_of = m["by_stage"].setdefault(fam, {})
+            k = stage_key(c["stage"] or "?")
+            stages_of[k] = stages_of.get(k, 0) + tok
     for v in win.values():
         v["reasons"] = sorted(({"kind": k, "n": n} for k, n in v["reasons"].items()), key=lambda x: -x["n"])[:3]
         v["latency_median"] = round(median(v["latency"])) if v["latency"] else None
         del v["latency"]
         v["per_hour"] = sorted(({"name": n, "label": STAGE_LABELS.get(n, n), "minutes": round(median(x), 1)}
                                 for n, x in v["per_hour"].items()), key=lambda x: -x["minutes"])
-        g = v["calls"]["gemini_by_stage"]
-        total = sum(g.values()) or 1
-        v["calls"]["gemini_by_stage"] = sorted(({"key": k, "tokens": n, "share": n / total} for k, n in g.items()),
-                                               key=lambda x: -x["tokens"])
+        for fam, g in v["calls"]["by_stage"].items():
+            total = sum(g.values()) or 1
+            v["calls"]["by_stage"][fam] = sorted(({"key": k, "tokens": n, "share": n / total} for k, n in g.items()),
+                                                 key=lambda x: -x["tokens"])
     return {"now": now_l.isoformat(timespec="seconds"), "windows": win, "days": [bars[k] for k in days],
-            "runway": _runway()}
+            "runway": _runway(), "runways": _sub_runways()}
 
 
 RUNWAY_MIN_DONE = 3  # issues finished over the readings before the quota's use per issue is told
 
 
-def _runway() -> dict | None:
-    """How many more issues the production group's weekly quota holds, roughly: the share of it used over the last week's
-    readings, divided by the issues finished over them. A rise of more than 10 points is the week's reset; smaller ones
-    are the reading wavering, not quota coming back. Runs still under way, trials and compiling (and agy used elsewhere)
-    also draw on it, so it is told only once a few issues were finished, and reads as an estimate."""
-    q = db.setting("agy_quota") or {}
-    g = next((g for g in q.get("groups") or [] if g["name"] == q.get("production_group")), None)
-    week = next((b for b in (g or {}).get("buckets", []) if b["window"] == "weekly" and not b["disabled"]), None)
+def _runway_of(log: list, week: dict | None) -> dict | None:
+    """How many more issues a weekly window holds, roughly: the share of it used over the last week's readings
+    (log: [time, left], oldest first), divided by the issues finished over them. A rise of more than 10 points is the
+    week's reset; smaller ones are the reading wavering, not quota coming back. Runs still under way, trials and
+    compiling (and the subscription used elsewhere) also draw on it, so it is told only once a few issues were finished,
+    and reads as an estimate."""
     from datetime import datetime, timedelta, timezone
     cut = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
-    log = [x for x in db.setting("agy_quota_log") or [] if x[2] is not None and x[0] >= cut]
+    log = [x for x in log if x[1] is not None and x[0] >= cut]
     if not week or week["remaining"] is None or len(log) < 2:
         return None
     done = db.one("""SELECT COUNT(*) n FROM runs WHERE finished_at >= ? AND production IN ('COMPLETE','COMPLETE_PARTIAL')
                      AND kind NOT IN ('IMPORT','EXPERIMENT')""", log[0][0])["n"]
     if done < RUNWAY_MIN_DONE:
         return None
-    used, top, low = 0.0, log[0][2], log[0][2]
-    for _, _, v in log[1:]:
+    used, top, low = 0.0, log[0][1], log[0][1]
+    for _, v in log[1:]:
         if v > low + 0.1:  # the week's reset: what was used before it is counted
             used += top - low
             top = low = v
@@ -628,6 +641,25 @@ def _runway() -> dict | None:
         return None
     per = used / done
     return {"per_issue": per, "issues": int(week["remaining"] / per), "remaining": week["remaining"], "reset_at": week["reset_at"]}
+
+
+def _runway() -> dict | None:
+    """约够印 N 期 for the production group's weekly quota on agy."""
+    q = db.setting("agy_quota") or {}
+    g = next((g for g in q.get("groups") or [] if g["name"] == q.get("production_group")), None)
+    week = next((b for b in (g or {}).get("buckets", []) if b["window"] == "weekly" and not b["disabled"]), None)
+    return _runway_of([[x[0], x[2]] for x in db.setting("agy_quota_log") or []], week)
+
+
+def _sub_runways() -> dict:
+    """约够印 N 期 for each of magpie's subscriptions, by provider and account, from magpie's own readings of its week."""
+    from ..providers.magpie_state import sub_id
+    out = {}
+    for s in (db.setting("magpie_state") or {}).get("subs") or []:
+        week = next((w for w in s.get("windows") or [] if w["window"] == "weekly"), None)
+        if r := _runway_of(s.get("trend") or [], week):
+            out[sub_id(s)] = r
+    return out
 
 
 @app.get("/api/runs/{rid}")
@@ -1073,24 +1105,30 @@ def _tracked(cid: str, locked: bool = False) -> dict:
 @app.get("/api/channels/{cid}/board")
 def channel_board(cid: str):
     """The 看板 of one channel: its stats, intake settings with the last scans, and every issue it has."""
-    from ..ingest import EVERY, backfill_held, next_round
+    from ..ingest import EVERY, backfill_view, next_round
     if not db.one("SELECT id FROM channels WHERE id=?", cid):
         raise HTTPException(404)
     issues = _issues("s.channel_id=?", cid)
     for i, it in enumerate(issues):
         it["no"] = i + 1
-    line = db.one("""SELECT COUNT(*) n, SUM(duration) seconds FROM backfill_queue WHERE channel_id=? AND status='PENDING'""", cid)
-    now_run = db.one("""SELECT r.id, r.production, r.wait_reason, s.title FROM runs r JOIN sources s ON s.id=r.source_id
-                        WHERE s.channel_id=? AND r.origin='backfill' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')""", cid)
+    under_way = db.q("""SELECT r.id, r.production, r.wait_reason, s.title FROM runs r JOIN sources s ON s.id=r.source_id
+                        WHERE s.channel_id=? AND r.origin='backfill' AND r.production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')
+                        ORDER BY r.started_at IS NULL, r.started_at, r.created_at""", cid)
     from ..tuning import minutes_per_video_minute
     return JSONResponse({"stats": _channel_stats(cid), "issues": list(reversed(issues)),
             "ingest": {**(db.setting(f"ingest:{cid}") or {"enabled": False}), "every_minutes": EVERY // 60, "next_at": next_round(),
                        "scanning": cid in _scanning},
-            # held: the window ("weekly", "5h") that holds the waiting 补录 back
-            "backfill": {"pending": line["n"], "seconds": line["seconds"] or 0, "running": now_run,
-                         "held": backfill_held() if line["n"] else None},
+            "backfill": {**backfill_view(cid), "running": under_way},
             # for the 补录 sheet's estimate: minutes of production per minute of video here, and the weekly quota an issue takes
             "pace": minutes_per_video_minute(cid), "runway": _runway()})  # plain JSON: as it is (a19)
+
+
+@app.get("/api/channels/{cid}/avatar")
+def channel_avatar(cid: str):
+    """The channel's avatar and how far its pages are, without asking Notion (the settings page polls it)."""
+    from .. import channel_icons
+    from ..notion import mapping as M
+    return channel_icons.state(cid, M.get(cid))
 
 
 @app.post("/api/channels/{cid}/scan")
@@ -1540,6 +1578,7 @@ def _database(n, database_id: str, cached: bool = False) -> dict:
 
 
 def _notion_view(cid: str, cfg: dict) -> dict:
+    from .. import channel_icons
     from ..notion import mapping as M
     from ..notion.client import NotionError
     n = _notion()
@@ -1563,6 +1602,7 @@ def _notion_view(cid: str, cfg: dict) -> dict:
                     titles[pid] = None
     return {"database": {"id": dbo["id"], "url": dbo.get("url"), "title": "".join(t.get("plain_text", "") for t in dbo.get("title", []))},
             "rev": (M.get(cid) or {}).get("rev") or 0,  # what a save is checked against (a12)
+            "avatar": channel_icons.state(cid, cfg),
             "test_copy": M.test_copy(cfg, title),
             "config": {k: cfg.get(k) for k in ("template", "heading", "icon")}, **view, "page_titles": titles,
             "sample_source": s and {"id": s["id"], "title": s["title"]},
@@ -1592,7 +1632,7 @@ class NotionMapping(BaseModel):
     properties: dict
     template: str = "default"
     heading: str = ""
-    icon: str = "none"
+    icon: str = "channel"
     rev: int | None = None  # the revision the page read: saved since by another device → 412, unless `force` (a12)
     force: bool = False
 
@@ -1892,6 +1932,16 @@ def agy_quota_refresh():
     return _read_agy()
 
 
+@app.post("/api/magpie/refresh")
+def magpie_refresh():
+    """Have magpie ask its vendors again and read the result; at most once every 20 seconds (magpie itself reads a card
+    at most once in 30). No turn, no quota spent."""
+    from ..providers.magpie_state import read
+    if busy := _throttled("magpie-refresh", 20.0, "刷新"):
+        return busy
+    return read(vendors=True)
+
+
 @app.post("/api/queue/resume")
 def resume():
     """手动恢复: the queue goes on and what waited for the model is queued again. agy's sign-in alert is not the click's
@@ -1899,9 +1949,10 @@ def resume():
     from ..pipeline.runner import auth_alert_provider
     paused = db.setting("queue_paused")
     db.set_setting("queue_paused", None)
-    reasons = ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA")
+    reasons = ("AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "PROVIDER_MODEL")
     db.exec(f"UPDATE runs SET production='QUEUED', wait_reason=NULL WHERE production='WAITING' AND wait_reason IN {reasons}")
     db.resolve_alert("PROVIDER_QUOTA")
+    db.resolve_alert("PROVIDER_MODEL")
     if auth_alert_provider() == "agy":
         threading.Thread(target=_read_agy, name="agy-usage", daemon=True).start()
     else:

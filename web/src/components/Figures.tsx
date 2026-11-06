@@ -198,13 +198,13 @@ export const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).p
 
 /** Ranked horizontal bars: a label, a bar against the largest, the value written at its end. */
 export function HBars({ rows, label }: { rows: { key: string; label: string; value: number; text: string; rest?: boolean }[]; label: string }) {
-  const max = Math.max(1e-9, ...rows.map((x) => x.value));
+  const max = Math.max(1e-9, ...rows.filter((x) => !x.rest).map((x) => x.value));  // 其余 is said, not drawn: it would dwarf what is named
   return (
     <ol className="hbars" aria-label={label}>
       {rows.map((x) => (
         <li key={x.key} className={x.rest ? "rest" : undefined}>
           <span className="hb-l">{x.label}</span>
-          <span className="hb-t"><i style={{ width: `${Math.max(1, (x.value / max) * 100)}%` }} /></span>
+          <span className="hb-t">{!x.rest && <i style={{ width: `${Math.max(1, (x.value / max) * 100)}%` }} />}</span>
           <span className="hb-v">{x.text}</span>
         </li>
       ))}
@@ -239,14 +239,14 @@ export function Spark({ points, label, height = 36 }: { points: [number, number]
   const md = (t: number) => `${new Date(t).getMonth() + 1}/${new Date(t).getDate()}`;
   return (
     <figure className="spark">
-      <div className="sp-plot" style={{ height }} tabIndex={0} role="img" aria-label={`${label}（方向键逐次查看）`}
+      <div className="sp-plot" style={{ "--sp-h": `${height}px` } as React.CSSProperties} tabIndex={0} role="img" aria-label={`${label}（方向键逐次查看）`}
         onKeyDown={r.onKey} onBlur={r.onBlur} onMouseMove={pick} onMouseLeave={() => r.setAt(null)}>
         <svg viewBox={`0 0 100 ${height}`} preserveAspectRatio="none" aria-hidden>
           <path className="sp-a" d={`${d}L100,${height}L0,${height}Z`} />
           <path className="sp-l" d={d} vectorEffect="non-scaling-stroke" />
         </svg>
-        <i className="sp-e" style={{ left: `${x(last[0])}%`, top: y(last[1]) }} />
-        {at && <i className="sp-e on" style={{ left: `${x(at[0])}%`, top: y(at[1]) }} />}
+        <i className="sp-e" style={{ left: `${x(last[0])}%`, top: `${(y(last[1]) / height) * 100}%` }} />
+        {at && <i className="sp-e on" style={{ left: `${x(at[0])}%`, top: `${(y(at[1]) / height) * 100}%` }} />}
         {at && (
           <div className={`tip${x(at[0]) > 60 ? " left" : ""}`} aria-hidden style={{ left: `${x(at[0])}%` }}>
             <b>剩 {pct(at[1])}</b> {when(at[0])}
