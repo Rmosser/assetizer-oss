@@ -240,6 +240,45 @@ def test_notes_block_lists_doubts_in_source_order(home):
     ]
 
 
+def test_notes_block_says_a_note_once_when_its_body_only_repeats_the_title(home):
+    from assetizer import db, delivery
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('s',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('r','s','COMPLETE',?)", t)
+    db.exec("INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, data) VALUES ('u','r','s','u',0,'美股',30,90,'{}')")
+    whole = "写长了：原话 974 字，正文 1473 字，去掉套话和他没说的话，内容一点不能少"
+    for title, body in [("写长了：原话 135 字，正文 197 字", "写长了：原话 135 字，正文 197 字"),  # the same sentence
+                        (whole[:40], whole)]:  # the title is the sentence cut at 40 characters
+        db.exec("""INSERT INTO flags(source_id, run_id, target_kind, target_id, kind, severity, title, body, evidence, origin, created_at)
+                   VALUES ('s','r','UNIT','u','SECTION_NOT_FAITHFUL','REVIEW',?,?,'{}','MACHINE_QA',?)""", f"「美股」{title}", body, t)
+    assert [B.plain(b) for b in delivery._notes("r")] == ["〔00:00:30 美股〕写长了：原话 135 字，正文 197 字", f"〔00:00:30 美股〕{whole}"]
+
+
+def test_issue_cover_is_a_still_or_else_the_first_frame_of_a_clip(home):
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import app as web
+    t = now()
+    for sid in ("talk", "chart", "none"):
+        rid = f"{sid}-r1"
+        db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES (?,?,?)", sid, t, t)
+        db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES (?,?,'COMPLETE',?)", rid, sid, t)
+        db.exec("UPDATE sources SET current_run_id=? WHERE id=?", rid, sid)
+        for uid, priority in ((f"{sid}-a", 1), (f"{sid}-b", 3)):
+            db.exec("""INSERT INTO units(id, run_id, source_id, label, ord, title, start, end, learning_priority, data)
+                       VALUES (?,?,?,?,0,'t',0,60,?,'{}')""", uid, rid, sid, uid, priority)
+
+    def asset(sid, unit, kind):
+        return db.exec("INSERT INTO assets(run_id, source_id, unit_id, kind, status, path, start, end, created_at) VALUES (?,?,?,?,'GENERATED','x',0,0,?)",
+                       f"{sid}-r1", sid, f"{sid}-{unit}", kind, t)
+    asset("talk", "a", "poster")
+    must = asset("talk", "b", "poster")  # no stills in this channel: the clip of the must-read
+    still = asset("chart", "a", "screenshot")
+    asset("chart", "b", "poster")  # a still of a lesser unit still goes before a clip's frame
+    assert {i["id"]: i["cover"] for i in web._issues()} == {"talk": must, "chart": still, "none": None}
+
+
 def test_lock_on_confirm_enables_intake(home):
     from assetizer import db, tuning
     from assetizer.util import now
@@ -3348,6 +3387,19 @@ def _stats_fixture():
     db.exec("UPDATE sources SET current_run_id='a-r1', created_at=?, delivered_at=? WHERE id='a'", iso(timedelta(hours=3)), iso(timedelta(hours=1)))
     db.exec("UPDATE runs SET error_class='PROVIDER_TIMEOUT' WHERE id='c-r1'")
     return iso
+
+
+def test_a_safety_filter_failure_has_one_name_on_the_front_page_and_in_the_engine_room(home):
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.web import app as web
+    _stats_fixture()
+    db.exec("UPDATE runs SET error_class='PROVIDER_FAILURE', error='blocked by the safety filter' WHERE id='c-r1'")
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    assert c.get("/api/engine/stats", headers=h).json()["windows"]["7d"]["reasons"] == [{"kind": "CONTENT_SAFETY", "n": 1}]
+    assert next(r for r in c.get("/api/engine", headers=h).json()["runs"] if r["id"] == "c-r1")["error_class"] == "CONTENT_SAFETY"
+    assert next(i for i in c.get("/api/overview", headers=h).json()["issues"] if i["id"] == "c")["error_class"] == "CONTENT_SAFETY"
+    assert c.get("/api/runs/c-r1", headers=h).json()["run"]["error_class"] == "CONTENT_SAFETY"
 
 
 def test_engine_stats_count_by_window_and_by_model_family(home):

@@ -159,8 +159,9 @@ def _notes(run_id: str) -> list[dict]:
         title = re.sub(r"^「[^」]*」\s*", "", r["title"] or "").strip() or (r["title"] or "")
         where = f"{fmt_tc(r['start'])} {r['unit']}" if r["unit"] else "全期"
         quote = (db.unj(r["evidence"], {}) or {}).get("quote")
-        text = f"〔{where}〕{title}" + (f"。{r['body'].strip()}" if (r["body"] or "").strip() else "") + \
-               (f" 原话：「{quote}」" if quote else "")
+        body = (r["body"] or "").strip()
+        said = body if body.startswith(title) else title + (f"。{body}" if body else "")  # a title may be its body, cut
+        text = f"〔{where}〕{said}" + (f" 原话：「{quote}」" if quote else "")
         out.append(B.block("bulleted_list_item", text))
     return out
 

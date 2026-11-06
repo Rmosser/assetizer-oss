@@ -4,11 +4,17 @@ export function cnYear(y: number) {
   return String(y).split("").map((d) => CN[+d]).join("");
 }
 
+/** 十二, 一百〇五, 一千〇一十; from 万 on, the digits as they are */
 export function cnNum(n: number): string {
-  if (n <= 10) return n === 10 ? "十" : CN[n];
-  if (n < 20) return "十" + CN[n - 10];
-  const t = Math.floor(n / 10), o = n % 10;
-  return CN[t] + "十" + (o ? CN[o] : "");
+  if (n >= 10000) return String(n);
+  if (n < 20) return n < 10 ? CN[n] : "十" + (n > 10 ? CN[n - 10] : "");
+  let out = "", gap = false;
+  for (const [unit, name] of [[1000, "千"], [100, "百"], [10, "十"], [1, ""]] as const) {
+    const d = Math.floor(n / unit) % 10;
+    if (d) { out += (gap ? "〇" : "") + CN[d] + name; gap = false; }
+    else if (out) gap = true;
+  }
+  return out;
 }
 
 const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
@@ -91,8 +97,9 @@ export const ERRORS: Record<string, string> = {
   PROVIDER_TIMEOUT: "模型超时", PROVIDER_FAILURE: "模型出错", PROVIDER_TRANSIENT: "模型暂时不可用", PROVIDER_OUTPUT_LIMIT: "输出超长",
   CONTENT_SAFETY: "被内容安全过滤拦下", MODALITY_ROUTING_DEVIATION: "模型越界读文件", MEDIA_READ_FAILED: "读不了视频", CONTRACT: "输出不合规", DOWNLOAD: "下载失败",
   TOO_MANY_RESTARTS: "反复重启", VIDEO_REMOVED: "视频已删除", VIDEO_PRIVATE: "视频设为私享", VIDEO_MEMBERS: "会员限定视频",
-  SOURCE_UNAVAILABLE: "视频看不了", STOPPED: "清空时停下", "?": "未分类",
+  SOURCE_UNAVAILABLE: "视频看不了", STOPPED: "清空时停下", NETWORK: "网络中断", UNKNOWN: "未分类", "?": "未分类",
 };
+export const errorLabel = (kind?: string | null) => ERRORS[kind || "?"] || ERRORS["?"];
 /** what stands in the way of 补录 (ingest.backfill_stop) */
 export const BACKFILL_STOP: Record<string, string> = {
   paused: "队列暂停中", queued: "先印新视频", trial: "先跑试跑", weekly: "周额度留给新视频", "5h": "5 小时额度留给新视频",

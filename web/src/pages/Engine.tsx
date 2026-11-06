@@ -12,7 +12,7 @@ import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { ago, bytes, clock, ERRORS, mergeAlerts, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
+import { ago, bytes, clock, ERRORS, errorLabel, mergeAlerts, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
 
 const SSH = "ssh -N -L 6080:127.0.0.1:6080 ovh-investment";
 /** stage keys of model calls (providers.stage_key) */
@@ -451,7 +451,7 @@ function Stats({ s }: { s: any }) {
         <Kpi label="视频" value={hrs(w.video_seconds)} unit="小时" />
         <Kpi label="收录到入库" value={latency == null ? "—" : hrs(latency)} unit={latency == null ? undefined : "小时"} sub="中位" />
         <Kpi label="失败" value={big(w.failed)} unit="期" tone={w.failed ? "zhu" : undefined}
-          sub={w.reasons.length ? w.reasons.map((r: any) => `${ERRORS[r.kind] || r.kind} ${r.n}`).join(" · ") : undefined} />
+          sub={w.reasons.length ? w.reasons.map((r: any) => `${errorLabel(r.kind)} ${r.n}`).join(" · ") : undefined} />
         <Kpi label="调用" value={big(c.n)} unit="次" sub={c.n ? `失败 ${pct(c.failed / c.n)}` : undefined} />
         <Kpi label="模型时长" value={hrs(c.wall)} unit="小时" />
         <Kpi label="Token" value={big(c.tokens)} />
@@ -494,7 +494,7 @@ function RunRow({ r, title, several, reload }: { r: any; title?: React.ReactNode
       <span className="eg-run-id num">{several && r.id.replace(/^.*?-(r\d+)$/, "$1")}{r.origin === "backfill" && <em>补录</em>}</span>
       <Track stages={r.stages} />
       <span className={`eg-run-s${bad ? " bad" : ""}`}>
-        {r.production !== "COMPLETE" && <>{PRODUCTION[r.production] || r.production}{r.wait_reason ? ` · ${WAIT[r.wait_reason] || r.wait_reason}` : ""}{r.error_class ? ` · ${ERRORS[r.error_class] || r.error_class}` : ""}</>}
+        {r.production !== "COMPLETE" && <>{PRODUCTION[r.production] || r.production}{r.wait_reason ? ` · ${WAIT[r.wait_reason] || r.wait_reason}` : ""}{r.error_class ? ` · ${errorLabel(r.error_class)}` : ""}</>}
       </span>
       <span className="eg-run-w" title={r.created_at}>{ago(r.created_at)}</span>
       <span className="eg-run-a">

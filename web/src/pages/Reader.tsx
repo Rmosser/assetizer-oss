@@ -103,7 +103,10 @@ function firstClause(s: string) {
   const cut = t.lastIndexOf("，", 40);
   return (cut > 12 ? t.slice(0, cut) : t.slice(0, 38)) + "…";
 }
+/** the body only says the title again: a section that did not pass its check, the title being the sentence cut at 40 */
+const echoes = (f: Flag) => !!f.body && f.body.trim().startsWith(verbOf(f));
 function headOf(f: Flag, needle?: string) {
+  if (echoes(f)) return (f.title || "").replace(verbOf(f), () => f.body!.trim());
   if (!GENERIC.test(f.title || "")) return f.title || "";
   const verb = verbOf(f);
   if (needle) return `「${needle}」${verb.replace(/^片段/, "")}`;
@@ -464,7 +467,7 @@ function Zhupi({ f, needle, onSet, playAt, focused, compact }: {
       )}
       <div className="zp-body">
         <div>
-          {f.body && <p>{typeset(endStop(deJargon(f.body)))}</p>}
+          {f.body && (info || !echoes(f)) && <p>{typeset(endStop(deJargon(f.body)))}</p>}
           {ev.quote && (
             <blockquote className={`q${long ? (more ? " open" : " clamp") : ""}`} onClick={long && !more ? () => setMore(true) : undefined}>
               {ev.t != null ? (

@@ -108,7 +108,7 @@ def _run_view(r: dict | None) -> dict | None:
     for s in stages:
         s["label"] = STAGE_LABELS.get(s["name"], s["name"])
         s["detail"] = db.unj(s["detail"], None)
-    return {**r, "summary": db.unj(r.get("summary"), {}), "pins": db.unj(r.get("pins"), {}), "stages": stages}
+    return {**r, "error_class": _error_class(r), "summary": db.unj(r.get("summary"), {}), "pins": db.unj(r.get("pins"), {}), "stages": stages}
 
 
 # a sample: a video of a channel still being tuned that is not in Notion — tried out, not an issue (it is not counted);
@@ -141,10 +141,11 @@ def _issues(where: str = "1=1", *args) -> list[dict]:
     for u in db.q(f"""SELECT u.run_id, u.id, u.title FROM units u JOIN sources s ON s.current_run_id=u.run_id
                       WHERE u.learning_priority=3 AND {where} ORDER BY u.start, u.rowid""", *args):
         musts.setdefault(u["run_id"], []).append({"id": u["id"], "title": u["title"]})
-    # the cover: a still of the most important unit, the earliest (one index lookup per issue, inside the one query)
+    # the cover: a still of the most important unit, the earliest; a clip's first frame where the issue has no still
+    # (setting screenshots:<channel>=off). One index lookup per issue, inside the one query
     covers = {r["run_id"]: r["id"] for r in db.q(f"""SELECT s.current_run_id run_id, (SELECT a.id FROM assets a
-                  JOIN units u ON u.id=a.unit_id WHERE a.run_id=s.current_run_id AND a.kind='screenshot'
-                  ORDER BY u.learning_priority DESC, a.start, a.id LIMIT 1) id FROM sources s
+                  JOIN units u ON u.id=a.unit_id WHERE a.run_id=s.current_run_id AND a.kind IN ('screenshot','poster')
+                  ORDER BY a.kind='screenshot' DESC, u.learning_priority DESC, a.start, a.id LIMIT 1) id FROM sources s
                   WHERE s.current_run_id IS NOT NULL AND {where}""", *args)}
     out = []
     for s in sources:
@@ -545,7 +546,7 @@ def engine_stats():
                        WHERE r.finished_at >= ? AND {kinds} AND r.production IN ('COMPLETE','COMPLETE_PARTIAL')
                        AND st.wall_seconds IS NOT NULL AND st.name NOT IN ('TRANSCRIBE','CLEANUP')""", since):
         stages.setdefault(st["run_id"], {})[st["name"]] = st["wall_seconds"]
-    for r in db.q(f"""SELECT r.id, r.production, r.error_class, r.finished_at, s.duration FROM runs r JOIN sources s ON s.id=r.source_id
+    for r in db.q(f"""SELECT r.id, r.production, r.error_class, r.error, r.finished_at, s.duration FROM runs r JOIN sources s ON s.id=r.source_id
                       WHERE r.finished_at >= ? AND {kinds} AND r.production IN ('COMPLETE','COMPLETE_PARTIAL','FAILED')""", since):
         t = local(r["finished_at"])
         if t is None:
@@ -561,7 +562,8 @@ def engine_stats():
             v = win[w]
             if not ok:
                 v["failed"] += 1
-                v["reasons"][r["error_class"] or "?"] = v["reasons"].get(r["error_class"] or "?", 0) + 1
+                why = _error_class(r) or "?"
+                v["reasons"][why] = v["reasons"].get(why, 0) + 1
                 continue
             v["done"] += 1
             v["partial"] += r["production"] == "COMPLETE_PARTIAL"

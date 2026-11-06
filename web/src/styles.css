@@ -380,6 +380,7 @@ details[open] > summary .plus { transform: rotate(45deg); }
 }
 .attn-row .mark { align-self: start; width: 10px; height: 10px; margin-top: 0.55em; border-radius: 50%; border: 2px solid var(--ink-2); }
 .attn-row.bad .mark { background: var(--zhu); border-color: var(--zhu); }
+.attn-more { align-self: start; }  /* stays under the pointer as the list opens */
 .attn-t { min-width: 0; }
 .attn-row:not(:has(> .btn)) > .attn-t { grid-column: 2 / -1; }  /* nothing beside it: its own buttons reach the right edge */
 .attn-t h4 { margin: 0; font: 700 17px/1.5 var(--serif); }

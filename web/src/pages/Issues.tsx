@@ -7,7 +7,7 @@ import { Fold } from "../components/Fold";
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDate, cnDay, cnMonth, cnNum, ERRORS, HELD, mergeAlerts, parseDay, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
+import { cnDate, cnDay, cnMonth, cnNum, errorLabel, HELD, mergeAlerts, parseDay, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
 
 type Stage = { name: string; label: string; status: string; started_at?: string };
 
@@ -198,6 +198,22 @@ function Dateline({ ready }: { ready: any[] }) {
   );
 }
 
+/** One line of 需要你 over a list of issues: its first three, the others opened right here (机房 lists only the newest
+ *  runs, not these). */
+function AttnIssues({ head, items, bad, row }: { head: string; items: any[]; bad?: boolean; row: (i: any) => React.ReactNode }) {
+  const [all, setAll] = useState(false);
+  return (
+    <div className={`attn-row${bad ? " bad" : ""}`}>
+      <span className="mark" aria-hidden />
+      <div className="attn-t">
+        <h4>{head}</h4>
+        <ul className="attn-list">{(all ? items : items.slice(0, 3)).map(row)}</ul>
+      </div>
+      {items.length > 3 && <button className="btn sm attn-more" aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起" : `全部 ${items.length} 期`}</button>}
+    </div>
+  );
+}
+
 /** What needs the reader: system alerts (with what fixes them), videos whose production failed, issues that did not
  *  reach Notion, decisions. */
 function Attention({ data, issues, reload }: { data: any; issues: any[]; reload: () => void }) {
@@ -236,70 +252,35 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
         );
       })}
       {broke.length > 0 && (
-        <div className="attn-row bad">
-          <span className="mark" aria-hidden />
-          <div className="attn-t">
-            <h4>{broke.length} 期生产失败</h4>
-            <ul className="attn-list">
-              {broke.slice(0, 3).map((i) => (
-                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
-                  {ERRORS[i.error_class] && <span className="muted">{ERRORS[i.error_class]}</span>}
-                  <button className="btn sm" disabled={busy === i.id}
-                    onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button></li>
-              ))}
-            </ul>
-          </div>
-          {broke.length > 3 && <a className="btn sm" {...linkProps("/engine")}>全部 {broke.length} 期</a>}
-        </div>
+        <AttnIssues head={`${broke.length} 期生产失败`} items={broke} bad row={(i) => (
+          <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+            <span className="muted">{errorLabel(i.error_class)}</span>
+            <button className="btn sm" disabled={busy === i.id}
+              onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button></li>
+        )} />
       )}
       {gone.length > 0 && (
-        <div className="attn-row">
-          <span className="mark" aria-hidden />
-          <div className="attn-t">
-            <h4>{gone.length} 期视频不可用</h4>
-            <ul className="attn-list">
-              {gone.slice(0, 3).map((i) => (
-                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
-                  <span className="muted">{UNAVAILABLE[i.error_class]}</span>
-                  <button className="btn sm" disabled={busy === i.id}
-                    onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/ignore`)}>忽略</button></li>
-              ))}
-            </ul>
-          </div>
-          {gone.length > 3 && <a className="btn sm" {...linkProps("/engine")}>全部 {gone.length} 期</a>}
-        </div>
+        <AttnIssues head={`${gone.length} 期视频不可用`} items={gone} row={(i) => (
+          <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+            <span className="muted">{UNAVAILABLE[i.error_class]}</span>
+            <button className="btn sm" disabled={busy === i.id}
+              onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/ignore`)}>忽略</button></li>
+        )} />
       )}
       {failed.length > 0 && (
-        <div className="attn-row bad">
-          <span className="mark" aria-hidden />
-          <div className="attn-t">
-            <h4>{failed.length} 期没写进 Notion</h4>
-            <ul className="attn-list">
-              {failed.slice(0, 3).map((i) => (
-                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
-                  <button className="btn sm" disabled={busy === i.id} onClick={() => retry(i.id)}>重试</button></li>
-              ))}
-            </ul>
-          </div>
-        </div>
+        <AttnIssues head={`${failed.length} 期没写进 Notion`} items={failed} bad row={(i) => (
+          <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+            <button className="btn sm" disabled={busy === i.id} onClick={() => retry(i.id)}>重试</button></li>
+        )} />
       )}
       {partial.length > 0 && (
-        <div className="attn-row bad">
-          <span className="mark" aria-hidden />
-          <div className="attn-t">
-            <h4>{partial.length} 期部分完成，补齐后写进 Notion</h4>
-            <ul className="attn-list">
-              {partial.slice(0, 3).map((i) => (
-                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
-                  {i.production === "COMPLETE_PARTIAL" && (
-                    <button className="btn sm" disabled={busy === i.id}
-                      onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button>
-                  )}</li>
-              ))}
-            </ul>
-          </div>
-          {partial.length > 3 && <a className="btn sm" {...linkProps("/engine")}>全部 {partial.length} 期</a>}
-        </div>
+        <AttnIssues head={`${partial.length} 期部分完成，补齐后写进 Notion`} items={partial} bad row={(i) => (
+          <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
+            {i.production === "COMPLETE_PARTIAL" && (
+              <button className="btn sm" disabled={busy === i.id}
+                onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button>
+            )}</li>
+        )} />
       )}
       {maybe.length > 0 && (
         <div className="attn-row">

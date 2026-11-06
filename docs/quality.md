@@ -18,6 +18,7 @@ npm --prefix web ci
 | 后端测试 | `.venv/bin/pytest -q` | 全部在 `tests/test_core.py`；`home` fixture 给每个测试一个隔离的数据库；Notion 调用全部打桩（`FakeNotion`），不会写真实 Notion |
 | 定向测试 | `.venv/bin/pytest -q -k <关键词>` | 改哪块先跑哪块 |
 | 前端类型检查 + 构建 | `cd web && npm run build` | `tsc -b` 加 `vite build`，产物写入 `src/assetizer/web/static`（不进 Git） |
+| 前端工具函数 | `cd web && npm run test:util` | 中文数字（期数）和失败原因的标签；不用 build，也不用浏览器 |
 
 仓库没有配置 lint / format 工具；代码里的 `# noqa` 是给 ruff 规则看的，按现有风格写即可。
 
