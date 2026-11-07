@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS runs (
   attempts INTEGER NOT NULL DEFAULT 0,
   pgid INTEGER,
   stop_at TEXT,                                        -- 清空 asked this trial to stop (a10): the worker stops it
+  retry TEXT,                                          -- JSON: the call being tried again, or what was tried before it failed
   pins TEXT,                                           -- JSON: playbook, policy, pipeline, model, agy version
   summary TEXT,                                        -- JSON stats
   revision_of TEXT,
@@ -140,6 +141,17 @@ CREATE TABLE IF NOT EXISTS model_calls (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS model_calls_run ON model_calls(run_id);
+CREATE TABLE IF NOT EXISTS retries (                   -- a model call that was tried again, once it came to its end (llm.LLM)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT,
+  call TEXT NOT NULL,
+  kind TEXT NOT NULL,                                  -- what failed it: a key of knobs.RETRY_DEFAULTS
+  tries INTEGER NOT NULL,
+  rescued INTEGER NOT NULL,                            -- 1: it got through in the end
+  fallback TEXT,                                       -- the other model the safety filter sent it to
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS retries_when ON retries(created_at);
 CREATE TABLE IF NOT EXISTS speakers (
   source_id TEXT NOT NULL REFERENCES sources(id),
   run_id TEXT NOT NULL,
@@ -352,6 +364,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN origin TEXT")
     if "stop_at" not in runs:
         conn.execute("ALTER TABLE runs ADD COLUMN stop_at TEXT")
+    if "retry" not in runs:
+        conn.execute("ALTER TABLE runs ADD COLUMN retry TEXT")
+        # the filter's failures read as the model's, or as an answer that did not pass, until it had a class of its own
+        conn.execute("""UPDATE runs SET error_class='CONTENT_SAFETY' WHERE (error_class='PROVIDER_FAILURE'
+                        AND lower(error) LIKE '%safety filter%') OR error_class='PROVIDER_SAFETY_BLOCK'""")
     if "notified_at" not in {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}:
         conn.execute("ALTER TABLE alerts ADD COLUMN notified_at TEXT")
         conn.execute("UPDATE alerts SET notified_at=created_at")  # raised before: pushed already

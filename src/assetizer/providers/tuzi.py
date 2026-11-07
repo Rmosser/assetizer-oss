@@ -36,6 +36,7 @@ IDLE_TIMEOUT = 300.0
 MAX_OUTPUT_TOKENS = 65536
 MIME = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg", ".png": "image/png", ".wav": "audio/wav", ".mp3": "audio/mpeg"}
+SAFETY_FINISH = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY"}  # RECITATION is a model failure of its own
 MEDIA_NOTE = ("\n\n【附件说明】上文要求读取的视频已作为附件随本消息提供，直接观看附件即可；"
               "你没有任何工具可调用，不要尝试读取文件路径。")
 
@@ -109,6 +110,9 @@ class TuziProvider:
                         continue
                     raw.write(line[5:].strip() + "\n")
                     chunk = json.loads(line[5:])
+                    if blocked := (chunk.get("promptFeedback") or {}).get("blockReason"):
+                        error = ("CONTENT_SAFETY", f"blockReason {blocked}")
+                        break
                     for c in chunk.get("candidates") or []:
                         finish = c.get("finishReason") or finish
                         for p in (c.get("content") or {}).get("parts") or []:
@@ -128,8 +132,10 @@ class TuziProvider:
             error = ("PROVIDER_TRANSIENT", f"stream ended without a finish reason after {len(text)} chars")
         elif error is None and finish == "MAX_TOKENS":
             error = ("PROVIDER_OUTPUT_LIMIT", f"stopped at {MAX_OUTPUT_TOKENS} output tokens")
+        elif error is None and finish in SAFETY_FINISH:
+            error = ("CONTENT_SAFETY", f"finishReason {finish}")
         elif error is None and finish not in (None, "STOP"):
-            error = ("PROVIDER_FAILURE", f"finishReason {finish}")  # SAFETY, RECITATION, …: a fresh call may pass
+            error = ("PROVIDER_FAILURE", f"finishReason {finish}")
         elif error is None and not text.strip():
             error = ("PROVIDER_TRANSIENT", "empty response")
         receipt.update(

@@ -13,7 +13,7 @@ from ..util import fmt_tc, now, read_json, sha256_file, write_json
 from .context import RunContext, Waiting
 
 class _Gate:
-    """At most `limit()` holders at once. The limit is read on every wait, so a change made in the 机房 applies to
+    """At most `limit()` holders at once. The limit is read on every wait, so a change made on the 设置 page applies to
     the next download (a download under way is never cut off when it is lowered)."""
 
     def __init__(self, limit):

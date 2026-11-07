@@ -58,17 +58,17 @@ MAGPIE_EVERY = 300           # seconds between two reads of magpie's subscriptio
 
 ALERT_TEXT = {
     "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
-                          "在「机房」点「登录 agy」，用 Google 授权后贴回授权码；登录后队列自动继续。"),
+                          "点「登录 agy」，用 Google 授权后贴回授权码；登录后队列自动继续。"),
     "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
-    "PROVIDER_MODEL": ("工序用的模型已取消，生产已暂停", "在「分工」里换一个模型，或在 magpie 里重新勾选；系统每 10 分钟探测一次，恢复后自动继续。"),
+    "PROVIDER_MODEL": ("工序用的模型已取消，生产已暂停", "在「设置」→「模型分工」里换一个模型，或在 magpie 里重新勾选；系统每 10 分钟探测一次，恢复后自动继续。"),
     "YOUTUBE_AUTH": ("YouTube 需要登录或会员权限",
                      "确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次；还没配置 CookieCloud 时，"
-                     "在「机房」→「YouTube 会话」里配置。修好后在那里做一次视频测试，通过就立刻继续；否则系统每 30 分钟自动重试。"),
+                     "在「设置」→「YouTube」里配置。修好后在那里做一次视频测试，通过就立刻继续；否则系统每 30 分钟自动重试。"),
     "YOUTUBE_REFUSED": ("YouTube 拒绝下载",
                         "YouTube 拒绝了下载（HTTP 403），要下载的期都在等。先让 Chrome 里的 CookieCloud 插件同步一次登录态，再到"
-                        "「机房」→「YouTube 会话」做一次视频测试，通过就立刻继续；测试能读到、下载仍被拒，多半是 yt-dlp 跟不上 YouTube："
+                        "「设置」→「YouTube」做一次视频测试，通过就立刻继续；测试能读到、下载仍被拒，多半是 yt-dlp 跟不上 YouTube："
                         "更新 docker/requirements.lock 里的 yt-dlp 后重新打包安装。系统每 30 分钟重试一次。"),
-    "DISK_LOW": ("磁盘空间不足，暂停下载", "系统会先清理过期原始媒体；仍不足时请在「机房」查看占用。"),
+    "DISK_LOW": ("磁盘空间不足，暂停下载", "系统会先清理过期原始媒体；仍不足时请在「设置」→「磁盘」查看占用。"),
     "YTDLP_OUTDATED": ("下载工具需要更新", "YouTube 改版后 yt-dlp 读不出视频了，要下载的期都在等。更新 docker/requirements.lock 里的 "
                        "yt-dlp 后重新打包安装，装好就继续；系统每 30 分钟重试一次，偶发的读不出会自己恢复。"),
 }
@@ -138,7 +138,7 @@ def _stop_asked(run_id: str) -> bool:
 
 def _stop(run_id: str) -> str:
     """Stopped on request: the stages done stay done for 重试, the one under way starts over; nothing is adopted."""
-    db.exec("UPDATE runs SET production='CANCELLED', error_class='STOPPED', error='清空时停下', stage=NULL, finished_at=? WHERE id=?",
+    db.exec("UPDATE runs SET production='CANCELLED', error_class='STOPPED', error='清空时停下', stage=NULL, retry=NULL, finished_at=? WHERE id=?",
             now(), run_id)
     db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status='RUNNING'", run_id)
     db.event("run", "清空时停下，已完成的工序保留，可以重试接着跑", run_id, "warn")
@@ -170,7 +170,7 @@ def _exec_stage(ctx: RunContext, name: str, fn, foreground: bool = True) -> tupl
     t0 = time.monotonic()
     _set_stage(ctx.id, name, status="RUNNING", started_at=now())
     if foreground:
-        db.exec("UPDATE runs SET stage=? WHERE id=?", name, ctx.id)
+        db.exec("UPDATE runs SET stage=?, retry=NULL WHERE id=?", name, ctx.id)
     try:
         detail = fn(ctx) or {}
         _set_stage(ctx.id, name, status="DONE", finished_at=now(), wall_seconds=round(time.monotonic() - t0, 1), detail=db.j(detail))
@@ -215,7 +215,7 @@ def _execute(run_id: str) -> str:
     source = db.one("SELECT * FROM sources WHERE id=?", run["source_id"])
     ctx = RunContext(run=run, source=source)
     # rowcount, not db.exec() (that returns the last insert id): 清空 may have stopped it a moment before (a10)
-    if not db.connect().execute("UPDATE runs SET production='RUNNING', wait_reason=NULL, error=NULL, error_class=NULL, "
+    if not db.connect().execute("UPDATE runs SET production='RUNNING', wait_reason=NULL, error=NULL, error_class=NULL, retry=NULL, "
                                 "attempts=attempts+1, started_at=COALESCE(started_at, ?) WHERE id=? AND production!='CANCELLED'",
                                 (now(), run_id)).rowcount:
         return "CANCELLED"
@@ -262,6 +262,7 @@ def _execute(run_id: str) -> str:
                     if blocking or e.transient:  # an outage: wait for it rather than deliver the issue without this stage
                         raise
                     _set_stage(run_id, name, status="WARN", detail=db.j({"warning": str(e)[:500]}))
+                    db.exec("UPDATE runs SET retry=NULL WHERE id=?", run_id)
                     warned = True
                     continue
                 raise
@@ -269,6 +270,7 @@ def _execute(run_id: str) -> str:
                 if blocking or _locked(e):  # a database held too long is not this stage's failure: the run goes back
                     raise
                 _set_stage(run_id, name, status="WARN", detail=db.j({"warning": f"{_classify(e)}: {str(e)[:400]}"}))
+                db.exec("UPDATE runs SET retry=NULL WHERE id=?", run_id)
                 ctx.event(f"{name} 非阻塞失败：{e}", "warn")
                 warned = True
         if bg is not None:
@@ -419,10 +421,9 @@ def alert_text(reason: str) -> tuple[str, str]:
     title, body = ALERT_TEXT[reason]
     if reason == "PROVIDER_QUOTA":
         import datetime as dt
+        from ..providers.agy import groups_in_use
         from ..providers.magpie_state import windows_in_use
-        q = db.setting("agy_quota") or {}
-        g = next((g for g in q.get("groups") or [] if g.get("name") == q.get("production_group")), None)
-        back = max((b["reset_at"] for b in [*(g or {}).get("buckets", []), *windows_in_use()]
+        back = max((b["reset_at"] for b in [*(b for g in groups_in_use() for b in g["buckets"]), *windows_in_use()]
                     if b.get("remaining") == 0 and b.get("reset_at") and not b.get("disabled")), default=None)
         try:
             d = dt.datetime.fromisoformat(back).astimezone(notify.TZ) if back else None
@@ -459,7 +460,7 @@ def _requeue(run_id: str, why: str) -> str:
 
 def _wait(run_id: str, reason: str, message: str, provider: str | None = None) -> None:
     # attempts counts restarts in the middle of production (recover() gives up after 5); a wait ends an attempt cleanly
-    db.exec("UPDATE runs SET production='WAITING', wait_reason=?, error=?, attempts=0 WHERE id=?", reason, message[:1000], run_id)
+    db.exec("UPDATE runs SET production='WAITING', wait_reason=?, error=?, attempts=0, retry=NULL WHERE id=?", reason, message[:1000], run_id)
     title, body = alert_text(reason) if reason in ALERT_TEXT else (f"生产等待：{reason}", message)
     if reason == "AGY_AUTH_REQUIRED":
         auth_alert(provider or "agy")
@@ -471,8 +472,9 @@ def _wait(run_id: str, reason: str, message: str, provider: str | None = None) -
 def _fail(run_id: str, e: BaseException) -> None:
     kind = _classify(e)
     state = "CANCELLED" if kind == "SKIPPED_SHORT" else "FAILED"
-    db.exec("UPDATE runs SET production=?, error_class=?, error=?, finished_at=? WHERE id=?",
-            state, kind, f"{e}\n{traceback.format_exc()[-1500:]}", now(), run_id)
+    tried = getattr(e, "retry", None)  # what the call that failed was put through (llm.LLM._call): 试了 4 次
+    db.exec("UPDATE runs SET production=?, error_class=?, error=?, retry=?, finished_at=? WHERE id=?",
+            state, kind, f"{e}\n{traceback.format_exc()[-1500:]}", db.j(tried) if tried else None, now(), run_id)
     db.event("run", f"生产失败：{kind}", run_id, "error")
     from ..tuning import release_hold
     release_hold(run_id)

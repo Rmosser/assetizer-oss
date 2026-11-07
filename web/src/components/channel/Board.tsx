@@ -1,3 +1,4 @@
+import { paceText } from "../../box";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { get, post } from "../../api";
 import { IssueTitle } from "../../cjk";
@@ -5,7 +6,6 @@ import { linkProps } from "../../router";
 import { usePoll } from "../../hooks";
 import { Row } from "../../pages/Issues";
 import { BACKFILL_BAD, BACKFILL_STOP, parseDay, WAIT } from "../../util";
-import { paceText } from "../BackfillPanel";
 import { about, big, Columns, hrs, Kpi, pct, ymd } from "../Figures";
 import { Sheet, type SheetHandle } from "../Sheet";
 import { Fault } from "../States";
@@ -113,7 +113,7 @@ function Intake({ ch, mode, b, onSet, onScan }: {
           <p>{[last ? `${hm(last.at)} · ${found(last)}` : "等第一次扫描", nextScan(ing)].filter(Boolean).join(" · ")}</p>
           {got && got !== last && <p>最近新收 {md(got.at)}</p>}
           {broke && <p className="z">{md(broke.at)} 扫描出错：{broke.error}</p>}
-          {mem && <p className="z">{MEMBERS[mem] || mem}{mem !== "rss" && <> · <a {...linkProps("/engine")}>机房</a></>}</p>}
+          {mem && <p className="z">{MEMBERS[mem] || mem}{mem !== "rss" && <> · <a {...linkProps("/settings#youtube")}>设置</a></>}</p>}
         </div>
       ) : null}
       {on && <button className="ch-btn sm" disabled={!!ing.scanning} onClick={onScan}>{ing.scanning ? "扫描中…" : "立即扫描"}</button>}

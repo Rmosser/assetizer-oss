@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { media, post, srcSet } from "../api";
+import { ALERT_FIX } from "../box";
 import { IssueTitle, issueHeadline, originalTitle, typeset, Words } from "../cjk";
 import { agyAlert, openAgyLogin } from "../components/AgyLogin";
 import { about, big, HBars, Heat, hrs, Kpi, ymd } from "../components/Figures";
@@ -7,7 +8,7 @@ import { Fold } from "../components/Fold";
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { useMedia, usePoll } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDate, cnDay, cnMonth, cnNum, errorLabel, HELD, mergeAlerts, parseDay, PRODUCTION, STOPS, UNAVAILABLE, WAIT } from "../util";
+import { cnDate, cnDay, cnMonth, cnNum, failText, HELD, mergeAlerts, parseDay, PRODUCTION, retryText, STOPS, UNAVAILABLE, WAIT } from "../util";
 
 type Stage = { name: string; label: string; status: string; started_at?: string };
 
@@ -24,7 +25,7 @@ export function PressLine({ run }: { run: any }) {
       <div className="press-head">
         <span className="label">正在付印</span>
         <h3><IssueTitle title={run.source?.title || run.source_id} /></h3>
-        <span className="eta">{current?.label}{run.eta_seconds ? ` · ${about(run.eta_seconds)}后可读` : ""}</span>
+        <span className="eta">{current?.label}{run.retry ? ` · ${retryText(run.retry)}` : run.eta_seconds ? ` · ${about(run.eta_seconds)}后可读` : ""}</span>
       </div>
       <div className={`rail${reveal ? " reveal" : ""}`} role="progressbar" aria-label="付印进度"
         aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-valuetext={`第 ${at}/${stages.length} 站：${current?.label || ""}`}
@@ -238,7 +239,7 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
     <section className="attn" aria-label="需要你">
       {mergeAlerts(data.alerts).map((a: any) => {
         const act: [string, () => void] | null = agyAlert(a) ? ["登录 agy", openAgyLogin] : null;
-        const login = a.key === "cookiecloud" || a.key === "YOUTUBE_AUTH";
+        const fix = ALERT_FIX[a.key];
         return (
           <div className={`attn-row${a.severity === "info" ? "" : " bad"}`} key={a.key} role={a.severity === "info" ? "status" : "alert"}>
             <span className="mark" aria-hidden />
@@ -247,16 +248,20 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
               {!act && <p>{(a.body || "").split(/`([^`]+)`/).map((part: string, i: number) => (i % 2 ? <code key={i}>{part}</code> : typeset(part)))}</p>}
             </div>
             {act ? <button className="btn zhu" onClick={act[1]}>{act[0]}</button>
-              : <a className="btn sm" {...linkProps(login ? "/engine#cc" : "/engine")}>{login ? "配置与测试" : "去机房"}</a>}
+              : <a className="btn sm" {...linkProps(fix?.href || "/engine")}>{fix?.label || "去机房"}</a>}
           </div>
         );
       })}
       {broke.length > 0 && (
         <AttnIssues head={`${broke.length} 期生产失败`} items={broke} bad row={(i) => (
           <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
-            <span className="muted">{errorLabel(i.error_class)}</span>
-            <button className="btn sm" disabled={busy === i.id}
-              onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button></li>
+            <span className="muted">{failText(i.error_class, i.retry)}</span>
+            <span className="attn-acts">
+              {i.error_class === "CONTENT_SAFETY" && <button className="btn ghost sm" disabled={busy === i.id}
+                onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/ignore`)}>忽略</button>}
+              <button className="btn sm" disabled={busy === i.id}
+                onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button>
+            </span></li>
         )} />
       )}
       {gone.length > 0 && (
@@ -384,7 +389,7 @@ function Presses({ data, reload }: { data: any; reload: () => void }) {
               <li key={r.id}>
                 <a {...linkProps(`/issue/${encodeURIComponent(r.source_id)}`)}><IssueTitle title={r.source?.title || r.source_id} /></a>
                 <span className="mp-bar" aria-hidden><i style={{ width: `${(done / Math.max(1, st.length)) * 100}%` }} /></span>
-                <span className="mp-at">{cur?.label || "—"}{r.eta_seconds ? ` · ${about(r.eta_seconds)}` : ""}</span>
+                <span className="mp-at">{cur?.label || "—"}{r.retry ? ` · ${retryText(r.retry)}` : r.eta_seconds ? ` · ${about(r.eta_seconds)}` : ""}</span>
               </li>
             );
           })}

@@ -23,15 +23,16 @@
 | 频道页的界面、点亮与连线、展开并排、断点、样式坑 | [channel-page.md](channel-page.md) | `web/src/pages/Channel.tsx`、`web/src/components/channel/`、`web/src/channel.css` |
 | Notion 交付、映射、页面模板、查重、预览 | [architecture.md](architecture.md)「交付到 Notion」、[channel-page.md](channel-page.md) §4 | `delivery.py`、`notion/`、`templates.py`、`preview.py` |
 | 自动收录新视频、立即扫描、补录旧视频 | [architecture.md](architecture.md)「频道生命周期」、[design.md](design.md) §R6-5、§R6-6、[channel-page.md](channel-page.md) §2 | `ingest.py`、`web/app.py`（看板接口）、`web/src/components/channel/Board.tsx` |
-| agy 在网页里登录、额度（5 小时 / 每周） | [operations.md](operations.md)「凭据与登录」、[design.md](design.md) §R6-3、§R6-4 | `providers/agy_login.py`、`providers/agy.py`（`usage`、`record_usage`）、`providers/magpie.py`（`quota_view`）、`web/src/components/AgyLogin.tsx` |
+| agy 在网页里登录、额度（5 小时 / 每周） | [operations.md](operations.md)「凭据与登录」、[design.md](design.md) §R6-3、§R6-4 | `providers/agy_login.py`、`providers/agy.py`（`usage`、`record_usage`、按型号找额度组的 `quota_group` 与 `groups_in_use`）、`providers/magpie.py`（`quota_view`）、`web/src/components/AgyLogin.tsx` |
 | magpie：订阅额度、模型、分工、上报 | [design.md](design.md) §R6-8、§R6-9、§R5-5 | `providers/magpie_state.py`、`providers/magpie.py`、`providers/__init__.py`（路由）、`knobs.py`、`web/src/components/Routes.tsx`（分工与模型列表）、`web/src/pages/Engine.tsx`（`SubTile`） |
 | YouTube 登录与 CookieCloud | [operations.md](operations.md)「凭据与登录」、[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)、[cookiecloud-read-ingress.md](cookiecloud-read-ingress.md) | `cookies.py`、`youtube.py`、`web/app.py`（`/api/cookiecloud/*`）、`web/src/components/CookieCloud.tsx` |
-| 盒子级设置（并行、保留期、分工、补录额度） | [design.md](design.md) §R6-7 | `knobs.py`、`web/src/components/Knobs.tsx` |
+| 盒子级设置（并行、保留期、分工、补录额度） | [design.md](design.md) §R6-7 | `knobs.py`、`web/src/pages/Settings.tsx`、`web/src/components/Knobs.tsx`、`web/src/box.ts` |
+| 模型调用出错自动重试、内容安全过滤换模型 | [design.md](design.md) §R6-10 | `llm.py`、`knobs.py`（`retry_counts`、`safety_fallback`）、`pipeline/context.py`（`retrying`、`settled`） |
 | 调试样片的低清版 | [design.md](design.md) §R-20 | `playback.py`、`media/ffmpeg.py`（`playback_copy`） |
 | GPU 转写 | [operations.md](operations.md)「GPU 转写」 | `media/asr.py`、`scripts/gpu_asr/` |
 | 告警与 Telegram 通知 | [README.md](../README.md)「通知」 | `notify.py`、`pipeline/runner.py`（告警） |
 | agy、yt-dlp 改版后要不要迭代、日志留在哪 | [operations.md](operations.md)「日志与迭代」 | `logs.py`、`youtube.py`（`classify`）、`providers/agy.py` |
-| 其他页面：刊、对照视图、机房，统计口径 | [architecture.md](architecture.md)「前端」、[design.md](design.md) §R6-1、§R6-2 | `web/src/pages/`、`web/src/components/Figures.tsx`、`web/app.py`（`/api/engine/stats`） |
+| 其他页面：刊、对照视图、机房、设置，统计口径 | [architecture.md](architecture.md)「前端」、[design.md](design.md) §R6-1、§R6-2 | `web/src/pages/`、`web/src/components/Figures.tsx`、`web/app.py`（`/api/engine/stats`） |
 | 为什么这样设计（长期决定与理由） | [design.md](design.md) | — |
 | 内容原则：视频是唯一事实来源 | [`contracts/policy.md`](../src/assetizer/contracts/policy.md) | — |
 | 改完怎么检查 | [quality.md](quality.md) | `tests/test_core.py` |

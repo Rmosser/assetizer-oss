@@ -34,7 +34,7 @@ export ASSETIZER_HOME=$(mktemp -d)
 
 本地实例没有样片和运行，也没有 Notion token，适合看空状态和布局。要看真实数据，把包装到 devbox，再经 SSH 隧道打开容器里的界面（见 [operations.md](operations.md)）。
 
-至少在 1600、1280、390 三种宽度和深色模式下各看一遍。频道页的检查要点见 [channel-page.md](channel-page.md) 第 11 节。
+至少在 1600、1280、390 三种宽度和深色模式下各看一遍。频道页的检查要点见 [channel-page.md](channel-page.md) 第 11 节。设置页还要看 320 宽（主导航一行、名字不折行），以及有红灯、黄灯和全新未配置的样子：在 Playwright 里 `page.route("**/api/settings", …)` 改真实返回最快。
 
 调试台（矩阵、三栏、展开并排）可以用模拟数据看，不要后端、Notion 和模型（先 build）：
 
@@ -44,11 +44,11 @@ node web/tools/mock-spread.mjs   # 打开 http://127.0.0.1:8797/channels/mock/st
 
 定稿单和页面图标也能在这里试：点「定稿 v3」看留意、重跑和底栏，页面图标选「频道头像」看预览、保存和还差几页。
 
-机房的额度与分工可以在本机走完整流程，不碰生产、不调模型：`scripts/dev/magpie_sim.py` 起一个假 magpie（接口形状照实测）、真的网页和真的 worker，数据在 `var/magpie-sim`。控制台能切「连不上、Key 受限、Key 失效、账号掉线」和 CookieCloud 的几种情况（正常、用上一份、用了很久、读不到、上一份也失效），调额度、改勾选、印一期，排补录、连印 8 期、造失败。agy、下载、媒体处理和模型的回答是假的，路由、回执、暂停恢复、告警、统计和上报都走真代码。
+机房的额度、设置页的分工与重试可以在本机走完整流程，不碰生产、不调模型：`scripts/dev/magpie_sim.py` 起一个假 magpie（接口形状照实测）、真的网页和真的 worker，数据在 `var/magpie-sim`。控制台能切「连不上、Key 受限、Key 失效、账号掉线」和 CookieCloud 的几种情况（正常、用上一份、用了很久、读不到、上一份也失效），调额度、改勾选、印一期，排补录、连印 8 期、造失败，让内容安全过滤拦下文章（看重试、换模型、失败）。agy、下载、媒体处理和模型的回答是假的，路由、回执、暂停恢复、告警、统计和上报都走真代码。
 
 ```bash
 npm --prefix web run build
-.venv/bin/python scripts/dev/magpie_sim.py          # 机房 http://127.0.0.1:8799/engine，控制台 http://127.0.0.1:8798；--reset 从头来
+.venv/bin/python scripts/dev/magpie_sim.py          # 机房 http://127.0.0.1:8799/engine，设置 /settings，控制台 http://127.0.0.1:8798；--reset 从头来
 ```
 
 CookieCloud 配置面板有一个浏览器冒烟脚本（先 build；它在仓库根目录起一个一次性的本地后端，不接受生产地址；默认用本机 Chrome，`BROWSER=webkit` 换 WebKit）。`PYTHON` 要给绝对路径：

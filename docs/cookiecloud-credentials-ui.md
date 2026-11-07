@@ -1,6 +1,6 @@
-# CookieCloud 凭据与「机房」面板
+# CookieCloud 凭据与「设置」面板
 
-「机房」→「YouTube 会话」配置读取入口和三项密钥，测试连接，并用一个会员视频验证 YouTube 登录态。入口的约定见 [cookiecloud-read-ingress.md](cookiecloud-read-ingress.md)。实现在 `src/assetizer/cookies.py`、`src/assetizer/web/app.py`（`/api/cookiecloud/*`）和 `web/src/components/CookieCloud.tsx`。
+「设置」→「YouTube」配置读取入口和三项密钥，测试连接，并用一个会员视频验证 YouTube 登录态。入口的约定见 [cookiecloud-read-ingress.md](cookiecloud-read-ingress.md)。实现在 `src/assetizer/cookies.py`、`src/assetizer/web/app.py`（`/api/cookiecloud/*`）和 `web/src/components/CookieCloud.tsx`。
 
 ## 1. 四项配置
 
@@ -63,7 +63,7 @@
 
 读取失败时，下载和列表先用 `secrets/youtube-cookies-last-good`，这是最后一份读到且带 YouTube 登录的 cookies，明文保存，权限 0600，改 CookieCloud 凭据时删除。没有这份才改用服务器 Chromium。视频测试只用 CookieCloud 现读的 cookies，不用这份。
 
-这段时间机房的灯：用上一份时变黄，写「用上一份 · 多久前」；上一份也被 YouTube 拒绝时变红，写「上一份也失效了」。告警：有上一份且读不到不满 6 小时，不告警；满 6 小时是一条 `info`（不标红，导航不亮「!」）；没有上一份才是 warning。
+这段时间机房和设置页的灯：用上一份时变黄，写「用上一份 · 多久前」；上一份也被 YouTube 拒绝时变红，写「上一份也失效了」。告警：有上一份且读不到不满 6 小时，不告警；满 6 小时是一条 `info`（不标红，导航不亮「!」）；没有上一份才是 warning。
 
 每个 code 的中文说明在 `cookies.py` 的 `FIX`，面板和告警都用它。
 

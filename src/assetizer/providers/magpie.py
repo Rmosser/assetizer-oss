@@ -28,7 +28,7 @@ from pathlib import Path
 
 from .. import config, db
 from ..util import fmt_tc, now, read_json, write_json, write_text
-from .agy import CallResult, ProviderError, _canary_clip, _seconds, gemini_schema
+from .agy import SAFETY_RE, CallResult, ProviderError, _canary_clip, _seconds, gemini_schema
 from .tuzi import IDLE_TIMEOUT, _effort, _http_kind  # noqa: F401
 
 DEFAULT_URL = "https://magpie.prodbox.heiyu.space"
@@ -245,7 +245,8 @@ class MagpieProvider:
             error = ("PROVIDER_TRANSIENT", f"stream ended without a final event after {len(text)} chars")
         elif error is None and status == "incomplete":
             why = ((final.get("incomplete_details") or {}).get("reason") or "")
-            error = ("PROVIDER_OUTPUT_LIMIT" if "token" in why else "PROVIDER_FAILURE", f"incomplete: {why}")
+            error = ("PROVIDER_OUTPUT_LIMIT" if "token" in why else "CONTENT_SAFETY" if SAFETY_RE.search(why) else "PROVIDER_FAILURE",
+                     f"incomplete: {why}")
         elif error is None and status != "completed":  # Claude's refusals come this way, after a 200
             why = json.dumps(final.get("error"), ensure_ascii=False)[:300]
             error = (_magpie_kind(500, why), f"response {status}: {why}")
@@ -342,6 +343,8 @@ MODEL_GONE = re.compile(r"unknown model|model_not_found|knows no model|issue wit
 
 
 def _magpie_kind(code: int, detail: str) -> str:
+    if SAFETY_RE.search(detail):  # before the status: Claude's refusals come after a 200, and read here as a 500
+        return "CONTENT_SAFETY"
     # a subscription's own limit: production waits for it like any quota
     if re.search(r"usage (limit|cap)|rate limit reached|limit reached|try again (in|at)", detail, re.I):
         return "PROVIDER_QUOTA"

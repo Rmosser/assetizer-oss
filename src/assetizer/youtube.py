@@ -118,7 +118,7 @@ def metadata(url: str) -> dict:
     return {k: info.get(k) for k in keep}
 
 
-# the 机房 video test: what each outcome says about the CookieCloud login
+# the 设置 page's video test: what each outcome says about the CookieCloud login
 VERDICT = {
     "member_ok": "能读到这个会员视频：YouTube 认这份登录态，会员权限有效。",
     "login_ok": "能读到这个视频，YouTube 认这份登录态。想确认会员权限，换一个会员视频再测。",

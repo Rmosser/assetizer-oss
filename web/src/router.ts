@@ -32,6 +32,10 @@ export function usePath() {
   return p;
 }
 
+/** Whether the page opening was gone back (or forward) to, and so goes back to where the reader was (useRestoreScroll);
+ *  not one opened afresh or reloaded. Read it as the page first renders: it holds until the scroll is restored. */
+export const returning = () => pendingY != null;
+
 /** After back/forward, return to where the reader was — once the page has rendered its data. */
 export function useRestoreScroll(ready: boolean) {
   useLayoutEffect(() => {

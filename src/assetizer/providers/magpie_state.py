@@ -113,7 +113,7 @@ def model_view(m: dict) -> dict:
     return {"id": m.get("id"), "name": m.get("display_name") or m.get("id"), "label": m.get("magpie_label") or m.get("display_name"),
             "vendor": m.get("owned_by") or (m.get("id") or "").split("/")[0], "group": (m.get("id") or "").startswith("group/"),
             "context": m.get("context_window"), "inputs": mod.get("input") or ["text"], "levels": m.get("reasoning_levels") or [],
-            "watches": "image" in (mod.get("input") or []) and knobs.watches(m.get("id") or "")}
+            "watches": knobs.sees(m.get("id") or "", mod.get("input") or ["text"])}
 
 
 def _trends() -> dict[str, list]:

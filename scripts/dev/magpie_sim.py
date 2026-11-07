@@ -7,7 +7,7 @@
     .venv/bin/python scripts/dev/magpie_sim.py --reset    # 从头来
 
 控制台 http://127.0.0.1:8798 切场景（连不上、Key 受限、Key 失效、账号掉线）、调额度、改勾选、印一期、
-排补录、让 CookieCloud 读不到、造几期失败。
+排补录、让 CookieCloud 读不到、让内容安全过滤拦下文章、造几期失败。
 真的：网关读取、分工路由、receipt、额度暂停与恢复、补录派发、登录态的读取与告警、统计、上报。
 假的：agy、CookieCloud 只读入口、下载和媒体处理，以及模型的回答。
 """
@@ -66,7 +66,10 @@ MODELS = [
 ]
 GROUP = _model("group/text-fast", "文本快线", "分组", 500000, ["low", "medium", "high"], TI, owner="codex")
 SCENARIOS = {"ok": "正常", "down": "连不上 magpie", "held": "Key 受限", "bad_key": "Key 失效", "signed_out": "ChatGPT 账号掉线"}
-SUBS = {"codex": "ChatGPT", "claude": "Claude Code", "grok": "Grok", "gemini": "Gemini（agy）"}
+SUBS = {"codex": "ChatGPT", "claude": "Claude Code", "grok": "Grok", "gemini": "Gemini（agy）", "argon": "Gemini 4 Argon（agy）"}
+# what the fake agy offers (`agy models`). Its /usage gives Argon a group of its own, as agy 1.2.16 did (tests USAGE_JSON),
+# so a stage on another group can be seen; agy 1.5 has no such group and Argon counts with Flash and Pro
+AGY_MODELS = [{"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash"}, {"id": "gemini-4-argon-high", "name": "Gemini 4 Argon"}]
 
 
 class Sim:
@@ -78,6 +81,7 @@ class Sim:
         self.ticked = {m["id"] for m in MODELS}
         self.group = False
         self.drain = 2.0  # points of the week a model call takes
+        self.blocks = 0  # how many of 文章's next Gemini calls the safety filter stops; -1: all of them
         self.windows = {
             "codex": {"plan": "prolite", "name": "Codex", "w": {"7 days": {"used": 27.0, "resets": utc(days=6)}}},
             "claude": {"plan": "pro", "name": "Claude Code", "w": {"5 hours": {"used": 0.0, "resets": utc(hours=4, minutes=20)},
@@ -85,6 +89,7 @@ class Sim:
             "grok": {"plan": None, "name": "Grok", "w": {"7 days": {"used": 0.0, "resets": utc(days=3)}}},
         }
         self.gemini = {"5h": 0.97, "weekly": 0.85}
+        self.argon = {"weekly": 0.6}  # Argon has a weekly limit only
         self.cookies = "ok"
         self.port = 8798
         self.history: dict[str, list] = {}
@@ -104,6 +109,9 @@ class Sim:
         with self.lock:
             if sub == "gemini":
                 self.gemini = {"5h": max(self.gemini["5h"], left / 100) if left > 0 else 0.0, "weekly": left / 100}
+                return
+            if sub == "argon":
+                self.argon = {"weekly": left / 100}
                 return
             for w in self.windows[sub]["w"].values():
                 w["used"] = 100 - left
@@ -329,6 +337,8 @@ class Handler(BaseHTTPRequestHandler):
                 SIM.group = bool(b["on"])
             elif path == "/sim/drain":
                 SIM.drain = float(b["value"])
+            elif path == "/sim/safety":
+                SIM.blocks = int(b["n"])
         if path == "/sim/produce":
             produce(int(b.get("n") or 1))
         elif path == "/sim/backfill":
@@ -355,10 +365,11 @@ def state_view() -> dict:
     with SIM.lock:
         windows = {k: round(100 - max(w["used"] for n, w in v["w"].items() if n == "7 days"), 1) for k, v in SIM.windows.items()}
         windows["gemini"] = round(SIM.gemini["weekly"] * 100, 1)
+        windows["argon"] = round(SIM.argon["weekly"] * 100, 1)
         return {"scenario": SIM.scenario, "scenarios": SCENARIOS, "left": windows, "subs": SUBS,
                 "models": [{"id": m["id"], "name": m["display_name"], "on": m["id"] in SIM.ticked} for m in MODELS],
                 "group": SIM.group, "drain": SIM.drain, "requests": SIM.requests[:14], "reported": len(SIM.reported),
-                "paused": db.setting("queue_paused"), "runs": runs, "cookies": SIM.cookies, "cookie_scenes": COOKIES,
+                "paused": db.setting("queue_paused"), "runs": runs, "cookies": SIM.cookies, "cookie_scenes": COOKIES, "blocks": SIM.blocks,
                 "backfill": db.one("SELECT COUNT(*) n FROM backfill_queue WHERE status='PENDING'")["n"]}
 
 
@@ -378,6 +389,7 @@ table{width:100%;border-collapse:collapse;font-size:12.5px}td,th{text-align:left
 <h2>额度</h2><div class=subs id=subs></div><div class=row style="margin-top:10px"><span style="color:var(--dim)">每次调用消耗</span><span id=dr class=row></span></div>
 <h2>在 magpie 里勾选的模型</h2><div class=ticks id=ticks></div>
 <h2>CookieCloud</h2><div class=row id=cc></div>
+<h2>文章被内容安全过滤拦下</h2><div class=row id=sf></div>
 <h2>补录 <span id=bfn style="font-weight:400;color:var(--dim)"></span></h2><div class=row><button onclick="act('/sim/backfill',{n:172})">排 172 期</button><button onclick="act('/sim/backfill',{n:0})">取消排队</button></div>
 <h2>生产</h2><div class=row><button onclick="act('/sim/produce',{n:1})">印一期</button><button onclick="act('/sim/produce',{n:3})">连印 3 期</button><button onclick="act('/sim/produce',{n:8})">连印 8 期</button><button onclick="act('/sim/fail')">造 3 期失败</button><span id=pause></span></div><table id=runs style="margin-top:10px"></table>
 <h2>《课代表》发来的请求 <span id=rep style="font-weight:400;color:var(--dim)"></span></h2><table id=reqs></table>
@@ -389,6 +401,7 @@ function draw(){const s=cur;
 $('sc').replaceChildren(...Object.entries(s.scenarios).map(([k,v])=>el('button',{className:s.scenario==k?'on':'',onclick:()=>act('/sim/scenario',{name:k})},v)));
 $('subs').replaceChildren(...Object.entries(s.subs).flatMap(([k,v])=>[el('span',{},v),el('b',{},s.left[k]+'%'),el('div',{className:'row'},...[[0,'用完'],[12,'剩 12%'],[50,'剩 50%'],[100,'恢复']].map(([n,t])=>el('button',{onclick:()=>act('/sim/left',{sub:k,left:n})},t)))]));
 $('cc').replaceChildren(...Object.entries(s.cookie_scenes).map(([k,v])=>el('button',{className:s.cookies==k?'on':'',onclick:()=>act('/sim/cookies',{name:k})},v)));
+$('sf').replaceChildren(...[[0,'不拦'],[1,'拦 1 次'],[3,'拦 3 次'],[-1,'一直拦']].map(([n,t])=>el('button',{className:s.blocks==n?'on':'',onclick:()=>act('/sim/safety',{n})},t)));
 $('bfn').textContent=s.backfill?'· 排队 '+s.backfill+' 期':'';
 $('dr').replaceChildren(...[[.5,'0.5%'],[2,'2%'],[6,'6%']].map(([n,t])=>el('button',{className:s.drain==n?'on':'',onclick:()=>act('/sim/drain',{value:n})},t)));
 $('ticks').replaceChildren(...s.models.map(m=>el('label',{},el('input',{type:'checkbox',checked:m.on,onchange:e=>act('/sim/tick',{model:m.id,on:e.target.checked})}),m.name)),el('label',{},el('input',{type:'checkbox',checked:s.group,onchange:e=>act('/sim/group',{on:e.target.checked})}),'路由分组：文本快线'));
@@ -521,36 +534,57 @@ def install(home: Path) -> None:
     magpie.transcript = lambda video, out: [{"start": 1.0, "end": 4.0, "text": "模拟的语音转写"}]
     magpie.MagpieProvider.media_health = lambda self: {"ok": True, "version": self.version(), "checked_at": _now()}
 
+    def quota_of(model: str) -> dict:
+        """The windows a model draws on: Argon's own, or the ones Flash and Pro share."""
+        return SIM.argon if "argon" in model else SIM.gemini
+
     def agy_call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None):
         call_dir = Path(call_dir)
         call_dir.mkdir(parents=True, exist_ok=True)
         with SIM.lock:
-            if min(SIM.gemini.values()) <= 0:
+            left = quota_of(self.model)
+            if min(left.values()) <= 0:
                 raise agy.ProviderError("PROVIDER_QUOTA", "Gemini quota used up (simulated)", {"provider": "agy"})
-            SIM.gemini["weekly"] = max(0.0, SIM.gemini["weekly"] - SIM.drain / 100 * 0.2)
-            SIM.gemini["5h"] = max(0.0, SIM.gemini["5h"] - SIM.drain / 100 * 0.5)
+            left["weekly"] = max(0.0, left["weekly"] - SIM.drain / 100 * 0.2)
+            if "5h" in left:
+                left["5h"] = max(0.0, left["5h"] - SIM.drain / 100 * 0.5)
         health = "只回复两个字" in prompt
+        with SIM.lock:
+            blocked = SIM.blocks != 0 and kind.startswith("article-sections")
+            if blocked and SIM.blocks > 0:
+                SIM.blocks -= 1
+        if blocked:
+            time.sleep(2)  # long enough to look at the page saying so
+            raise agy.ProviderError("CONTENT_SAFETY", "Your request was blocked by our safety filter (simulated)",
+                                    {"provider": "agy", "kind": kind, "status": "FAILED", "error_class": "CONTENT_SAFETY", "agy_version": "agy-sim", "wall_seconds": 2})
         time.sleep(0.1 if health else random.uniform(0.5, 1.2))
         text = "在线" if health else "这是模拟的 Gemini 回答。" * 20
-        receipt = {"provider": "agy", "kind": kind, "status": "SUCCESS", "actual_model": "gemini-3.8-flash-high", "agy_version": "agy-sim",
+        receipt = {"provider": "agy", "kind": kind, "status": "SUCCESS", "actual_model": agy.model_for(self.model, effort), "agy_version": "agy-sim",
                    "wall_seconds": random.uniform(20, 90), "view_file_count": len(media or []),
                    "usage": {"input_tokens": random.randint(20000, 90000), "output_tokens": random.randint(2000, 9000), "thinking_tokens": random.randint(500, 4000)}}
         return agy.CallResult(text, receipt)
 
     def agy_usage(self):
         with SIM.lock:
-            left = dict(SIM.gemini)
-        return {"ok": True, "checked_at": _now(), "version": "agy-sim", "groups": [{"name": "Gemini Models", "models": "Models within this group: Gemini Flash", "buckets": [
-            {"window": "5h", "remaining": left["5h"], "reset_at": iso(utc(hours=3, minutes=20)), "disabled": False, "note": None},
-            {"window": "weekly", "remaining": left["weekly"], "reset_at": iso(utc(days=5, hours=2)), "disabled": False, "note": None}]}]}
+            left, argon = dict(SIM.gemini), dict(SIM.argon)
+        return {"ok": True, "checked_at": _now(), "version": "agy-sim", "groups": [
+            {"name": "Gemini Models", "models": "Models within this group: Gemini Flash, Gemini Pro", "buckets": [
+                {"window": "5h", "remaining": left["5h"], "reset_at": iso(utc(hours=3, minutes=20)), "disabled": False, "note": None},
+                {"window": "weekly", "remaining": left["weekly"], "reset_at": iso(utc(days=5, hours=2)), "disabled": False, "note": None}]},
+            {"name": "Claude and GPT models", "models": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS", "buckets": [
+                {"window": "weekly", "remaining": 1.0, "reset_at": iso(utc(days=6)), "disabled": False, "note": None}]},
+            {"name": "Gemini 4 Argon", "models": "For paid Pro plans, Argon quota is separate.", "buckets": [
+                {"window": "weekly", "remaining": argon["weekly"], "reset_at": iso(utc(days=2, hours=7)), "disabled": False, "note": None}]}]}
 
     def agy_health(self):
-        ok = min(SIM.gemini.values()) > 0
+        with SIM.lock:
+            ok = min(quota_of(self.model).values()) > 0
         return {"ok": ok, "error": None if ok else "PROVIDER_QUOTA", "model": "agy-sim", "checked_at": _now()}
 
     agy.AgyProvider.call = agy_call
     agy.AgyProvider.usage = agy_usage
     agy.AgyProvider.health = agy_health
+    agy.AgyProvider.models = lambda self: [dict(m) for m in AGY_MODELS]  # not this machine's own agy
     agy.AgyProvider.media_health = lambda self: {"ok": True, "version": "agy-sim", "checked_at": _now()}
     agy.AgyProvider.version = lambda self: "agy-sim"
 
@@ -632,7 +666,7 @@ def seed(home: Path) -> None:
     week = [x for x in log if x[0] >= iso(utc(days=-7)).replace("Z", "+00:00")]
     for j, x in enumerate(week):
         x[2] = round(0.98 - (0.98 - SIM.gemini["weekly"]) * j / max(1, len(week) - 1), 3)
-    db.set_setting("agy_quota_log", week)
+    db.set_setting("agy_quota_logs", {"Gemini Models": week})
     db.set_setting("magpie_report_cursor", db.one("SELECT MAX(id) m FROM model_calls")["m"])  # nothing old to report: the sim shows new calls going
 
 

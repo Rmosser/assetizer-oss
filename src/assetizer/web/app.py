@@ -108,20 +108,12 @@ def _run_view(r: dict | None) -> dict | None:
     for s in stages:
         s["label"] = STAGE_LABELS.get(s["name"], s["name"])
         s["detail"] = db.unj(s["detail"], None)
-    return {**r, "error_class": _error_class(r), "summary": db.unj(r.get("summary"), {}), "pins": db.unj(r.get("pins"), {}), "stages": stages}
+    return {**r, "summary": db.unj(r.get("summary"), {}), "pins": db.unj(r.get("pins"), {}), "retry": db.unj(r.get("retry"), None), "stages": stages}
 
 
 # a sample: a video of a channel still being tuned that is not in Notion — tried out, not an issue (it is not counted);
 # for queries over sources s joined to channels c
 NOT_SAMPLE = "NOT (COALESCE(c.stage, '') = 'TUNING' AND s.delivery NOT IN ('DELIVERED','REGISTERED'))"
-
-
-def _error_class(run: dict) -> str | None:
-    """The run's error class. A model's safety filter reads as its own class: unlike its other failures, it is unlikely
-    to go away by trying again."""
-    if run["error_class"] == "PROVIDER_FAILURE" and "safety filter" in (run["error"] or "").lower():
-        return "CONTENT_SAFETY"
-    return run["error_class"]
 
 
 def _issues(where: str = "1=1", *args) -> list[dict]:
@@ -162,7 +154,8 @@ def _issues(where: str = "1=1", *args) -> list[dict]:
             "units": summ.get("units"), "must": len(must), "notes": notes.get((s["id"], rid), 0), "cover": covers.get(rid),
             "clips": sum(v for k, v in (summ.get("assets") or {}).items() if k == "clip:GENERATED"), "musts": must[:3],
             "production": last["production"] if last else None, "stage": last["stage"] if last else None,
-            "error_class": _error_class(last) if last else None, "origin": last["origin"] if last else None,
+            "error_class": last["error_class"] if last else None, "origin": last["origin"] if last else None,
+            "retry": db.unj(last.get("retry"), None) if last else None,
             # 库里可能已有 (a05), 旧页上有你的改动 (a07): what the 刊 asks about
             "maybe": db.setting(f"maybe_have:{s['id']}") if s.get("delivery_reason") == "MAYBE_HAVE" else None,
             "yours": db.setting(f"yours_on_page:{s['id']}") if s.get("delivery_reason") == "YOURS_ON_PAGE" else None,
@@ -422,7 +415,7 @@ _sizes_lock = threading.Lock()
 
 
 def _dir_sizes(s) -> dict:
-    """Bytes under media / runs / packages. The 机房 page asks every 10 seconds and on the box these hold tens of GB in
+    """Bytes under media / runs / packages. The 机房 and 设置 pages ask every 10 seconds and on the box these hold tens of GB in
     tens of thousands of files, so after the first count the last one is answered and a recount runs in the
     background, at most once a minute."""
     import time
@@ -467,15 +460,49 @@ def _providers() -> dict:
             "in_use": list(dict.fromkeys(p.name for p in in_use()))}
 
 
-@app.get("/api/engine")
-def engine():
+def _box() -> dict:
+    """What the box is set to and how each part of it is doing: all the 设置 page reads, and the 机房 reads it too."""
     from .. import ingest
-    from ..pipeline.runner import worker_slots
     from ..providers import magpie_state
-    from ..providers.agy import route_models
+    from ..providers.agy import groups_in_use, quota_logs, route_models
     s = config.get()
     magpie_state.read_if_stale()
     du = shutil.disk_usage(s.home)
+    q = db.setting("agy_quota")
+    return {
+        "disk": {"total": du.total, "free": du.free, **_dir_sizes(s)},
+        "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model, "agy_models": route_models(),
+        # agy's quota with the groups of it the stages draw on now, and a week of each Gemini group
+        "quota": {"agy": {**q, "in_use": [g["name"] for g in groups_in_use(q)]} if q else None, "agy_log": quota_logs()},
+        "magpie": magpie_state.view(),
+        "providers": _providers(),
+        "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
+                   "parent": db.setting("notion_parent_page_id"), "title": db.setting("notion_database_title", "课代表")},
+        "knobs": knobs.view(), "backfill": ingest.backfill_view(), "asr": _asr_view(), "telegram": _telegram_view(),
+        "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
+                    "profile_ok": bool(s.browser_profile and s.browser_profile.exists()), **_cookie_status()},
+        "paused": db.setting("queue_paused"),
+        "alerts": db.q("SELECT * FROM alerts ORDER BY resolved_at IS NOT NULL, created_at DESC LIMIT 20"),
+    }
+
+
+def _retries_since(since: str) -> dict:
+    """What trying again came to, by the kind of error: the calls that needed it, the tries (asking another model is one), the
+    calls that then got through."""
+    return {r["kind"]: {"calls": r["n"], "tried": r["tried"], "rescued": r["rescued"]} for r in db.q(
+        "SELECT kind, COUNT(*) n, SUM(tries + (fallback IS NOT NULL)) tried, SUM(rescued) rescued FROM retries WHERE created_at >= ? GROUP BY kind", since)}
+
+
+@app.get("/api/settings")
+def settings():
+    from datetime import datetime, timedelta, timezone
+    month = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds")
+    return {**_box(), "retry_defaults": knobs.RETRY_DEFAULTS, "retry_max": knobs.RETRY_MAX, "retries": _retries_since(month)}
+
+
+@app.get("/api/engine")
+def engine():
+    from ..pipeline.runner import worker_slots
     runs = [_run_view(r) for r in db.q("SELECT * FROM runs ORDER BY created_at DESC LIMIT 30")]
     for r in runs:
         src = db.one("SELECT title, headline FROM sources WHERE id=?", r["source_id"]) or {}
@@ -485,19 +512,9 @@ def engine():
     counts = db.one("""SELECT SUM(production='RUNNING') running, SUM(production='QUEUED') queued,
                        SUM(production IN ('WAITING','INTERRUPTED')) waiting FROM runs""")
     return {
-        "disk": {"total": du.total, "free": du.free, **_dir_sizes(s)},
-        "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model, "agy_models": route_models(),
-        "quota": {"agy": db.setting("agy_quota"), "agy_log": db.setting("agy_quota_log") or []},
-        "magpie": magpie_state.view(),
-        "providers": _providers(), "slots": worker_slots(), "drain_seconds": _drain(),
+        **_box(),
+        "slots": worker_slots(), "drain_seconds": _drain(),
         "counts": {k: counts[k] or 0 for k in ("running", "queued", "waiting")},
-        "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
-                   "parent": db.setting("notion_parent_page_id"), "title": db.setting("notion_database_title", "课代表")},
-        "knobs": knobs.view(), "backfill": ingest.backfill_view(), "asr": _asr_view(), "telegram": _telegram_view(),
-        "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
-                    "profile_ok": bool(s.browser_profile and s.browser_profile.exists()), **_cookie_status()},
-        "paused": db.setting("queue_paused"),
-        "alerts": db.q("SELECT * FROM alerts ORDER BY resolved_at IS NOT NULL, created_at DESC LIMIT 20"),
         "runs": runs, "calls": calls,
         "events": db.q("SELECT * FROM events ORDER BY id DESC LIMIT 80"),
         "stage_labels": STAGE_LABELS,
@@ -563,7 +580,7 @@ def engine_stats():
             v = win[w]
             if not ok:
                 v["failed"] += 1
-                why = _error_class(r) or "?"
+                why = r["error_class"] or "?"
                 v["reasons"][why] = v["reasons"].get(why, 0) + 1
                 continue
             v["done"] += 1
@@ -600,8 +617,11 @@ def engine_stats():
             stages_of = m["by_stage"].setdefault(fam, {})
             k = stage_key(c["stage"] or "?")
             stages_of[k] = stages_of.get(k, 0) + tok
+    for w, cut in cuts.items():
+        win[w]["retries"] = _retries_since(cut.astimezone(timezone.utc).isoformat(timespec="seconds"))
     for v in win.values():
-        v["reasons"] = sorted(({"kind": k, "n": n} for k, n in v["reasons"].items()), key=lambda x: -x["n"])[:3]
+        # all of them: the page puts together the kinds it names alike (输出不合规) before it shows the first three
+        v["reasons"] = sorted(({"kind": k, "n": n} for k, n in v["reasons"].items()), key=lambda x: -x["n"])
         v["latency_median"] = round(median(v["latency"])) if v["latency"] else None
         del v["latency"]
         v["per_hour"] = sorted(({"name": n, "label": STAGE_LABELS.get(n, n), "minutes": round(median(x), 1)}
@@ -611,7 +631,7 @@ def engine_stats():
             v["calls"]["by_stage"][fam] = sorted(({"key": k, "tokens": n, "share": n / total} for k, n in g.items()),
                                                  key=lambda x: -x["tokens"])
     return {"now": now_l.isoformat(timespec="seconds"), "windows": win, "days": [bars[k] for k in days],
-            "runway": _runway(), "runways": _sub_runways()}
+            "agy_runways": _agy_runways(), "runways": _sub_runways()}
 
 
 RUNWAY_MIN_DONE = 3  # issues finished over the readings before the quota's use per issue is told
@@ -646,12 +666,20 @@ def _runway_of(log: list, week: dict | None) -> dict | None:
     return {"per_issue": per, "issues": int(week["remaining"] / per), "remaining": week["remaining"], "reset_at": week["reset_at"]}
 
 
+def _agy_runways() -> dict:
+    """约够印 N 期 for each group of agy's quota a stage draws on, by its name (the Gemini tiles on the 机房 page)."""
+    from ..providers.agy import groups_in_use, quota_logs
+    logs, out = quota_logs(), {}
+    for g in groups_in_use():
+        week = next((b for b in g["buckets"] if b["window"] == "weekly" and not b["disabled"]), None)
+        if r := _runway_of([[x[0], x[2]] for x in logs.get(g["name"]) or []], week):
+            out[g["name"]] = r
+    return out
+
+
 def _runway() -> dict | None:
-    """约够印 N 期 for the production group's weekly quota on agy."""
-    q = db.setting("agy_quota") or {}
-    g = next((g for g in q.get("groups") or [] if g["name"] == q.get("production_group")), None)
-    week = next((b for b in (g or {}).get("buckets", []) if b["window"] == "weekly" and not b["disabled"]), None)
-    return _runway_of([[x[0], x[2]] for x in db.setting("agy_quota_log") or []], week)
+    """For the 补录 sheet's estimate: the group of agy's quota in use that an issue takes the largest share of a week of."""
+    return max(_agy_runways().values(), key=lambda r: r["per_issue"], default=None)
 
 
 def _sub_runways() -> dict:
@@ -828,23 +856,25 @@ def retry(rid: str):
     if src and not (src["media_state"] == "CACHED" and src["media_path"] and Path(src["media_path"]).exists()):
         # the video went with retention: fetch and cut it again; the stages done with it stay done
         db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND name IN ('ACQUIRE','CHUNK')", rid)
-    db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL, error=NULL, error_class=NULL, attempts=0, stop_at=NULL WHERE id=?", rid)
+    db.exec("UPDATE runs SET production='QUEUED', wait_reason=NULL, error=NULL, error_class=NULL, attempts=0, stop_at=NULL, retry=NULL WHERE id=?", rid)
     return {"ok": True}
 
 
 @app.post("/api/runs/{rid}/ignore")
 def ignore(rid: str):
-    """A video no login opens (removed, private, members-only) is put away: nothing to fix, nothing to wait for (a15)."""
+    """A video no login opens (removed, private, members-only) is put away: nothing to fix, nothing to wait for (a15). So is
+    one the safety filter keeps stopping, once the retries and the other model have not got it through."""
     from ..youtube import UNAVAILABLE
     r = db.one("SELECT production, error_class FROM runs WHERE id=?", rid)
     if not r:
         raise HTTPException(404)
     if r["production"] == "CANCELLED":  # a second click
         return {"ok": True}
-    if r["production"] != "FAILED" or r["error_class"] not in UNAVAILABLE:
-        raise HTTPException(409, "只有视频不可用的这一期能忽略")
+    safety = r["error_class"] == "CONTENT_SAFETY"
+    if r["production"] != "FAILED" or not (safety or r["error_class"] in UNAVAILABLE):
+        raise HTTPException(409, "只有视频不可用或被内容安全过滤拦下的这一期能忽略")
     db.exec("UPDATE runs SET production='CANCELLED' WHERE id=? AND production='FAILED'", rid)
-    db.event("run", f"视频不可用（{UNAVAILABLE[r['error_class']]}），已忽略", rid)
+    db.event("run", "被内容安全过滤拦下，已忽略" if safety else f"视频不可用（{UNAVAILABLE[r['error_class']]}），已忽略", rid)
     return {"ok": True}
 
 
@@ -974,7 +1004,7 @@ def _throttled(key: str, interval: float, what: str = "测试") -> JSONResponse 
 
 @app.post("/api/cookiecloud/test")
 def cookiecloud_test():
-    """One CookieCloud read for the 机房 button; at most one every COOKIE_TEST_INTERVAL seconds (429 otherwise)."""
+    """One CookieCloud read for the 设置 page's button; at most one every COOKIE_TEST_INTERVAL seconds (429 otherwise)."""
     from .. import cookies
     if busy := _throttled("connection", COOKIE_TEST_INTERVAL):
         return busy
@@ -990,7 +1020,7 @@ class VideoTest(BaseModel):
 
 @app.post("/api/cookiecloud/test-video")
 def cookiecloud_test_video(body: VideoTest):
-    """The 机房 video test: does YouTube accept the CookieCloud login for this video (ideally a members-only one)?
+    """The 设置 page's video test: does YouTube accept the CookieCloud login for this video (ideally a members-only one)?
     A pass also wakes the runs waiting for a YouTube login instead of leaving them to the 30-minute retry."""
     from .. import youtube
     url = body.url.strip()
@@ -1963,7 +1993,7 @@ def resume():
     return {"ok": True, "was": paused}
 
 
-# ------------------------------------------------------------------ 机房的盒子设置 (knobs.py, design §R6-7)
+# ------------------------------------------------------------------ 设置页的盒子设置 (knobs.py, design §R6-7)
 @app.post("/api/knobs")
 async def knobs_save(request: Request):
     """Partial update {key: value | null (default)}; the answer is every setting in effect."""

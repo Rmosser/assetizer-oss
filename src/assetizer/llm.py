@@ -6,21 +6,23 @@ Policy (ADR-3):
      still a failure (Run-013 S03);
   3. at most one same-model *contract repair* without media, which may only
      reformat the frozen response, never add evidence;
-  4. transient provider errors retry with backoff (max 2), everything else
-     surfaces with its classification.
+  4. each kind of error is tried again as often as the 设置 page says (knobs.retries, design §R6-10), only the call that
+     failed; the safety filter then gets one try at another model, whose answer has to pass the same checks; everything
+     else surfaces with its classification, and with what the call was put through (`retry` on the error).
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 import jsonschema
 
-from . import providers
+from . import knobs, providers
 from .providers.agy import AgyProvider, ProviderError, gemini_schema
 from .util import read_json, write_json
 
@@ -39,6 +41,14 @@ def _reusable(accepted: Path, key: str) -> bool:
         return True
     accepted.rename(accepted.with_name(f"{accepted.stem}.stale-{int(time.time())}{accepted.suffix}"))
     return False
+
+
+def _refuse(r: Any, kind: str) -> None:
+    """An answer that was not taken is not a success to reuse when the run is tried again: that would fail the same way."""
+    sub = (getattr(r, "meta", None) or {}).get("dir")
+    if sub:
+        write_json(sub / "invocation.json", {**r.receipt, "status": "FAILED", "error_class": kind})
+
 
 Recorder = Callable[[dict], None]
 
@@ -84,8 +94,9 @@ def extract_json(text: str, required: list[str] | None = None) -> Any:
 
 
 def is_safety_block(text: str) -> bool:
-    t = (text or "")[:600].lower()
-    return "blocked by gemini's filters" in t or "blocked by gemini’s filters" in t
+    """The filter's words handed back as the answer: prose where JSON was asked for. An answer may well discuss filters."""
+    t = (text or "")[:600]
+    return not t.lstrip().startswith(("{", "[", "```")) and bool(re.search(r"blocked by .{0,40}filter", t, re.I))
 
 
 def _strip_extras(obj: Any, schema: dict) -> Any:
@@ -104,40 +115,100 @@ def validate(obj: Any, schema: dict) -> None:
 
 
 class LLM:
-    def __init__(self, provider: AgyProvider | None = None, recorder: Recorder | None = None, session: str | None = None):
+    def __init__(self, provider: AgyProvider | None = None, recorder: Recorder | None = None, session: str | None = None,
+                 watch: Any = None):
         self.fixed = provider  # an explicit provider answers every stage (bench, tests); otherwise `stage_providers` routes
         self.p = provider or providers.get()
         self.recorder = recorder
         self.session = session
+        self.watch = watch  # the run these calls are for (RunContext): told of retries, and only for a run do we change model
 
-    def provider(self, stage: str):
-        p = self.fixed or providers.for_stage(stage)
+    def _bound(self, p):
         if self.session and hasattr(p, "session"):
             p.session = self.session
         return p
+
+    def provider(self, stage: str):
+        return self._bound(self.fixed or providers.for_stage(stage))
 
     def _record(self, stage: str, attempt: str, receipt: dict) -> None:
         if self.recorder:
             self.recorder({"stage": stage, "attempt": attempt, **receipt})
 
-    def _call(self, d: Path, stage: str, prompt: str, **kw):
-        last: ProviderError | None = None
+    def _again(self, kind: str, stage: str, retry: int, of: int, fallback: str | None = None) -> bool:
+        """About to try again. False: the run was asked to stop, this is where its calls end."""
+        return not self.watch or self.watch.retrying({"kind": kind, "call": stage, "retry": retry, "of": of, "fallback": fallback})
+
+    def _settled(self, stage: str, tried: dict[str, int], rescued: bool, fallback: str | None = None) -> None:
+        if self.watch and (fallback or any(tried.values())):
+            self.watch.settled(stage, tried, rescued, fallback)
+
+    def _attempt(self, p, sub: Path, stage: str, prompt: str, **kw):
+        """One call, recorded; the answer knows where it is kept (`meta["dir"]`). The filter's words handed back as an
+        answer fail like the filter's error."""
+        try:
+            r = p.call(sub, prompt, **kw)
+            if is_safety_block(r.text):
+                failed = {**r.receipt, "status": "FAILED", "error_class": "CONTENT_SAFETY"}
+                write_json(sub / "invocation.json", failed)  # not a success to reuse when the run is tried again
+                raise ProviderError("CONTENT_SAFETY", r.text[:300], failed)
+        except ProviderError as e:
+            self._record(stage, sub.name, e.receipt or {"status": "FAILED", "error_class": e.kind})
+            raise
+        if not r.reused:
+            self._record(stage, sub.name, r.receipt)
+        if isinstance(getattr(r, "meta", None), dict):
+            r.meta["dir"] = sub
+        return r
+
+    def _call(self, d: Path, stage: str, prompt: str, accept: Callable[[str], Any] | None = None, **kw):
+        """One call, tried again as the 设置 page says for what failed it. Failing in the end, the error says what the call
+        was put through (`retry`, the shape of runs.retry: 试了 4 次). `accept`: the checks another model's answer must pass."""
         p = self.provider(stage)
-        for n in range(3):
-            sub = d if n == 0 else d.with_name(d.name + f"-retry{n}")
+        tried: dict[str, int] = {}
+        while True:
+            n = sum(tried.values())
             try:
-                r = p.call(sub, prompt, **kw)
-                if not r.reused:
-                    self._record(stage, sub.name, r.receipt)
+                r = self._attempt(p, d if n == 0 else d.with_name(f"{d.name}-retry{n}"), stage, prompt, **kw)
+                self._settled(stage, tried, True)
                 return r
             except ProviderError as e:
-                self._record(stage, sub.name, e.receipt or {"status": "FAILED", "error_class": e.kind})
-                last = e
-                if not e.transient:
+                kind, of = knobs.retry_kind(e.kind), knobs.retries(e.kind)
+                if tried.get(kind, 0) < of and self._again(kind, stage, tried.get(kind, 0) + 1, of):
+                    tried[kind] = tried.get(kind, 0) + 1
+                    if e.transient:
+                        time.sleep(20 * tried[kind])
+                    continue
+                r, route = self._another_model(d, stage, prompt, tried, of, accept, **kw) if kind == "CONTENT_SAFETY" else (None, None)
+                self._settled(stage, tried, r is not None, route)
+                if r is not None:
+                    return r
+                if sum(tried.values()) or route:
+                    e.retry = {"kind": kind, "call": stage, "retry": sum(tried.values()), "of": of, "fallback": route}
+                raise
+
+    def _another_model(self, d: Path, stage: str, prompt: str, tried: dict[str, int], of: int,
+                       accept: Callable[[str], Any] | None = None, **kw):
+        """The safety filter kept stopping this call: one try at another model, for the answer and the model tried. The
+        answer counts only once `accept` takes it. That model's failure is no news (its quota or login must not pause the
+        queue, nor its video frames fail the run, over a call the first model refused anyway): the block stands."""
+        other = None if self.fixed or not self.watch else providers.safety_fallback(stage)
+        if not other or not self._again("CONTENT_SAFETY", stage, tried.get("CONTENT_SAFETY", 0), of, other[0]):
+            return None, None
+        sub = d.with_name(f"{d.name}-fallback")
+        try:
+            r = self._attempt(self._bound(other[1]), sub, stage, prompt, **kw)
+            if accept:
+                try:
+                    accept(r.text)
+                except ContractError as e:
+                    _refuse(r, e.kind)
                     raise
-                time.sleep(20 * (n + 1))
-        assert last
-        raise last
+            return r, other[0]
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:  # the provider's, the checks', the frames'
+            if not isinstance(e, ProviderError):
+                self.watch.event(f"换 {other[0]} 没有写成：{str(e)[:300]}", "warn")
+            return None, other[0]
 
     def text(self, call_root: Path, stage: str, prompt: str, *, min_chars: int = 200,
              media: list[str] | None = None, effort: str | None = None) -> str:
@@ -146,9 +217,16 @@ class LLM:
         key = _fingerprint(prompt, media, effort)
         if _reusable(accepted, key):
             return accepted.read_text()
-        r = self._call(d / "attempt-1", stage, prompt, kind=stage, media=media, effort=effort)
-        if len(r.text.strip()) < min_chars:
-            raise ContractError("CONTENT_FAILURE", f"response only {len(r.text)} chars")
+
+        def enough(text: str) -> None:
+            if len(text.strip()) < min_chars:
+                raise ContractError("CONTENT_FAILURE", f"response only {len(text)} chars")
+        r = self._call(d / "attempt-1", stage, prompt, accept=enough, kind=stage, media=media, effort=effort)
+        try:
+            enough(r.text)
+        except ContractError as e:
+            _refuse(r, e.kind)
+            raise
         accepted.write_text(r.text)
         accepted.with_suffix(".key").write_text(key)
         return r.text
@@ -166,7 +244,8 @@ class LLM:
         Run-014 validated path — and are validated locally.
 
         Recovery policy:
-          * deviation / empty / parseable-but-invalid → regenerate once (fresh call);
+          * a provider's error → `_call` tries that call again as the 设置 page says;
+          * empty / parseable-but-invalid → regenerate with the reason (CONTRACT, once by default);
           * unparseable text → one media-free contract repair (pure reformatting);
           * repair output must pass the same validation and check, otherwise fail.
         """
@@ -189,43 +268,38 @@ class LLM:
                 check(o)
             return o
 
-        last: ContractError | ProviderError | None = None
-        r = None
-        deviations = 0
+        attempts_again = knobs.retries("CONTRACT")
+        n = 0
         feedback = ""  # why the previous answer was rejected: the same prompt again got the same answer (2026-10-27)
-        for n in (1, 2, 3, 4):
-            if n == 4 or (n == 3 and deviations == 0):
-                break
+
+        def given_up(e: ContractError) -> ContractError:
+            self._settled(stage, {"CONTRACT": n - 1}, False)
+            if n > 1:
+                e.retry = {"kind": "CONTRACT", "call": stage, "retry": n - 1, "of": attempts_again, "fallback": None}
+            return e
+
+        while True:
+            n += 1
             try:
-                r = self._call(d / f"attempt-{n}", stage, full_prompt + feedback, **kw)
-            except ProviderError as e:
-                if e.kind not in ("MODALITY_ROUTING_DEVIATION", "MEDIA_READ_COUNT"):
-                    raise
-                deviations += 1
-                last = e
-                continue
-            if is_safety_block(r.text):
-                # Gemini filters occasionally false-positive on trading content; a fresh call usually passes
-                write_json(d / f"invalid-{n}.json", {"classification": "PROVIDER_SAFETY_BLOCK", "detail": r.text[:300]})
-                last = ContractError("PROVIDER_SAFETY_BLOCK", "blocked by Gemini filters")
-                deviations += 1  # allow the third attempt
-                continue
+                r = self._call(d / f"attempt-{n}", stage, full_prompt + feedback, accept=parse, **kw)
+            except ProviderError:
+                self._settled(stage, {"CONTRACT": n - 1}, False)  # the answers rewritten so far count, the call failing after
+                raise
             try:
                 obj = parse(r.text)
                 write_json(accepted, obj)
                 accepted.with_suffix(".key").write_text(key)
+                self._settled(stage, {"CONTRACT": n - 1}, True)
                 return obj
             except ContractError as e:
+                _refuse(r, e.kind)
                 write_json(d / f"invalid-{n}.json", {"classification": e.kind, "detail": str(e)})
                 last = e
                 if e.kind == "FORMAT_NONCOMPLIANCE" and len(r.text.strip().strip("}{[] \n")) >= 20:
-                    break  # real content in a broken envelope → repair below
+                    break  # real content in a broken envelope → repair below; not a try of its own
+                if n > attempts_again or not self._again("CONTRACT", stage, n, attempts_again):
+                    raise given_up(e)
                 feedback = f"\n\n【上一次的输出没有通过校验】{e}。请重新完整输出，不要遗漏任何要求的条目。"
-        if r is None and isinstance(last, ProviderError):
-            raise last
-        if r is None or not isinstance(last, ContractError) or last.kind != "FORMAT_NONCOMPLIANCE" \
-                or len(r.text.strip().strip("}{[] \n")) < 20:
-            raise last if last else ContractError("CONTENT_FAILURE")
         repair_prompt = (
             "禁止使用任何工具、媒体与外部知识。你的唯一任务是把下面冻结的响应转换为符合给定 JSON Schema 的对象。"
             "不得改写事实、增加观点或补充证据；原响应没有的信息用空字符串或空数组，并在可用的 uncertainties 字段记录缺失。"
@@ -233,8 +307,17 @@ class LLM:
             f"\n失败原因：{last}\n\nJSON Schema：\n{json.dumps(gemini_schema(schema), ensure_ascii=False)}"
             f"\n\n冻结响应：\n{r.text}"
         )
-        rr = self._call(d / "contract-repair", stage + ":repair", repair_prompt, kind="contract-repair")
-        obj = parse(rr.text)
+        try:
+            rr = self._call(d / "contract-repair", stage + ":repair", repair_prompt, kind="contract-repair")
+        except ProviderError:
+            self._settled(stage, {"CONTRACT": n - 1}, False)
+            raise
+        try:
+            obj = parse(rr.text)
+        except ContractError as e:
+            _refuse(rr, e.kind)
+            raise given_up(e)
         write_json(accepted, obj)
         accepted.with_suffix(".key").write_text(key)
+        self._settled(stage, {"CONTRACT": n - 1}, True)
         return obj

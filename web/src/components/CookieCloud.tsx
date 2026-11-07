@@ -3,7 +3,7 @@ import { post } from "../api";
 import { ago } from "../util";
 import { Sheet } from "./Sheet";
 
-/* 机房 · YouTube 会话: setting up CookieCloud in four steps, each saying where its value comes from, then two tests.
+/* 设置 · YouTube: setting up CookieCloud in four steps, each saying where its value comes from, then two tests.
    The secrets are write-only: the server never sends one back, the form never refills one, and nothing is kept
    outside this component's state (no storage, URL or console). */
 

@@ -75,6 +75,10 @@ class CallResult:
     meta: dict = field(default_factory=dict)
 
 
+# A model's safety filter or its refusal: another try may well pass, the answer being what was stopped ("blocked by content
+# safety filters … violate Google's Generative AI Prohibited Use policy", 2026-11; "blocked by Gemini's filters", before).
+SAFETY_RE = re.compile(r"blocked by .{0,40}filter|safety filter|prohibited[ _]use|prohibited[ _]content|content[ _]filter|"
+                       r"content[ _]policy|\brefusal\b", re.I)
 _TRANSIENT_RE = re.compile(r"\b(429|500|502|503|504)\b|resource_exhausted|unavailable|deadline exceeded|timed out|"
                            r"temporarily|overloaded|rate limit|connection reset|broken pipe|unexpected eof|"
                            r"connection refused|tls handshake|no such host|i/o timeout|"
@@ -160,6 +164,8 @@ def _stop(pgid: int, sig: int = signal.SIGTERM) -> None:
 
 def classify_error(text: str) -> str:
     t = (text or "").lower()
+    if SAFETY_RE.search(t):
+        return "CONTENT_SAFETY"
     if "output token limit" in t or "max_tokens" in t or "output limit" in t:
         return "PROVIDER_OUTPUT_LIMIT"
     if _MODEL_GONE.search(t):
@@ -567,13 +573,16 @@ def _name(model: str) -> str:
 
 
 def route_models() -> list[dict]:
-    """agy's models as the page's model list has them (magpie_state.model_view). Until agy has been asked: the models
-    the routes use, so a stage reads by its model's name and is not taken for one that was withdrawn."""
+    """agy's models as the page's model list has them (magpie_state.model_view), each with the group of agy's quota it
+    draws on (`quota`; None until a reading places it). Until agy has been asked: the models the routes use, so a stage
+    reads by its model's name and is not taken for one that was withdrawn."""
     from .. import db
     from . import AGY_PREFIX, is_agy, resolve, routes
     rows = db.setting("agy_models") or [{"id": r[len(AGY_PREFIX):], "name": _name(r[len(AGY_PREFIX):])}
                                         for r in dict.fromkeys([resolve("agy"), *routes()]) if is_agy(r)]
-    return [{"id": AGY_PREFIX + m["id"], "name": m["name"], "vendor": "agy", "group": False, "watches": True} for m in rows]
+    groups = (db.setting("agy_quota") or {}).get("groups") or []
+    return [{"id": AGY_PREFIX + m["id"], "name": m["name"], "vendor": "agy", "group": False, "watches": True,
+             "quota": (quota_group(groups, m["id"]) or {}).get("name")} for m in rows]
 
 
 def missing_routes() -> list[str]:
@@ -621,30 +630,78 @@ def parse_usage(payload: dict) -> list[dict]:
     return [{"name": k, "models": "", "buckets": v} for k, v in by.items()]
 
 
+def _words(text: str) -> str:
+    """The words that name a model, versions left out: "Gemini 4 Argon" → "gemini argon", gemini-3.8-flash → "gemini flash"."""
+    return " ".join(w for w in (x.strip(".") for x in re.split(r"[^a-z0-9.]+", text.lower())) if w and not re.fullmatch(r"[\d.]+", w))
+
+
+def _gemini(g: dict) -> bool:
+    return "gemini" in (g["name"] + (g.get("models") or "")).lower()
+
+
 def quota_group(groups: list[dict], model: str) -> dict | None:
-    """The group production draws on: the one whose models include the configured model's family (Flash / Pro)."""
-    family = next((f for f in ("flash", "pro") if f in model.lower()), "")
-    gem = [g for g in groups if "gemini" in (g["name"] + g["models"]).lower()]
-    return next((g for g in gem if family and f"gemini {family}" in g["models"].lower()), None) or (gem[0] if gem else None)
+    """The group of `/usage` a Gemini model draws on. agy keeps a quota per group of models and `/usage` says which: on
+    agy 1.5 Flash and Pro share "Gemini Models" ("Models within this group: Gemini Flash, Gemini Pro"); 1.2.16 also had a
+    "Gemini 4 Argon" of its own. The group named after the model, else the one listing its family, the longest name first
+    (a -flash-lite model: "Gemini Flash Lite", then "Gemini Flash"). A model neither places (Argon on agy 1.5) is counted in
+    the Gemini group named for no model, if there is just one; otherwise it has none."""
+    gem = [g for g in groups if _gemini(g)]
+    name = _words(re.sub(r"-(low|medium|high)$", "", model)).split()
+    for n in range(len(name), 1, -1):
+        said = f" {' '.join(name[:n])} "
+        for part in ("name", "models"):
+            if g := next((g for g in gem if said in f" {_words(g.get(part) or '')} "), None):
+                return g
+    plain = [g for g in gem if not set(_words(g["name"]).split()) - {"gemini", "models", "model"}]
+    return plain[0] if len(plain) == 1 else None
+
+
+def groups_in_use(q: dict | None = None) -> list[dict]:
+    """The groups of a `/usage` reading (by default the latest kept) that the stages on agy draw on, each once, in the order
+    of the routes (the default first)."""
+    from .. import db
+    from . import AGY_PREFIX, is_agy, routes
+    groups = ((db.setting("agy_quota") or {}) if q is None else q).get("groups") or []
+    out: dict[str, dict] = {}
+    for r in routes():
+        if is_agy(r) and (g := quota_group(groups, r[len(AGY_PREFIX):])):
+            out.setdefault(g["name"], g)
+    return list(out.values())
+
+
+def quota_logs() -> dict[str, list]:
+    """A week of each Gemini group's two windows (setting agy_quota_logs: {group: [[time, 5-hour left, weekly left], …]}),
+    for the trend and 约够印 on the 机房 page. Until that is first written: the one list 0.4.35 and earlier keep
+    (agy_quota_log), as the readings of the group the box's model drew on (production_group). That list is no longer
+    written and keeps its form, so a version rolled back to goes on with it (an older version reads a newer database)."""
+    from .. import db
+    logs = db.setting("agy_quota_logs")
+    if logs is not None:
+        return logs
+    old = db.setting("agy_quota_log")
+    g = (db.setting("agy_quota") or {}).get("production_group")
+    return {g: old} if g and isinstance(old, list) and old else {}
 
 
 def record_usage(q: dict) -> dict:
-    """Keep the latest `/usage` answer (setting agy_quota) and, when it worked, a week of the production group's two
-    windows (agy_quota_log: [time, 5-hour left, weekly left]) for the trend on the 机房 page."""
-    from .. import config as _config, db
+    """Keep the latest `/usage` answer (setting agy_quota) and, when it worked, the readings of every Gemini group
+    (quota_logs; a stage sent to another model has its group's trend from the start). Returned with `in_use`: the names of
+    the groups the stages draw on (groups_in_use)."""
+    from .. import db
     if q.get("ok"):
-        g = quota_group(q["groups"], _config.get().agy_model)
-        q = {**q, "production_group": g["name"] if g else None}
-        if g:
+        cut = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=8)).isoformat(timespec="seconds")
+        logs = quota_logs()
+        for g in filter(_gemini, q["groups"]):
             left = {b["window"]: (None if b["disabled"] else b["remaining"]) for b in g["buckets"]}
-            cut = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=8)).isoformat(timespec="seconds")
-            log = [x for x in (db.setting("agy_quota_log") or []) if x[0] >= cut]
-            db.set_setting("agy_quota_log", (log + [[q["checked_at"], left.get("5h"), left.get("weekly")]])[-1200:])
+            logs[g["name"]] = (logs.get(g["name"]) or []) + [[q["checked_at"], left.get("5h"), left.get("weekly")]]
+        logs = {k: [x for x in v if x[0] >= cut][-1200:] for k, v in logs.items()}
+        db.set_setting("agy_quota_logs", {k: v for k, v in logs.items() if v})
         db.set_setting("agy_quota", q)
-    else:  # keep the last numbers that were read, say why this read failed
-        last = db.setting("agy_quota") or {}
-        db.set_setting("agy_quota", {**last, "ok": False, "error": q.get("error"), "detail": q.get("detail"),
-                                     "failed_at": q.get("checked_at")} if last.get("groups") else q)
+        return {**q, "in_use": [g["name"] for g in groups_in_use(q)]}
+    # keep the last numbers that were read, say why this read failed
+    last = db.setting("agy_quota") or {}
+    db.set_setting("agy_quota", {**last, "ok": False, "error": q.get("error"), "detail": q.get("detail"),
+                                 "failed_at": q.get("checked_at")} if last.get("groups") else q)
     return q
 
 

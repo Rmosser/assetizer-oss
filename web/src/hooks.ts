@@ -10,20 +10,29 @@ export function usePoll<T>(path: string | null, interval = 0) {
   const [loadedAt, setLoadedAt] = useState<number>(0);
   const alive = useRef(true);
   const has = useRef(false);
-  const load = useCallback(async () => {
+  // answers come back in any order: one older than what is shown, or asked before something was changed here (`reload`
+  // after a save; the page opening on another path), would put back what was there before
+  const sent = useRef(0), floor = useRef(0), shown = useRef(0);
+  const load = useCallback(async (fresh = false) => {
     if (!path) return;
+    const mine = ++sent.current;
+    if (fresh) floor.current = mine;
+    const late = () => !alive.current || mine < floor.current || mine < shown.current;
     try {
       const d = await get<T>(path);
-      if (alive.current) { has.current = true; setData(d); setError(null); setLoadedAt(Date.now()); }
+      if (late()) return;
+      shown.current = mine;
+      has.current = true; setData(d); setError(null); setLoadedAt(Date.now());
     } catch (e) {
       const err = e as Error;
       // a cross-origin redirect to the Access login surfaces as a TypeError too
-      if (alive.current) setError({ message: err.message || String(e), auth: err.name === "AuthExpired" || err.name === "TypeError", at: Date.now() });
+      if (!late()) setError({ message: err.message || String(e), auth: err.name === "AuthExpired" || err.name === "TypeError", at: Date.now() });
     }
   }, [path]);
+  const reload = useCallback(() => load(true), [load]);
   useEffect(() => {
     alive.current = true;
-    load();
+    load(true);
     // without data, keep retrying quietly so a dropped connection heals by itself
     const every = interval || 0;
     const t = setInterval(() => { if (!document.hidden && (every || !has.current)) load(); }, every || 15000);
@@ -32,7 +41,7 @@ export function usePoll<T>(path: string | null, interval = 0) {
   // what is polled is read again the moment the page is back (a Mac waking, a tab brought forward, the network back),
   // not a whole interval later
   useBack(interval ? load : null);
-  return { data, error, loadedAt, reload: load, setData };
+  return { data, error, loadedAt, reload, setData };
 }
 
 /** Call `fn` when the page comes back into view, gets the focus again, or the network returns (at most every 2 s). */

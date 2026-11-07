@@ -64,6 +64,21 @@ def for_stage(stage: str):
     return _make(choice) if choice else get()
 
 
+def safety_fallback(stage: str) -> tuple[str, object] | None:
+    """(route, provider) for the last try of a call the safety filter keeps stopping (design §R6-10), or None: none is set,
+    it is the model that stopped it, or the stage watches video and that model cannot. Not one of `in_use`: its quota or
+    login does not pause the queue."""
+    from .. import db, knobs
+    route = knobs.fallback_route()
+    if not route:
+        return None
+    key = stage_key(stage)
+    own = (db.setting("stage_providers") or {}).get(key) or db.setting("llm_provider") or "agy"
+    if resolve(route) == resolve(own) or (key in knobs.VIDEO_STAGES and not knobs.watches(resolve(route))):
+        return None
+    return resolve(route), _make(route)
+
+
 def routes() -> list[str]:
     """The default route and every one a stage is sent to, resolved, each once."""
     from .. import db
@@ -72,9 +87,20 @@ def routes() -> list[str]:
 
 
 def in_use() -> list:
-    """One provider per subscription in use: a quota pause only lifts when all of them answer. Two models of one
-    subscription draw on one quota, so asking one is enough; a routing group may span several, so each is asked."""
+    """One provider per quota in use: a quota pause only lifts when all of them answer. Two models of one magpie
+    subscription draw on one quota, so asking one is enough; a routing group may span several, so each is asked. agy
+    keeps a quota per group of models, as its `/usage` groups them (agy.quota_group; on agy 1.5 all Gemini models count
+    in "Gemini Models"), so one model per group is asked, and one that no reading of agy's quota places yet is asked
+    for itself."""
+    from .. import db
+    from .agy import quota_group
+    groups = (db.setting("agy_quota") or {}).get("groups") or []
+
+    def quota(r: str) -> str:
+        if is_agy(r):
+            return f"agy:{g['name']}" if (g := quota_group(groups, r[len(AGY_PREFIX):])) else r
+        return r if r.startswith("group/") or "/" not in r else r.split("/")[0]
     seen: dict[str, str] = {}
     for r in routes():
-        seen.setdefault(r if r.startswith("group/") or "/" not in r else r.split("/")[0], r)
+        seen.setdefault(quota(r), r)
     return [_make(r) for r in seen.values()]

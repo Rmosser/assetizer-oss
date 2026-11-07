@@ -43,7 +43,7 @@
    - `lzc-cli docker -- ps -a | grep assetizer`：app / web / worker 三个容器都是 healthy；
    - 版本：`lzc-cli docker -- exec cloudlazycatappassetizer-web-1 grep ^version /lzcapp/pkg/package.yml`；
    - worker 日志：`lzc-cli docker -- logs --tail 200 cloudlazycatappassetizer-worker-1`；
-   - 打开入口，看刊、频道、机房三页。
+   - 打开入口，看刊、频道、机房、设置四页。
 
    `lzc-cli app status` 的 `Installed` 只说明装上了；lzc-cli 2.0.9 的 `app log` 未实现。
 
@@ -59,7 +59,7 @@ lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <�
 
 新盒子的 `init` 不能在容器里跑：LPK 不含 `seeds/`（`scripts/lzc/build_content.sh`），`init` 要读它。
 
-队列由 worker 自动暂停和恢复，不要手动设置 `queue_paused`。暂停期间 worker 每 10 分钟探测一次在用的 provider（`health()`，会调用模型），都通过就恢复队列、解除这条告警。「读不了视频」不走这条路：它由空闲时的读视频自检解除，每小时一次，通过后等它的运行才重新排队。需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」：它们清掉暂停，把等登录和等额度的运行重新排队，解除额度告警。按钮不解除 agy 的登录告警，它要等上面的探测，或 agy 回答 `/usage`（恢复时会在后台问一次）；模型调用报「未登录」时 worker 也先问一次 `/usage`，答得上就只让这一期等网络，不暂停生产；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
+队列由 worker 自动暂停和恢复，不要手动设置 `queue_paused`。暂停期间 worker 每 10 分钟探测一次在用的 provider（`health()`，会调用模型；agy 每个在用的额度组问一次），都通过就恢复队列、解除这条告警。「读不了视频」不走这条路：它由空闲时的读视频自检解除，每小时一次，通过后等它的运行才重新排队。需要立即恢复时，用首页的「恢复队列」或机房的「手动恢复」：它们清掉暂停，把等登录和等额度的运行重新排队，解除额度告警。按钮不解除 agy 的登录告警，它要等上面的探测，或 agy 回答 `/usage`（恢复时会在后台问一次）；模型调用报「未登录」时 worker 也先问一次 `/usage`，答得上就只让这一期等网络，不暂停生产；因 agy 登录暂停时页面只给「登录 agy」。在终端里登录之后，点机房额度卡的「刷新」，读到额度即解除告警、恢复队列。
 
 ## 日志与迭代
 
@@ -110,16 +110,16 @@ agy 和 yt-dlp 更新得勤，改适配代码时要参考它们最近的表现�
   ```
 
   网页只处理「没登录」的情况；agy 已登录时不会退出重登，换 Google 账号仍用上面的命令行（在 agy 里 `/logout` 再登录）。
-- **agy 额度**：`agy -p /usage --output-format json` 由 agy 自己回答，不开对话、不耗额度。worker 在 agy 在用时每 15 分钟读一次（设置 `agy_quota`、一周走势 `agy_quota_log`），机房的「刷新」立即读一次。magpie 的订阅与模型由 worker 每 5 分钟从网关读取（设置 `magpie_state`，不问供应商、不花额度）；Key 被限制时退回最近一次调用回执里的 `codex.rate_limits`（设置 `magpie_quota`）。agy 的调用每 5 分钟上报给 magpie 的 Usage 页（`rid` 是 `assetizer-<id>`，重复发送会被跳过），模型名和级别分开写（`gemini-3.8-flash` + `high`），否则 magpie 算不出价格。
+- **agy 额度**：`agy -p /usage --output-format json` 由 agy 自己回答，不开对话、不耗额度。worker 在 agy 在用时每 15 分钟读一次（设置 `agy_quota`；一周走势 `agy_quota_logs`，按 Gemini 额度组分开存。0.4.35 及以前的 `agy_quota_log` 是一条列表，升级后第一次读额度时接进当时默认型号的组，之后不再写，保持原样留给回滚），机房的「刷新」立即读一次。magpie 的订阅与模型由 worker 每 5 分钟从网关读取（设置 `magpie_state`，不问供应商、不花额度）；Key 被限制时退回最近一次调用回执里的 `codex.rate_limits`（设置 `magpie_quota`）。agy 的调用每 5 分钟上报给 magpie 的 Usage 页（`rid` 是 `assetizer-<id>`，重复发送会被跳过），模型名和级别分开写（`gemini-3.8-flash` + `high`），否则 magpie 算不出价格。
 - **magpie 和兔子的密钥**：`secrets/magpie-api-key`、`secrets/tuzi-api-key`，告警「模型密钥失效」时放这里，恢复后队列自动继续。放法和 Notion token 一样（只有用到时才需要）：
 
   ```bash
   lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; cat > /lzcapp/var/assetizer/data/secrets/magpie-api-key'
   ```
 
-  地址和模型在设置 `magpie_url`、`magpie_model`、`tuzi_model`；哪道工序用哪个模型在机房「分工」（设置 `stage_providers`，默认 provider 是 `llm_provider`）；Gemini 的型号列表来自 `agy models`（设置 `agy_models`），`agy` 这个值指环境变量 `ASSETIZER_MODEL`。
+  地址和模型在设置 `magpie_url`、`magpie_model`、`tuzi_model`；哪道工序用哪个模型在「设置」→「模型分工」（设置 `stage_providers`，默认 provider 是 `llm_provider`）；Gemini 的型号列表来自 `agy models`（设置 `agy_models`），`agy` 这个值指环境变量 `ASSETIZER_MODEL`。每种错误重试几次在「设置」→「自动重试」（设置 `retry_counts`，只存和默认不同的；`safety_fallback` 是还被拦时换的模型，`off` 不换；design §R6-10）。
 
-- **YouTube**：用 CookieCloud，在「机房」→「YouTube 会话」里按面板步骤配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)）。容器走的代理节点换 IP 后，读取会报 `ip_not_allowed`：令牌不用动，把面板显示的出口 IP 加进 CookieCloud Setup 的 `/setup/read-allowlist` 并同步，旧 IP 删掉。
+- **YouTube**：用 CookieCloud，在「设置」→「YouTube」里按面板步骤配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)）。容器走的代理节点换 IP 后，读取会报 `ip_not_allowed`：令牌不用动，把面板显示的出口 IP 加进 CookieCloud Setup 的 `/setup/read-allowlist` 并同步，旧 IP 删掉。
 
 ## Notion 目标与测试副本
 
@@ -149,7 +149,7 @@ whisper 转写可以交给局域网里的 Windows 显卡机（RTX 4070 Ti，`192
 - **显卡机**：跑在 WSL Debian 13（`debian-gpu`，镜像网络模式，直接用 192.168.1.50）里，不在 Windows 原生环境里跑。同一段 59 分钟音频，WSL 用 39 秒，Windows 原生用 50 秒。`scripts/gpu_asr/server.py` 放在 `~/voice-lab/asr`，环境是 `~/voice-lab/envs/asr`（faster-whisper、nvidia-cublas-cu12、nvidia-cudnn-cu12 9），模型在 `~/voice-lab/models/hf`，令牌在 `~/voice-lab/asr/token`，监听 8790 端口。服务用 systemd 管理（`scripts/gpu_asr/assetizer-asr.service` → `/etc/systemd/system/`），日志用 `journalctl -u assetizer-asr` 查看。模型空闲 10 分钟后自动卸载，释放显存。
 - **常驻**：WSL 开了 systemd，`.wslconfig`（`%USERPROFILE%`）设了 `instanceIdleTimeout=-1` 和 `vmIdleTimeout=-1`，没有会话连着也不会关机；Windows 登录时，计划任务「WSL debian-gpu autostart」会启动发行版，服务随之起来。Windows 重启后如果没有人登录，WSL 不会启动，转写会退回 CPU。
 - **端口坑**：镜像网络下，WSL 和 Windows 共用端口。Windows 上 8790 只要还有残留连接（包括 TIME_WAIT），服务就绑定不上；systemd 会每 30 秒重试一次，大约 2 分钟后残留连接清掉就能起来。
-- **worker**：在机房「系统」列表的「转写」里填地址（`http://192.168.1.50:8790`）和令牌，点「测试」：连得上、令牌对就通过，不发音频。设置是 `asr_url`，令牌存在 `secrets/asr-token`。状态灯「转写」显示上一期实际用的是 GPU 还是退回了 CPU。切窗口、时间偏移和繁简转换仍在 worker 里做，每个约 15 分钟的窗口发一次请求。
+- **worker**：在「设置」→「GPU 转写」里填地址（`http://192.168.1.50:8790`）和令牌，点「测试」：连得上、令牌对就通过，不发音频。设置是 `asr_url`，令牌存在 `secrets/asr-token`。机房的「转写」灯显示上一期实际用的是 GPU 还是退回了 CPU。切窗口、时间偏移和繁简转换仍在 worker 里做，每个约 15 分钟的窗口发一次请求。
 - **回退**：显卡机关机、连不上或中途出错时，这一期改用本地 CPU 转写。`TRANSCRIBE` 阶段详情里的 `device` 记录实际用的是哪一个，回退时会附带 `remote_failed`。
 
 ## OVH（迁移前的部署）

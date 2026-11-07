@@ -9,7 +9,7 @@ Configuration (all optional; without it the server Chromium profile is used as b
   setting  cookiecloud_origin        e.g. "https://cookiecloud-read.example.com"
   setting  cookiecloud_domains       default "youtube.com"
   secrets  cookiecloud-token, cf-access-client-id, cf-access-client-secret
-The 机房 page sets them through save_credentials() (docs/cookiecloud-credentials-ui.md). Secrets are write-only:
+The 设置 page sets them through save_credentials() (docs/cookiecloud-credentials-ui.md). Secrets are write-only:
 nothing here returns a value, or any part of one.
 """
 from __future__ import annotations
@@ -43,8 +43,8 @@ FIX: dict[str, str] = {
     "not_found": "只读入口不开放这个地址：通常是 origin 填错了，应为 https://cookiecloud-read.example.com。",
     "upstream_unavailable": "懒猫微服上的 CookieCloud 没有响应：检查它是否在运行。",
     "upstream_timeout": "懒猫微服上的 CookieCloud 响应超时：检查它是否在运行，稍后再试。",
-    "token_not_found": "CookieCloud App Token 不存在或没带上：在机房「YouTube 会话」里重新填写 App Token。",
-    "token_revoked": "CookieCloud App Token 已被吊销：在 CookieCloud Setup 里新建一个只读 Token，再到机房里更新。",
+    "token_not_found": "CookieCloud App Token 不存在或没带上：在设置「YouTube」里重新填写 App Token。",
+    "token_revoked": "CookieCloud App Token 已被吊销：在 CookieCloud Setup 里新建一个只读 Token，再到设置里更新。",
     "missing_scope": "App Token 没有 cookies:read 权限：重建 Token。",
     "domain_not_allowed": "App Token 的域名白名单不包含 youtube.com：调整 Token 或 cookiecloud_domains。",
     "sync_source_not_configured": "CookieCloud 还没有同步源：在 Chrome 的 CookieCloud 插件里完成配对并同步一次。",
@@ -235,7 +235,7 @@ def _record(ok: bool, source: str, code: str | None = None, count: int | None = 
 
 
 def probe() -> dict:
-    """One read through CookieCloud, as the 机房 test button and `assetizer cookies` report it:
+    """One read through CookieCloud, as the 设置 page's test button and `assetizer cookies` report it:
     {ok, count, hosts} or {ok, code, fix}, plus the token's name and whitelist when CookieCloud accepted it.
     The result is recorded like a real download's."""
     if not configured():
@@ -265,8 +265,8 @@ def _signed_in(lines: list[str]) -> bool:
 
 @contextlib.contextmanager
 def cookiecloud_file() -> Iterator[tuple[str, dict]]:
-    """Fresh CookieCloud cookies in a 0600 file for one yt-dlp call, with no fallback to the server Chromium (the 机房
-    video test). Yields (path, {count, signed_in}) and removes the file afterwards; raises CookieError."""
+    """Fresh CookieCloud cookies in a 0600 file for one yt-dlp call, with no fallback to the server Chromium (the 设置
+    page's video test). Yields (path, {count, signed_in}) and removes the file afterwards; raises CookieError."""
     try:
         text = fetch()
     except CookieError as e:
@@ -419,7 +419,7 @@ def ytdlp_login() -> Iterator[tuple[list[str], dict]]:
                 os.unlink(path)
 
 
-# ------------------------------------------------------------------ credentials from the 机房 page
+# ------------------------------------------------------------------ credentials from the 设置 page
 # API field → (label in messages, secret file; None for the origin, which is a setting)
 FIELDS: dict[str, tuple[str, str | None]] = {
     "origin": ("origin", None),
@@ -508,7 +508,7 @@ def _env_set(f: str) -> str | None:
 
 
 def save_credentials(body) -> None:
-    """Partial update from the 机房 form: {origin?, access_client_id?, access_client_secret?, app_token?, clear?: [...]}.
+    """Partial update from the 设置 page's form: {origin?, access_client_id?, access_client_secret?, app_token?, clear?: [...]}.
     Omitted or empty means unchanged. Every check runs before anything is written."""
     if not isinstance(body, dict):
         raise CredentialError(400, "请求体必须是 JSON 对象")
@@ -577,7 +577,7 @@ def _field(name: str) -> dict:
 
 
 def status() -> dict:
-    """What the 机房 shows: where the login comes from, how the last read and the last video test went (no values)."""
+    """What the 设置 page shows: where the login comes from, how the last read and the last video test went (no values)."""
     s = config.get()
     return {"cookiecloud": {"configured": configured(), "origin": origin(), "domains": domains(),
                             "access_token": bool(s.secret("cf-access-client-id") and s.secret("cf-access-client-secret")),

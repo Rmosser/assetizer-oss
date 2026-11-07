@@ -4,7 +4,7 @@ Off by default per channel (`auto_ingest`); when switched on, only videos publis
 after that moment are queued — never a backlog — and shorts/live replays shorter
 than the channel's minimum duration are skipped after RESOLVE. Older videos come in
 only when picked on the channel's 看板 (补录), through their own line: one at a time, or
-side by side in the fast hours set in 机房, while nothing else waits and the quota has
+side by side in the fast hours set on the 设置 page, while nothing else waits and the quota has
 room (design §R6-5).
 
 The channel is read through yt-dlp's flat listing of its videos and streams tabs (and
@@ -269,18 +269,16 @@ def backfill_held() -> str | None:
     """Which window of the subscriptions in use has no room beyond what new videos need ("weekly", "5h"), or None: 补录
     may go on (unknown or stale quota does not hold it back: a quota that runs out pauses production on its own)."""
     from datetime import timedelta
-    from .providers import in_use
+    from .providers.agy import groups_in_use
     from .providers.magpie_state import windows_in_use
     buckets = list(windows_in_use())
-    if any(p.name == "agy" for p in in_use()):
-        q = db.setting("agy_quota") or {}
-        g = next((g for g in q.get("groups") or [] if g["name"] == q.get("production_group")), None)
-        try:
-            fresh = q.get("ok") and datetime.fromisoformat(q["checked_at"]) > datetime.now(timezone.utc) - timedelta(hours=2)
-        except (KeyError, TypeError, ValueError):
-            fresh = False
-        if fresh and g:
-            buckets += g["buckets"]
+    q = db.setting("agy_quota") or {}
+    try:
+        fresh = q.get("ok") and datetime.fromisoformat(q["checked_at"]) > datetime.now(timezone.utc) - timedelta(hours=2)
+    except (KeyError, TypeError, ValueError):
+        fresh = False
+    if fresh:  # each group of agy's quota a stage draws on, as `/usage` groups the models (agy.quota_group)
+        buckets += [b for g in groups_in_use(q) for b in g["buckets"]]
     left = [(b["window"], b["remaining"]) for b in buckets if not b.get("disabled") and b.get("remaining") is not None]
     # the share of each window 补录 never dips into: it is for new videos (settings backfill_min_weekly / _5h)
     if any(w == "weekly" and v < knobs.get("backfill_min_weekly") for w, v in left):

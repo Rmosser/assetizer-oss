@@ -40,12 +40,13 @@ try {
     });
     assert.equal(reset.status(), 200);
     await page.goto(`${url}/engine`);
-    await page.getByRole("region", { name: "系统" }).getByRole("button", { name: /^YouTube/ }).click();
-    await page.getByRole("button", { name: "配置 CookieCloud", exact: true }).click();
+    await page.getByRole("region", { name: "系统" }).getByRole("link", { name: /^YouTube/ }).click();
+    await page.waitForURL("**/settings#youtube");
+    await page.locator("#youtube").getByRole("button", { name: "配置 CookieCloud", exact: true }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByLabel("App Token", { exact: true }).fill(token);
     // A successful mutation already returns fresh metadata. A failed refresh must not hide it or block testing.
-    await page.route("**/api/engine", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"detail":"refresh unavailable"}' }));
+    await page.route("**/api/settings", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"detail":"refresh unavailable"}' }));
     await dialog.getByRole("button", { name: "保存第 2、3 步", exact: true }).click();
     await dialog.getByText("已保存。接着做第 4 步：先「测试连接」，再「视频测试」。", { exact: true }).waitFor();
     assert.equal(await dialog.getByLabel("App Token", { exact: true }).inputValue(), "");
@@ -62,12 +63,12 @@ try {
     await dialog.getByText("令牌 assetizer · 域名白名单 youtube.com", { exact: true }).waitFor();
     const originField = dialog.locator(".cc-field").first();
     await originField.getByRole("button", { name: "清除", exact: true }).click();
-    assert.equal((await context.request.get(`${url}/api/engine`)).ok(), true);
+    assert.equal((await context.request.get(`${url}/api/settings`)).ok(), true);
     await originField.getByRole("button", { name: "确认清除", exact: true }).click();
     await dialog.getByText("已清除。", { exact: true }).waitFor();
     assert.equal(await dialog.getByLabel("Origin", { exact: true }).inputValue(), "");
     assert.equal(await dialog.getByRole("button", { name: "保存第 2、3 步", exact: true }).isEnabled(), false);
-    const saved = await (await context.request.get(`${url}/api/engine`)).json();
+    const saved = await (await context.request.get(`${url}/api/settings`)).json();
     assert.equal(saved.youtube.cookiecloud.origin, null);
     assert.equal(saved.youtube.cookiecloud.fields.app_token.configured, true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);

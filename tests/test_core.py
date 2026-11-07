@@ -51,6 +51,10 @@ def test_error_classification():
     assert classify_error('Eligibility check failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:'
                           'loadCodeAssist": EOF') == "PROVIDER_TRANSIENT"
     assert classify_error("model output token limit reached") == "PROVIDER_OUTPUT_LIMIT"
+    assert classify_error("Your previous response was blocked by content safety filters: The model output could not be generated. "
+                          "This output contains sensitive words that violate Google's Generative AI Prohibited Use policy") == "CONTENT_SAFETY"
+    assert classify_error("This request was blocked by Gemini's filters.") == "CONTENT_SAFETY"
+    assert classify_error("connection refused") != "CONTENT_SAFETY"  # refused the connection, not the request
     assert classify("ERROR: Sign in to confirm you’re not a bot") == "BOT_CHALLENGE"
     assert classify("HTTP Error 429: Too Many Requests") == "RATE_LIMITED"
     assert classify("ERROR: [youtube] eu6OH1R3mL8: This live event will begin in a few moments.") == "LIVE_UPCOMING"
@@ -2046,6 +2050,8 @@ def test_worker_runs_as_many_issues_at_once_as_the_box_allows(home, monkeypatch)
     w.tick()
     assert started == ["a-r1", "b-r1", "c-r1"]
     release["b-r1"].set(), release["c-r1"].set()
+    for run in w.active.values():
+        run.join()  # a run still writing when the next test starts would write to that test's new database, as it is created
     db.set_setting("worker_slots", "many")
     assert runner.worker_slots() == 1
     db.set_setting("worker_slots", 40)
@@ -3169,30 +3175,81 @@ def test_usage_reads_both_windows_of_every_group():
                       "note": "You have hit your weekly limit, it refreshes in 3 days, 7 hours."}
     assert gem[1]["window"] == "5h" and gem[1]["disabled"] and gem[1]["reset_at"] is None
     assert groups[1]["buckets"][1]["remaining"] == 0.42
-    # production draws on the group holding the configured model's family, not on Argon or the third-party one
+    # a Gemini model draws on the group agy puts it in: Flash and Pro share one, Argon's is its own on agy 1.2.16; the
+    # third-party one is no one's
     assert quota_group(groups, "gemini-3.8-flash-high")["name"] == "Gemini Models"
-    assert quota_group(groups[1:], "gemini-3.8-flash-high")["name"] == "Gemini 4 Argon"  # only Gemini group left
+    assert quota_group(groups, "gemini-3.5-pro-low")["name"] == "Gemini Models"
+    assert quota_group(groups, "gemini-4-argon-high")["name"] == "Gemini 4 Argon"  # "For paid Pro plans" does not make it Pro's
+    assert quota_group(groups[1:], "gemini-3.8-flash-high") is None  # Argon's group holds no other model
+    # agy 1.5 (prodbox, 2026-11-07) has no group of Argon's: it is counted with Flash and Pro
+    assert quota_group(groups[:2], "gemini-4-argon-high")["name"] == "Gemini Models"
+    # a model agy has not named yet: the longest name it is known by, else the one Gemini group named for no model
+    assert quota_group(groups, "gemini-3.8-flash-lite-high")["name"] == "Gemini Models"
+    assert quota_group(groups, "gemini-5-nova-high")["name"] == "Gemini Models"
+    assert quota_group(groups + [{"name": "Gemini", "models": "", "buckets": []}], "gemini-5-nova-high") is None  # which of two
     # an answer without the structured part: the tab-separated text says the same
     text = parse_usage({"status": "SUCCESS", "response": USAGE_JSON["response"]})
     assert [b["window"] for b in text[0]["buckets"]] == ["weekly", "5h"] and text[0]["buckets"][0]["remaining"] == 0.0
     assert text[0]["buckets"][1]["disabled"] and text[0]["buckets"][1]["remaining"] is None
     assert text[1]["buckets"][1] == {"window": "5h", "remaining": 1.0, "reset_at": "2026-10-27T21:07:47Z", "disabled": False, "note": None}
+    assert quota_group(text, "gemini-3.8-flash-high")["name"] == "Gemini Models"
     assert parse_usage({}) == [] and parse_usage({"command": {"data": {"groups": [{"name": "x", "buckets": []}]}}}) == []
 
 
-def test_usage_probe_records_a_week_of_the_production_group(fake_usage, home):
+def test_usage_probe_records_a_week_of_every_gemini_group(fake_usage, home):
     from assetizer import db
     from assetizer.providers.agy import AgyProvider, record_usage
     fake_usage("ok")
     q = record_usage(AgyProvider().usage())
-    assert q["ok"] and q["production_group"] == "Gemini Models" and q["version"] == "1.4.8"
+    assert q["ok"] and q["in_use"] == ["Gemini Models"] and q["version"] == "1.4.8"
+    assert "in_use" not in db.setting("agy_quota")  # said of the stages as they are routed now, not kept
     assert db.setting("agy_quota")["groups"][0]["buckets"][0]["remaining"] == 0.0
-    log = db.setting("agy_quota_log")
-    assert len(log) == 1 and log[0][1:] == [None, 0.0]  # [time, 5-hour (disabled → None), weekly]
-    # points older than eight days fall off
-    db.set_setting("agy_quota_log", [["2020-01-01T00:00:00+00:00", 1, 1]] + log)
+    # [time, 5-hour (disabled → None), weekly] of each Gemini group, the one no stage uses too; the third-party one is left out
+    log = db.setting("agy_quota_logs")
+    assert {k: [x[1:] for x in v] for k, v in log.items()} == {"Gemini Models": [[None, 0.0]], "Gemini 4 Argon": [[None, 1.0]]}
+    # points older than eight days fall off, and with them a group agy no longer has
+    old = ["2020-01-01T00:00:00+00:00", 1, 1]
+    db.set_setting("agy_quota_logs", {**log, "Gemini Models": [old] + log["Gemini Models"], "Gemini 3 Retired": [old]})
     record_usage(AgyProvider().usage())
-    assert [x[0][:4] for x in db.setting("agy_quota_log")] != ["2020"] and len(db.setting("agy_quota_log")) == 2
+    log = db.setting("agy_quota_logs")
+    assert sorted(log) == ["Gemini 4 Argon", "Gemini Models"] and len(log["Gemini Models"]) == 2 and old not in log["Gemini Models"]
+
+
+def test_the_one_list_of_readings_kept_before_goes_on_as_its_groups(fake_usage, home):
+    # 0.4.35 and earlier kept one list, the readings of the box model's group
+    from assetizer import db
+    from assetizer.providers.agy import AgyProvider, quota_logs, record_usage
+    from assetizer.util import now
+    t = now()
+    db.set_setting("agy_quota", {"ok": True, "checked_at": t, "production_group": "Gemini Models", "groups": []})
+    db.set_setting("agy_quota_log", [[t, 0.5, 0.9]])
+    assert quota_logs() == {"Gemini Models": [[t, 0.5, 0.9]]}
+    fake_usage("ok")
+    record_usage(AgyProvider().usage())
+    log = db.setting("agy_quota_logs")
+    assert log["Gemini Models"][0] == [t, 0.5, 0.9] and len(log["Gemini Models"]) == 2 and len(log["Gemini 4 Argon"]) == 1
+    assert db.setting("agy_quota_log") == [[t, 0.5, 0.9]]  # left as it was
+
+
+def test_a_version_rolled_back_to_goes_on_with_its_list_of_readings(fake_usage, home):
+    # an older version reads a newer database (operations「回滚」): 0.4.35 reads agy_quota_log as one list of
+    # [time, 5-hour left, weekly left] and appends to it, so the readings by group never go there
+    from datetime import datetime, timedelta, timezone
+    from assetizer import db
+    from assetizer.providers.agy import AgyProvider, record_usage
+    from assetizer.util import now
+    fake_usage("ok")
+    record_usage(AgyProvider().usage())
+    assert db.setting("agy_quota_logs") and db.setting("agy_quota_log") is None  # not one this version writes
+    kept = [[now(), None, 0.8]]
+    db.set_setting("agy_quota_log", kept)  # what 0.4.35 wrote, before the upgrade or while rolled back to
+    for _ in range(2):
+        record_usage(AgyProvider().usage())
+    assert db.setting("agy_quota_log") == kept
+    # 0.4.35's own read of it, on its next reading of the quota and for 约够印 on its 机房 page
+    cut = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(timespec="seconds")
+    log = [x for x in (db.setting("agy_quota_log") or []) if x[0] >= cut] + [[now(), None, 0.7]]
+    assert [x[2] for x in log] == [0.8, 0.7]
 
 
 def test_usage_probe_says_signed_out_and_keeps_the_last_numbers(fake_usage, home):
@@ -3313,7 +3370,7 @@ def test_signing_in_from_the_page_resumes_what_waited_for_it(signin, home, monke
     # pasted as the whole callback address: the code is taken out of it
     assert signin.submit("https://antigravity.google/oauth-callback?code=4/0Agood-code&state=st4te")["state"] == "verifying"
     v = _until(signin, "done", "failed")
-    assert v["state"] == "done" and v["quota"]["production_group"] == "Gemini Models"
+    assert v["state"] == "done" and v["quota"]["in_use"] == ["Gemini Models"]
     assert db.setting("queue_paused") is None and db.setting("agy_quota")["ok"]
     assert db.one("SELECT resolved_at FROM alerts WHERE key='AGY_AUTH_REQUIRED'")["resolved_at"]
     assert db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
@@ -3394,7 +3451,13 @@ def test_a_safety_filter_failure_has_one_name_on_the_front_page_and_in_the_engin
     from assetizer import db
     from assetizer.web import app as web
     _stats_fixture()
-    db.exec("UPDATE runs SET error_class='PROVIDER_FAILURE', error='blocked by the safety filter' WHERE id='c-r1'")
+    # what failed before the filter had a class of its own comes over with the column that says what was tried
+    db.exec("UPDATE runs SET error_class='PROVIDER_FAILURE', error='Your previous response was blocked by content safety filters: …' WHERE id='c-r1'")
+    db.exec("INSERT INTO runs(id, source_id, production, error_class, created_at) VALUES ('c-r0','c','FAILED','PROVIDER_SAFETY_BLOCK','2020-01-01T00:00:00+00:00')")
+    conn = db.connect()
+    conn.execute("ALTER TABLE runs DROP COLUMN retry")
+    db._migrate(conn)
+    assert db.one("SELECT error_class FROM runs WHERE id='c-r0'")["error_class"] == "CONTENT_SAFETY"  # an answer that was the filter's
     c, h = TestClient(web.app), {"host": "127.0.0.1"}
     assert c.get("/api/engine/stats", headers=h).json()["windows"]["7d"]["reasons"] == [{"kind": "CONTENT_SAFETY", "n": 1}]
     assert next(r for r in c.get("/api/engine", headers=h).json()["runs"] if r["id"] == "c-r1")["error_class"] == "CONTENT_SAFETY"
@@ -3422,18 +3485,46 @@ def test_engine_stats_count_by_window_and_by_model_family(home):
     assert (m["n"], m["failed"], m["tokens"]) == (3, 1, 1800) and m["by_family"]["chatgpt"] == {"n": 1, "tokens": 500, "wall": 10.0}
     assert [(x["key"], round(x["share"], 2)) for x in m["by_stage"]["gemini"]] == [("understanding", 0.77), ("article", 0.23)]
     assert len(s["days"]) == 30 and sum(d["done"] for d in s["days"]) == 3 and sum(d["failed"] for d in s["days"]) == 1
-    assert sum(d["video_seconds"] for d in s["days"]) == 6000 and s["runway"] is None
+    assert sum(d["video_seconds"] for d in s["days"]) == 6000 and s["agy_runways"] == {}
     # the weekly quota fell 0.21 (a reading that wavers up is not quota coming back), was reset, fell 0.5 more
-    db.set_setting("agy_quota", {"ok": True, "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+    db.set_setting("agy_quota", {"ok": True, "groups": [{"name": "Gemini Models", "models": "Models within this group: Gemini Flash", "buckets": [
         {"window": "weekly", "remaining": 0.5, "reset_at": "x", "disabled": False, "note": None}]}]})
-    db.set_setting("agy_quota_log", [[iso(timedelta(days=9)), 1, 0.1], [iso(timedelta(days=6)), 1, 0.9], [iso(timedelta(days=5)), 1, 0.7],
-                                     [iso(timedelta(days=4.8)), 1, 0.75], [iso(timedelta(days=4.6)), 1, 0.69],
-                                     [iso(timedelta(days=4)), 1, 1.0], [iso(timedelta(hours=1)), 1, 0.5]])
-    assert c.get("/api/engine/stats", headers={"host": "127.0.0.1"}).json()["runway"] is None  # 2 issues over it: too few to tell
+    db.set_setting("agy_quota_logs", {"Gemini Models": [
+        [iso(timedelta(days=9)), 1, 0.1], [iso(timedelta(days=6)), 1, 0.9], [iso(timedelta(days=5)), 1, 0.7], [iso(timedelta(days=4.8)), 1, 0.75],
+        [iso(timedelta(days=4.6)), 1, 0.69], [iso(timedelta(days=4)), 1, 1.0], [iso(timedelta(hours=1)), 1, 0.5]]})
+    assert c.get("/api/engine/stats", headers={"host": "127.0.0.1"}).json()["agy_runways"] == {}  # 2 issues over it: too few to tell
     db.exec("INSERT INTO runs(id, source_id, kind, production, created_at, finished_at) VALUES ('e-r1','x','PRODUCTION','COMPLETE',?,?)",
             iso(timedelta(days=1)), iso(timedelta(days=1)))
-    r = c.get("/api/engine/stats", headers={"host": "127.0.0.1"}).json()["runway"]
+    r = c.get("/api/engine/stats", headers={"host": "127.0.0.1"}).json()["agy_runways"]["Gemini Models"]
     assert round(r["per_issue"], 3) == 0.237 and r["issues"] == 2  # 0.71 over 3 issues, 0.5 left
+
+
+def test_each_gemini_group_a_stage_draws_on_has_its_own_runway(home):
+    from datetime import timedelta
+    from fastapi.testclient import TestClient
+    from assetizer import db, knobs
+    from assetizer.web import app as web
+    iso = _stats_fixture()
+    db.exec("INSERT INTO runs(id, source_id, kind, production, created_at, finished_at) VALUES ('e-r1','x','PRODUCTION','COMPLETE',?,?)",
+            iso(timedelta(days=1)), iso(timedelta(days=1)))  # 3 issues over the readings
+    week = lambda left: [{"window": "weekly", "remaining": left, "reset_at": "x", "disabled": False, "note": None}]  # noqa: E731
+    db.set_setting("agy_quota", {"ok": True, "groups": [
+        {"name": "Gemini Models", "models": "Models within this group: Gemini Flash, Gemini Pro", "buckets": week(0.85)},
+        {"name": "Gemini 4 Argon", "models": "For paid Pro plans, Argon quota is separate.", "buckets": week(0.4)}]})
+    db.set_setting("agy_quota_logs", {"Gemini Models": [[iso(timedelta(days=6)), 1, 1.0], [iso(timedelta(hours=1)), 1, 0.85]],
+                                      "Gemini 4 Argon": [[iso(timedelta(days=6)), None, 1.0], [iso(timedelta(hours=1)), None, 0.4]]})
+    c, h = TestClient(web.app), {"host": "127.0.0.1"}
+    assert list(c.get("/api/engine/stats", headers=h).json()["agy_runways"]) == ["Gemini Models"]  # no stage draws on Argon
+    knobs.save({"stage_route": {"understanding": "agy/gemini-4-argon-high"}})
+    r = c.get("/api/engine/stats", headers=h).json()["agy_runways"]
+    assert {k: round(v["per_issue"], 3) for k, v in r.items()} == {"Gemini Models": 0.05, "Gemini 4 Argon": 0.2} and r["Gemini 4 Argon"]["issues"] == 2
+    assert round(web._runway()["per_issue"], 3) == 0.2  # 补录's estimate: the group an issue takes the most of
+    # the one list of 0.4.35 (the box model's group), until the readings by group are first kept: read as that group's
+    logs = db.setting("agy_quota_logs")
+    db.exec("DELETE FROM settings WHERE key='agy_quota_logs'")
+    db.set_setting("agy_quota", {**db.setting("agy_quota"), "production_group": "Gemini Models"})
+    db.set_setting("agy_quota_log", logs["Gemini Models"])
+    assert list(c.get("/api/engine/stats", headers=h).json()["agy_runways"]) == ["Gemini Models"]
 
 
 def test_the_new_reads_answer_on_an_empty_database(home):
@@ -3443,7 +3534,7 @@ def test_the_new_reads_answer_on_an_empty_database(home):
     from assetizer.web import app as web
     c, h = TestClient(web.app), {"host": "127.0.0.1"}
     s = c.get("/api/engine/stats", headers=h).json()
-    assert s["windows"]["7d"]["done"] == 0 and s["windows"]["30d"]["latency_median"] is None and s["runway"] is None
+    assert s["windows"]["7d"]["done"] == 0 and s["windows"]["30d"]["latency_median"] is None and s["agy_runways"] == {}
     assert c.get("/api/status", headers=h).json() == {"alerts": [], "decisions": 0, "running": 0, "queued": 0, "paused": None}
     o = c.get("/api/overview", headers=h).json()
     assert o["running"] == [] and o["drain_seconds"] == 0
@@ -3770,10 +3861,10 @@ def test_backfill_goes_one_at_a_time_when_idle_and_the_quota_has_room(home, monk
     db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, created_at) VALUES ('t','x',1,?)", now())
     assert ingest.dispatch_backfill() is None  # a trial waits: it goes first
     db.exec("DELETE FROM trial_queue")
-    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "groups": [{"name": "Gemini Models", "models": "Models within this group: Gemini Flash", "buckets": [
         {"window": "weekly", "remaining": 0.2, "reset_at": None, "disabled": False, "note": None}]}]})
     assert ingest.dispatch_backfill() is None and ingest.backfill_held() == "weekly"  # the week's quota is kept for new videos
-    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "groups": [{"name": "Gemini Models", "models": "Models within this group: Gemini Flash", "buckets": [
         {"window": "weekly", "remaining": 0.8, "reset_at": None, "disabled": False, "note": None},
         {"window": "5h", "remaining": 0.1, "reset_at": None, "disabled": False, "note": None}]}]})
     assert ingest.dispatch_backfill() is None and ingest.backfill_held() == "5h"  # and so is most of the 5 hours
@@ -3888,7 +3979,7 @@ def test_backfill_says_what_stands_in_its_way(home, monkeypatch):
     db.exec("INSERT INTO trial_queue(channel_id, source_id, playbook_id, status, created_at) VALUES ('t','w',1,'PENDING',?)", now())
     assert ingest.backfill_view("t")["stop"] == "trial"
     db.exec("DELETE FROM trial_queue")
-    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "production_group": "G", "groups": [{"name": "G", "models": "", "buckets": [
+    db.set_setting("agy_quota", {"ok": True, "checked_at": now(), "groups": [{"name": "Gemini Models", "models": "Models within this group: Gemini Flash", "buckets": [
         {"window": "weekly", "remaining": 0.1, "reset_at": None, "disabled": False, "note": None}]}]})
     assert ingest.backfill_view("t")["stop"] == "weekly"
 
@@ -4206,7 +4297,7 @@ def test_the_quota_alert_says_when_the_quota_comes_back(home):
     from assetizer import db
     from assetizer.pipeline import runner
     from assetizer.util import now
-    db.set_setting("agy_quota", {"ok": True, "production_group": "Gemini Pro", "groups": [{"name": "Gemini Pro", "buckets": [
+    db.set_setting("agy_quota", {"ok": True, "groups": [{"name": "Gemini Models", "models": "Models within this group: Gemini Flash", "buckets": [
         {"window": "5h", "remaining": 0.4, "reset_at": "2026-10-30T02:00:00+00:00", "disabled": False},
         {"window": "weekly", "remaining": 0, "reset_at": "2026-10-30T23:34:00+00:00", "disabled": False}]}]})
     t = now()
@@ -6371,7 +6462,7 @@ def test_one_stage_pick_goes_on_what_is_stored(home):
     assert knobs.save({"stage_route": {"selection": "group/text-fast"}})["stage_providers"] == {"knowledge": "codex/gpt-6.1-sol", "selection": "group/text-fast"}
     assert knobs.save({"stage_route": {"selection": "agy"}})["stage_providers"] == {"knowledge": "codex/gpt-6.1-sol"}  # where the default goes anyway
     logged = [e["message"] for e in db.q("SELECT message FROM events WHERE kind='config' ORDER BY id")]
-    assert logged[-1] == "机房设置：选片 group/text-fast → agy"  # the stage that moved, not every stage twice over
+    assert logged[-1] == "设置：选片 group/text-fast → agy"  # the stage that moved, not every stage twice over
     for bad in ({"nope": "agy"}, {"merge": "no such"}, "merge"):
         with pytest.raises(knobs.KnobError):
             knobs.save({"stage_route": bad})
@@ -6439,8 +6530,8 @@ def test_a_route_to_an_agy_model_runs_agy_with_it(home, monkeypatch):
     assert isinstance(p, AgyProvider) and p.model == "gemini-4-argon-high"
     assert model_for(p.model, "medium") == "gemini-4-argon-medium"  # the stage still says the level
     assert isinstance(providers.for_stage("merge"), AgyProvider) and providers.for_stage("merge").model == base
-    # one subscription: two of its models are asked once, and nothing about them is magpie's
-    assert [q.name for q in providers.in_use()] == ["agy"]
+    # nothing about them is magpie's; with no reading of agy's quota to say which group each draws on, each is asked
+    assert [(q.name, q.model) for q in providers.in_use()] == [("agy", base), ("agy", "gemini-4-argon-high")]
     assert not providers.is_model("agy/gemini-4-argon-high")
     # a stage sent to the model the default already means needs no entry
     knobs.save({"stage_route": {"knowledge": f"agy/{base}"}})
@@ -6491,3 +6582,417 @@ def test_the_media_self_test_runs_on_each_gemini_model_that_watches_video(home, 
     knobs.save({"stage_route": {"understanding": "agy/gemini-bad-high"}})
     h = runner.media_self_test()
     assert not h["ok"] and h["model"] == "gemini-bad-high"
+
+
+def _two_groups(flash_week: float, argon_week: float) -> dict:
+    """`/usage` as agy 1.2.16 answered it (USAGE_JSON): Flash and Pro share a group, Argon's quota is its own."""
+    return {"status": "SUCCESS", "command": {"data": {"groups": [
+        {"name": "Gemini Models", "description": "Models within this group: Gemini Flash, Gemini Pro", "buckets": [
+            {"window": "weekly", "remaining_fraction": flash_week, "reset_time": "2026-11-02T08:00:00Z"},
+            {"window": "5h", "remaining_fraction": 1, "reset_time": "2026-10-28T08:00:00Z"}]},
+        {"name": "Claude and GPT models", "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS", "buckets": [
+            {"window": "weekly", "remaining_fraction": 0, "reset_time": "2026-11-03T16:07:47Z"}]},
+        {"name": "Gemini 4 Argon", "description": "For paid Pro plans, Argon quota is separate.", "buckets": [
+            {"window": "weekly", "remaining_fraction": argon_week, "reset_time": "2026-10-30T23:34:00Z"}]}]}}}
+
+
+def test_a_stage_on_another_gemini_model_draws_on_that_models_quota(fake_usage, home, monkeypatch):
+    # agy keeps a quota per group of models: a stage sent to Argon spends Argon's, not the box model's
+    import time
+    from fastapi.testclient import TestClient
+    from assetizer import db, ingest, knobs, providers
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import AgyProvider, record_usage
+    from assetizer.util import now
+    from assetizer.web import app as web
+    fake_usage("ok", _two_groups(0.9, 0.1))
+    assert record_usage(AgyProvider().usage())["in_use"] == ["Gemini Models"]
+    assert ingest.backfill_held() is None  # Argon's 10% is no stage's
+    knobs.save({"stage_route": {"understanding": "agy/gemini-4-argon-high", "article": "agy/gemini-3.5-pro-high"}})
+    assert record_usage(AgyProvider().usage())["in_use"] == ["Gemini Models", "Gemini 4 Argon"]  # Pro shares the box model's
+    assert ingest.backfill_held() == "weekly"  # what is left of Argon's week is kept for new videos
+    # the pages: the groups the stages draw on, a week of each, each model with its group (its 剩 X% where one is picked)
+    s = TestClient(web.app).get("/api/settings", headers={"host": "127.0.0.1"}).json()
+    assert s["quota"]["agy"]["in_use"] == ["Gemini Models", "Gemini 4 Argon"] and sorted(s["quota"]["agy_log"]) == ["Gemini 4 Argon", "Gemini Models"]
+    assert {m["id"]: m["quota"] for m in s["agy_models"]} == {
+        "agy/gemini-3.8-flash-high": "Gemini Models", "agy/gemini-4-argon-high": "Gemini 4 Argon", "agy/gemini-3.5-pro-high": "Gemini Models"}
+    # Argon's week runs out: the alert says when it comes back, and the pause lifts only once it has
+    fake_usage("ok", _two_groups(0.9, 0))
+    record_usage(AgyProvider().usage())
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+    runner._wait("v-r1", "PROVIDER_QUOTA", "quota")
+    runner.pause_queue("PROVIDER_QUOTA")
+    assert "周六 07:34" in db.one("SELECT body FROM alerts WHERE key='PROVIDER_QUOTA'")["body"]
+    out, asked = {"gemini-4-argon-high"}, []
+
+    def health(self):
+        asked.append(self.model)
+        return {"ok": self.model not in out, "error": "PROVIDER_QUOTA" if self.model in out else None}
+    monkeypatch.setattr(AgyProvider, "health", health)
+    w = runner.Worker()
+    m = time.monotonic()
+    w.last.update({k: m for k in w.last}, health=m - 601)  # only the paused queue's probe is due
+    w.housekeeping()
+    assert asked == ["gemini-3.8-flash-high", "gemini-4-argon-high"]  # one model per group: Pro's is Flash's
+    assert db.setting("queue_paused")["reason"] == "PROVIDER_QUOTA"
+    out.clear()
+    w.last["health"] = time.monotonic() - 601
+    w.housekeeping()
+    assert db.setting("queue_paused") is None and db.one("SELECT production FROM runs WHERE id='v-r1'")["production"] == "QUEUED"
+
+
+# ---------------------------------------------------------------- 自动重试 (design §R6-10)
+class _Script:
+    """A provider that goes through its answers: text, or the kind of error to raise."""
+    name = "stub"
+
+    def __init__(self, *answers):
+        self.answers, self.dirs = list(answers), []
+
+    def call(self, call_dir, prompt, **kw):
+        from assetizer.providers.agy import CallResult, ProviderError
+        self.dirs.append(Path(call_dir).name)
+        a = self.answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        if a.isupper():
+            raise ProviderError(a, "stub", {"status": "FAILED", "error_class": a})
+        return CallResult(a, {"status": "SUCCESS"})
+
+
+class _Kept(_Script):
+    """Keeps its answers where the providers do, and gives one back from there when the run is tried again, as they do."""
+
+    def call(self, call_dir, prompt, **kw):
+        from assetizer.providers.agy import CallResult
+        from assetizer.util import read_json, write_json
+        d = Path(call_dir)
+        if (d / "invocation.json").exists() and read_json(d / "invocation.json")["status"] == "SUCCESS":
+            return CallResult((d / "response.txt").read_text(), read_json(d / "invocation.json"), reused=True)
+        r = super().call(call_dir, prompt, **kw)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "response.txt").write_text(r.text)
+        write_json(d / "invocation.json", r.receipt)
+        return r
+
+
+def _run_ctx():
+    from assetizer import db
+    from assetizer.pipeline.context import RunContext
+    db.exec("INSERT INTO sources(id, url, created_at, updated_at) VALUES ('s','u','t','t')")
+    db.exec("INSERT INTO runs(id, source_id, kind, production, created_at) VALUES ('s-r1','s','PRODUCTION','RUNNING','t')")
+    return RunContext(run=db.one("SELECT * FROM runs WHERE id='s-r1'"), source=db.one("SELECT * FROM sources WHERE id='s'"))
+
+
+SCHEMA = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+GOOD = '{"ok": true}'
+
+
+def _route(monkeypatch, own, other=None):
+    """Every stage answers from `own`; a call sent to another model from `other`."""
+    from assetizer import providers
+    monkeypatch.setattr(providers, "for_stage", lambda stage: own)
+    monkeypatch.setattr(providers, "_make", lambda route: other)
+    monkeypatch.setattr("assetizer.llm.time.sleep", lambda s: None)
+
+
+def test_each_kind_of_error_is_tried_again_as_often_as_the_setting_says(home, monkeypatch):
+    from assetizer import db, knobs
+    from assetizer.providers.agy import ProviderError
+    ctx = _run_ctx()
+    own = _Script("PROVIDER_TIMEOUT", "PROVIDER_TRANSIENT", "PROVIDER_TIMEOUT", GOOD)
+    _route(monkeypatch, own)
+    assert ctx.llm().structured(home / "c", "article-x", "p", SCHEMA) == {"ok": True}
+    assert own.dirs == ["attempt-1", "attempt-1-retry1", "attempt-1-retry2", "attempt-1-retry3"]
+    assert db.one("SELECT retry FROM runs WHERE id='s-r1'")["retry"] is None  # got through: the pages stop saying so
+    assert {r["kind"]: (r["tries"], r["rescued"]) for r in db.q("SELECT * FROM retries")} == {"PROVIDER_TIMEOUT": (2, 1), "PROVIDER_TRANSIENT": (1, 1)}
+
+    db.exec("DELETE FROM retries")
+    own = _Script("PROVIDER_FAILURE", GOOD)  # by default it gets no second call
+    _route(monkeypatch, own)
+    with pytest.raises(ProviderError) as e:
+        ctx.llm().structured(home / "c2", "article-x", "p", SCHEMA)
+    assert e.value.kind == "PROVIDER_FAILURE" and own.dirs == ["attempt-1"] and not db.q("SELECT * FROM retries")
+
+    knobs.save({"retry_count": {"PROVIDER_FAILURE": 1}})  # read at the failure: no restart
+    own = _Script("PROVIDER_FAILURE", GOOD)
+    _route(monkeypatch, own)
+    assert ctx.llm().structured(home / "c3", "article-x", "p", SCHEMA) == {"ok": True}
+
+    own = _Script("PROVIDER_QUOTA", GOOD)  # waits for the health probe, not for another call: no count to set
+    _route(monkeypatch, own)
+    with pytest.raises(ProviderError):
+        ctx.llm().structured(home / "c4", "article-x", "p", SCHEMA)
+    assert own.dirs == ["attempt-1"]
+
+
+def test_an_output_that_fails_its_check_is_asked_for_again_with_the_reason(home, monkeypatch):
+    from assetizer import db, knobs
+    ctx = _run_ctx()
+    own = _Script('{"nope": 1}', GOOD)
+    _route(monkeypatch, own)
+    assert ctx.llm().structured(home / "c", "merge", "p", SCHEMA) == {"ok": True}
+    assert db.one("SELECT tries, rescued FROM retries WHERE kind='CONTRACT'") == {"tries": 1, "rescued": 1}
+    knobs.save({"retry_count": {"CONTRACT": 0}})
+    own = _Script('{"nope": 1}', GOOD)
+    _route(monkeypatch, own)
+    with pytest.raises(ContractError):
+        ctx.llm().structured(home / "c2", "merge", "p", SCHEMA)
+    assert own.dirs == ["attempt-1"]
+
+
+def test_the_safety_filter_is_tried_again_then_another_model_says_so_in_the_issue(home, monkeypatch):
+    from assetizer import db
+    ctx = _run_ctx()
+    db.set_setting("stage_providers", {"knowledge": "codex/gpt-6.1"})
+    own, other = _Script("CONTENT_SAFETY", "CONTENT_SAFETY", "CONTENT_SAFETY"), _Script(GOOD)
+    _route(monkeypatch, own, other)
+    assert ctx.llm().structured(home / "c", "article-rewrite-u1", "p", SCHEMA) == {"ok": True}
+    assert own.dirs == ["attempt-1", "attempt-1-retry1", "attempt-1-retry2"] and other.dirs == ["attempt-1-fallback"]
+    r = db.one("SELECT * FROM retries")
+    assert (r["kind"], r["tries"], r["rescued"], r["fallback"]) == ("CONTENT_SAFETY", 2, 1, "codex/gpt-6.1")
+    assert db.one("SELECT retry FROM runs WHERE id='s-r1'")["retry"] is None
+    f = db.one("SELECT * FROM flags WHERE kind='SAFETY_FALLBACK'")
+    assert f["severity"] == "INFO" and "gpt-6.1" in f["title"] and f["title"].startswith("文章")
+
+
+def test_when_the_other_model_fails_too_the_block_stands_and_the_run_keeps_what_was_tried(home, monkeypatch):
+    from assetizer import db
+    from assetizer.providers.agy import ProviderError
+    ctx = _run_ctx()
+    db.set_setting("safety_fallback", "codex/gpt-6.1")
+    own, other = _Script("CONTENT_SAFETY", "CONTENT_SAFETY", "CONTENT_SAFETY"), _Script("PROVIDER_QUOTA")
+    _route(monkeypatch, own, other)
+    with pytest.raises(ProviderError) as e:
+        ctx.llm().structured(home / "c", "article-x", "p", SCHEMA)
+    assert e.value.kind == "CONTENT_SAFETY"  # not a quota to pause the queue for
+    # what the call was put through goes with the error, for the run it fails (runner._fail: 试了 4 次); the call is over,
+    # so the pages no longer say it is being tried, whether or not the stage goes on without it
+    assert e.value.retry == {"kind": "CONTENT_SAFETY", "call": "article-x", "retry": 2, "of": 2, "fallback": "codex/gpt-6.1"}
+    assert db.one("SELECT retry FROM runs WHERE id='s-r1'")["retry"] is None
+    assert db.one("SELECT rescued FROM retries")["rescued"] == 0
+    assert not db.q("SELECT * FROM flags")
+
+
+def test_the_other_models_answer_counts_once_it_passes_the_same_checks(home, monkeypatch):
+    from assetizer import db
+    from assetizer.providers.agy import ProviderError
+    from assetizer.util import read_json
+    ctx = _run_ctx()
+    db.set_setting("safety_fallback", "codex/gpt-6.1")
+    own, other = _Script("CONTENT_SAFETY", "CONTENT_SAFETY", "CONTENT_SAFETY", GOOD), _Script('{"ok": "yes"}')
+    _route(monkeypatch, own, other)
+    with pytest.raises(ProviderError) as e:
+        ctx.llm().structured(home / "c", "article-x", "p", SCHEMA)
+    assert e.value.kind == "CONTENT_SAFETY" and e.value.retry["fallback"] == "codex/gpt-6.1"  # the block stands: 忽略 is offered
+    assert own.dirs == ["attempt-1", "attempt-1-retry1", "attempt-1-retry2"]
+    assert db.one("SELECT tries, rescued FROM retries") == {"tries": 2, "rescued": 0} and not db.q("SELECT * FROM flags")
+    assert read_json(home / "c" / "article-x" / "attempt-1-fallback" / "invocation.json")["status"] == "FAILED"  # not reused
+
+
+def test_the_other_model_failing_on_the_video_leaves_the_block_standing(home, monkeypatch):
+    from assetizer import db
+    from assetizer.providers.agy import ProviderError
+    ctx = _run_ctx()
+    db.set_setting("safety_fallback", "codex/gpt-6.1")
+    own, other = _Script("CONTENT_SAFETY", "CONTENT_SAFETY", "CONTENT_SAFETY"), _Script(RuntimeError("whisper exited 1"))
+    _route(monkeypatch, own, other)
+    with pytest.raises(ProviderError) as e:
+        ctx.llm().structured(home / "c", "understand-CH01", "p", SCHEMA, media=["x.mp4"])
+    assert e.value.kind == "CONTENT_SAFETY" and e.value.retry["fallback"] == "codex/gpt-6.1"
+    assert db.one("SELECT tries, rescued, fallback FROM retries") == {"tries": 2, "rescued": 0, "fallback": "codex/gpt-6.1"}
+    assert db.one("SELECT 1 FROM events WHERE run_id='s-r1' AND message LIKE '%whisper exited 1%'")
+
+
+def test_what_rewriting_came_to_counts_when_the_call_then_fails(home, monkeypatch):
+    from assetizer import db
+    from assetizer.llm import ContractError
+    from assetizer.providers.agy import ProviderError
+    ctx = _run_ctx()
+    _route(monkeypatch, _Script('{"ok": "yes"}', "PROVIDER_FAILURE"))
+    with pytest.raises(ProviderError):
+        ctx.llm().structured(home / "c", "article-x", "p", SCHEMA)
+    assert db.one("SELECT kind, tries, rescued FROM retries") == {"kind": "CONTRACT", "tries": 1, "rescued": 0}
+    db.exec("DELETE FROM retries")
+    # rewritten, the model not there a moment, answered, still not right: the run says it was rewritten
+    _route(monkeypatch, _Script('{"ok": "yes"}', "PROVIDER_TRANSIENT", '{"ok": "yes"}'))
+    with pytest.raises(ContractError) as e:
+        ctx.llm().structured(home / "d", "article-x", "p", SCHEMA)
+    assert e.value.retry == {"kind": "CONTRACT", "call": "article-x", "retry": 1, "of": 1, "fallback": None}
+    assert db.one("SELECT retry FROM runs WHERE id='s-r1'")["retry"] is None
+
+
+def test_trying_a_run_again_asks_again_for_the_answers_that_did_not_pass(home, monkeypatch):
+    from assetizer.llm import ContractError
+    ctx = _run_ctx()
+    own = _Kept('{"ok": "yes"}', '{"ok": "yes"}', GOOD)
+    _route(monkeypatch, own)
+    with pytest.raises(ContractError):
+        ctx.llm().structured(home / "c", "article-x", "p", SCHEMA)
+    assert ctx.llm().structured(home / "c", "article-x", "p", SCHEMA) == {"ok": True}  # 重试: not the same answers again
+    assert own.dirs == ["attempt-1", "attempt-2", "attempt-1"]
+
+
+def test_a_failed_run_keeps_what_the_call_that_failed_it_was_put_through(home, monkeypatch):
+    from assetizer import db
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import ProviderError
+    from assetizer.util import now
+    t = now()
+    db.exec("INSERT INTO sources(id, delivery, created_at, updated_at) VALUES ('v','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('v-r1','v','QUEUED',?)", t)
+    tried = {"kind": "CONTENT_SAFETY", "call": "article-x", "retry": 2, "of": 2, "fallback": "codex/gpt-6.1"}
+
+    def article(ctx):
+        e = ProviderError("CONTENT_SAFETY", "blocked")
+        e.retry = tried
+        raise e
+    monkeypatch.setattr(runner, "STAGES", [("ARTICLE", article, True)])
+    assert runner._execute("v-r1") == "FAILED"
+    r = db.one("SELECT error_class, retry FROM runs WHERE id='v-r1'")
+    assert r["error_class"] == "CONTENT_SAFETY" and json.loads(r["retry"]) == tried
+
+
+def test_a_model_that_takes_no_images_watches_no_video_on_the_page_nor_in_the_box(home, monkeypatch):
+    from assetizer import db, knobs, providers
+    from assetizer.providers import magpie_state
+    monkeypatch.setattr(providers, "_make", lambda route: route)
+    db.set_setting("magpie_state", {"models": [magpie_state.model_view({"id": "x/text-only", "modalities": {"input": ["text"]}}),
+                                               magpie_state.model_view({"id": "x/eyes", "modalities": {"input": ["text", "image"]}})]})
+    assert [m["watches"] for m in db.setting("magpie_state")["models"]] == [False, True]  # what the page offers
+    assert not knobs.watches("x/text-only") and knobs.watches("x/eyes") and knobs.watches("agy/gemini-3.8-flash-high")
+    assert not knobs.watches("claude/claude-sonnet-5-5")
+    knobs.save({"safety_fallback": "x/text-only"})
+    assert providers.safety_fallback("understand-CH01") is None and providers.safety_fallback("article-x")[0] == "x/text-only"
+    knobs.save({"llm_provider": "x/text-only"})  # the stages that watch video stay where they were going, as the page shows
+    assert {s: knobs.get("stage_providers").get(s) for s in knobs.VIDEO_STAGES} == {"understanding": "agy", "boundary": "agy"}
+
+
+def test_where_the_filter_sends_a_call(home, monkeypatch):
+    from assetizer import db, knobs, providers
+    monkeypatch.setattr(providers, "_make", lambda route: route)
+    assert providers.safety_fallback("article-x") is None  # nothing set, and 知识 goes where everything goes
+    db.set_setting("stage_providers", {"knowledge": "codex/gpt-6.1"})
+    assert providers.safety_fallback("article-x")[0] == "codex/gpt-6.1"  # by default where 知识 goes
+    assert providers.safety_fallback("knowledge-detail-01") is None  # it is the model that stopped it
+    knobs.save({"safety_fallback": "off"})
+    assert providers.safety_fallback("article-x") is None
+    knobs.save({"safety_fallback": "claude/claude-sonnet-5-5"})
+    assert providers.safety_fallback("article-x")[0] == "claude/claude-sonnet-5-5"
+    assert providers.safety_fallback("understand-CH01") is None  # it cannot watch the video
+    assert providers.safety_fallback("boundary-u1") is None
+    knobs.save({"safety_fallback": None})
+    assert knobs.fallback_route() == "codex/gpt-6.1"
+    # 知识 going where the rest goes: there, for a stage sent elsewhere
+    db.exec("DELETE FROM settings WHERE key='stage_providers'")
+    knobs.save({"llm_provider": "codex/gpt-6.1"})
+    knobs.save({"stage_route": {"article": "agy/gemini-3.8-flash-high"}})
+    assert providers.safety_fallback("article-sections-01")[0] == "codex/gpt-6.1"
+    assert providers.safety_fallback("knowledge-detail-01") is None
+
+
+def test_the_filter_words_handed_back_as_an_answer_fail_like_the_filter(home, monkeypatch):
+    from assetizer import db
+    from assetizer.llm import is_safety_block
+    from assetizer.util import read_json, write_json
+    assert not is_safety_block('{"note": "blocked by the filter"}')  # an answer may discuss it
+    ctx = _run_ctx()
+    words = "This request was blocked by Gemini's filters. They can occasionally trigger by mistake"
+    own = _Script(words, GOOD)
+    _route(monkeypatch, own)
+    assert ctx.llm().structured(home / "c", "article-x", "p", SCHEMA) == {"ok": True}
+    assert db.one("SELECT status, error_class FROM model_calls WHERE attempt='attempt-1'") == {"status": "FAILED", "error_class": "CONTENT_SAFETY"}
+    # what it left is no success for the next try of the run to reuse
+    (home / "c" / "article-x" / "attempt-1").mkdir(parents=True, exist_ok=True)
+    write_json(home / "c" / "article-x" / "attempt-1" / "invocation.json", {"status": "SUCCESS"})
+    own = _Script(words, GOOD)
+    _route(monkeypatch, own)
+    assert ctx.llm().structured(home / "c3", "article-x", "p", SCHEMA) == {"ok": True}
+    assert read_json(home / "c3" / "article-x" / "attempt-1" / "invocation.json")["status"] == "FAILED"
+
+
+def test_a_run_asked_to_stop_gets_no_more_tries(home, monkeypatch):
+    from assetizer import db
+    from assetizer.providers.agy import ProviderError
+    ctx = _run_ctx()
+    db.exec("UPDATE runs SET stop_at='t' WHERE id='s-r1'")
+    own = _Script("PROVIDER_TRANSIENT", GOOD)
+    _route(monkeypatch, own)
+    with pytest.raises(ProviderError):
+        ctx.llm().structured(home / "c", "article-x", "p", SCHEMA)
+    assert own.dirs == ["attempt-1"]
+
+
+def test_retry_counts_are_set_one_by_one_and_only_what_differs_is_stored(cc_api, home):
+    from assetizer import db, knobs
+    assert cc_api.get("/api/settings").json()["knobs"]["retry_counts"] == knobs.RETRY_DEFAULTS
+    r = cc_api.post("/api/knobs", json={"retry_count": {"CONTENT_SAFETY": 4}})
+    assert r.status_code == 200 and r.json()["retry_counts"]["CONTENT_SAFETY"] == 4 and r.json()["retry_counts"]["CONTRACT"] == 1
+    assert db.setting("retry_counts") == {"CONTENT_SAFETY": 4}
+    assert "被内容安全过滤拦下 2 → 4 次" in db.one("SELECT message FROM events WHERE kind='config' ORDER BY id DESC")["message"]
+    assert cc_api.post("/api/knobs", json={"retry_count": {"PROVIDER_TIMEOUT": 0}}).json()["retry_counts"]["CONTENT_SAFETY"] == 4  # a pick goes on what is stored
+    assert knobs.retries("PROVIDER_TIMEOUT") == 0
+    assert cc_api.post("/api/knobs", json={"retry_count": {"CONTENT_SAFETY": None}}).json()["retry_counts"]["CONTENT_SAFETY"] == 2
+    assert db.setting("retry_counts") == {"PROVIDER_TIMEOUT": 0}
+    for bad in ({"CONTENT_SAFETY": 6}, {"CONTENT_SAFETY": -1}, {"CONTENT_SAFETY": 1.5}, {"CONTENT_SAFETY": True}, {"AGY_AUTH_REQUIRED": 1}, 3):
+        assert cc_api.post("/api/knobs", json={"retry_count": bad}).status_code == 400
+    db.set_setting("retry_counts", {"CONTRACT": 40, "NOPE": 1})  # what `set` may have stored
+    assert knobs.retries("CONTRACT") == knobs.RETRY_MAX and knobs.retries("NOPE") == 0 and knobs.retries("MEDIA_READ_COUNT") == 2
+    db.set_setting("retry_counts", "lots")
+    assert knobs.get("retry_counts") == knobs.RETRY_DEFAULTS
+    assert cc_api.post("/api/knobs", json={"safety_fallback": "not a route"}).status_code == 400
+    assert cc_api.post("/api/knobs", json={"safety_fallback": "off"}).json()["safety_fallback"] == "off"
+
+
+def test_the_settings_page_reads_what_the_box_is_set_to_and_what_retrying_came_to(cc_api, home):
+    from assetizer import db
+    from assetizer.util import now
+    db.exec("INSERT INTO retries(run_id, call, kind, tries, rescued, created_at) VALUES ('r','a','PROVIDER_TIMEOUT',2,1,?), ('r','b','PROVIDER_TIMEOUT',1,0,?), ('r','c','CONTENT_SAFETY',2,1,'2020-01-01T00:00:00+00:00')", now(), now())
+    db.exec("INSERT INTO retries(run_id, call, kind, tries, rescued, fallback, created_at) VALUES ('r','d','CONTENT_SAFETY',0,1,'codex/x',?)", now())  # asked another model and nothing else
+    s = cc_api.get("/api/settings").json()
+    assert s["retries"] == {"PROVIDER_TIMEOUT": {"calls": 2, "tried": 3, "rescued": 1}, "CONTENT_SAFETY": {"calls": 1, "tried": 1, "rescued": 1}} and s["retry_defaults"]["CONTENT_SAFETY"] == 2
+    assert {"knobs", "providers", "magpie", "quota", "disk", "backfill", "asr", "telegram", "youtube", "notion", "alerts"} <= set(s)
+    assert "runs" not in s and "events" not in s
+
+
+def test_a_run_the_filter_stopped_can_be_put_away(cc_api, home):
+    from assetizer import db
+    db.exec("INSERT INTO sources(id, url, created_at, updated_at) VALUES ('s','u','t','t')")
+    db.exec("INSERT INTO runs(id, source_id, kind, production, error_class, created_at) VALUES ('s-r1','s','PRODUCTION','FAILED','CONTENT_SAFETY','t'), ('s-r2','s','PRODUCTION','FAILED','PROVIDER_FAILURE','t')")
+    assert cc_api.post("/api/runs/s-r1/ignore", json={}).status_code == 200
+    assert db.one("SELECT production FROM runs WHERE id='s-r1'")["production"] == "CANCELLED"
+    assert cc_api.post("/api/runs/s-r2/ignore", json={}).status_code == 409
+
+
+def test_the_providers_name_their_filters(home, monkeypatch):
+    from assetizer.providers.magpie import _magpie_kind
+    from assetizer.providers.tuzi import _http_kind
+    assert _magpie_kind(500, '{"code":"refusal","message":"Claude declined"}') == "CONTENT_SAFETY"
+    assert _magpie_kind(500, '{"message":"overloaded"}') == "PROVIDER_TRANSIENT"
+    assert _http_kind(400, "The response was blocked by the safety filter") == "CONTENT_SAFETY"
+
+
+def test_a_rewrite_the_filter_stops_leaves_the_draft_for_a_person_to_look_at(home, monkeypatch):
+    from assetizer import db
+    from assetizer.contracts import prompts
+    from assetizer.llm import LLM
+    from assetizer.pipeline import fidelity, semantic
+    from assetizer.providers.agy import ProviderError
+    ctx = _run_ctx()
+    ctx.playbook = {}
+
+    def answer(self, root, stage, prompt, schema, **kw):
+        if stage == "article-sections-01":
+            return {"sections": [{"label": "u1", "markdown": "## 初稿"}]}
+        raise ProviderError("CONTENT_SAFETY", "blocked")
+
+    monkeypatch.setattr(LLM, "structured", answer)
+    monkeypatch.setattr(prompts, "transcript_sections_prompt", lambda *a, **k: "p")
+    monkeypatch.setattr(fidelity, "section_problems", lambda role, text, md: ["压缩太多"])
+    monkeypatch.setattr(semantic, "_source_brief", lambda u, source: {})
+    unit = {"id": "U1", "label": "u1", "title": "第一节", "role": "TOPIC", "segments": [], "provenance": {"chunk_topic_refs": []}}
+    assert semantic._write_from_source(ctx, [unit], {}, []) == {"u1": "## 初稿"}
+    f = db.one("SELECT * FROM flags WHERE kind='SECTION_NOT_FAITHFUL'")
+    assert f["target_id"] == "U1" and f["severity"] == "REVIEW"

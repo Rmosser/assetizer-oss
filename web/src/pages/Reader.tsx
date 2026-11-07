@@ -9,7 +9,7 @@ import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll, Empty } from "../components/States";
 import { useLeaving, useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDay, cnNum, cnYear, deliveryLabel, mins, parseDay, reduceMotion, tc } from "../util";
+import { cnDay, cnNum, cnYear, deliveryLabel, failText, mins, parseDay, reduceMotion, tc, UNAVAILABLE } from "../util";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -28,7 +28,7 @@ const FLAG_KIND: Record<string, string> = {
   ANCHOR_OUT_OF_RANGE: "截图锚点", HALF_SENTENCE_START: "片段起点", NEXT_TOPIC_BLEED: "片段终点", ENDS_BEFORE_CONCLUSION: "片段终点",
   DANGLING_REFERENCE: "指代", ATTRIBUTION_RISK: "归属", OVERSTATEMENT: "程度", SOFTENED: "改轻", CLIP_SHARED: "共用片段", UNIT_SPLIT_SPAN: "单元区间",
   CLIP_TOO_LONG: "片段过长", SELECTION_FALLBACK: "选片兜底", MERGE_UNREFERENCED_TOPIC: "合并", SCREENSHOT_FAILED: "截图",
-  BAD_TIMECODE: "时间码", CLIP_RENDER_FAILED: "剪辑失败",
+  BAD_TIMECODE: "时间码", CLIP_RENDER_FAILED: "剪辑失败", SAFETY_FALLBACK: "换模型",
 };
 const flagKind = (k: string) => FLAG_KIND[k] || FLAG_KIND[k.replace(/^AI_/, "")] || "其他";
 const RESOLVED: Record<string, string> = { ACCEPTED: "无误", FIXED: "已改好", DISMISSED: "已忽略" };
@@ -782,6 +782,24 @@ function Progress() {
   return <div className="progress" ref={ref} aria-hidden />;
 }
 
+/** No article to show: still on the press, or it failed, and then why and what can be done about it here. */
+function NotPrinted({ run, reload }: { run: any; reload: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const act = async (what: string) => {
+    setBusy(true);
+    try { await post(`/api/runs/${encodeURIComponent(run.id)}/${what}`); reload(); } finally { setBusy(false); }
+  };
+  if (run?.production !== "FAILED") return <Empty title={run?.production === "CANCELLED" ? "这一期已取消" : "这一期还在付印"} />;
+  return (
+    <Empty title={failText(run.error_class, run.retry)} action={
+      <>
+        {(UNAVAILABLE[run.error_class] || run.error_class === "CONTENT_SAFETY") && <button className="btn" disabled={busy} onClick={() => act("ignore")}>忽略</button>}
+        {run.kind !== "IMPORT" && <button className="btn solid" disabled={busy} onClick={() => act("retry")}>重试</button>}
+      </>
+    } />
+  );
+}
+
 export default function Reader({ id }: { id: string }) {
   // 频道调试台 links to one version of an issue: /issue/<id>?run=<run id>
   const runParam = new URLSearchParams(location.search).get("run");
@@ -1005,7 +1023,7 @@ export default function Reader({ id }: { id: string }) {
       )}
 
       {!run || !units.length ? (
-        <Empty title="这一期还在付印" />
+        <NotPrinted run={run} reload={reload} />
       ) : (
         <div className="reader">
           {!mobile && (

@@ -95,11 +95,39 @@ export const WAIT: Record<string, string> = {
 /** why a run failed, in a few words */
 export const ERRORS: Record<string, string> = {
   PROVIDER_TIMEOUT: "模型超时", PROVIDER_FAILURE: "模型出错", PROVIDER_TRANSIENT: "模型暂时不可用", PROVIDER_OUTPUT_LIMIT: "输出超长",
-  CONTENT_SAFETY: "被内容安全过滤拦下", MODALITY_ROUTING_DEVIATION: "模型越界读文件", MEDIA_READ_FAILED: "读不了视频", CONTRACT: "输出不合规", DOWNLOAD: "下载失败",
+  CONTENT_SAFETY: "被内容安全过滤拦下", MODALITY_ROUTING_DEVIATION: "模型越界读文件", MEDIA_READ_COUNT: "模型越界读文件", MEDIA_READ_FAILED: "读不了视频", CONTRACT: "输出不合规", DOWNLOAD: "下载失败",
   TOO_MANY_RESTARTS: "反复重启", VIDEO_REMOVED: "视频已删除", VIDEO_PRIVATE: "视频设为私享", VIDEO_MEMBERS: "会员限定视频",
   SOURCE_UNAVAILABLE: "视频看不了", STOPPED: "清空时停下", NETWORK: "网络中断", UNKNOWN: "未分类", "?": "未分类",
+  SCHEMA_VIOLATION: "输出不合规", FORMAT_NONCOMPLIANCE: "输出不合规", CONTENT_FAILURE: "输出不合规", CONTENT_FAILURE_EMPTY_TOPICS: "输出不合规", MISSING_UNITS: "输出不合规",
 };
 export const errorLabel = (kind?: string | null) => ERRORS[kind || "?"] || ERRORS["?"];
+
+/** one name per subscription, whichever part of the page says it */
+export const VENDOR_NAME: Record<string, string> = { agy: "Gemini", codex: "ChatGPT", claude: "Claude", grok: "Grok" };
+
+/** A model call being tried again (llm.py, runs.retry): `retry` of `of`; `fallback`: the model getting the last try. On a
+ *  run that failed: what the call that failed it was put through, `retry` counting every try again it had. */
+export type Retry = { kind: string; call?: string; retry: number; of: number; fallback?: string | null };
+/** what stopped the call, as short as a line under a stage can take it */
+const RETRY_SAID: Record<string, string> = {
+  CONTENT_SAFETY: "被拦下", CONTRACT: "输出不合规", MODALITY_ROUTING_DEVIATION: "模型越界", MEDIA_READ_FAILED: "读不了视频",
+  PROVIDER_FAILURE: "模型出错", PROVIDER_OUTPUT_LIMIT: "输出超长", PROVIDER_TRANSIENT: "模型不可用", PROVIDER_TIMEOUT: "模型超时",
+};
+/** 被拦下，重试 1/2 · 被拦下，换 ChatGPT */
+export function retryText(r?: Retry | null): string | null {
+  if (!r) return null;
+  const said = RETRY_SAID[r.kind] || errorLabel(r.kind);
+  if (!r.fallback) return `${said}，重试 ${r.retry}/${r.of}`;
+  const [vendor] = r.fallback.split("/");
+  return `${said}，换 ${VENDOR_NAME[vendor] || r.fallback.split("/").pop()}`;
+}
+/** 被内容安全过滤拦下 · 试了 4 次: why a run failed, and how hard it was tried if that error is what was being tried */
+export function failText(kind?: string | null, r?: Retry | null): string {
+  const label = errorLabel(kind);
+  if (!r || errorLabel(r.kind) !== label) return label;
+  const tries = r.retry + 1 + (r.fallback ? 1 : 0);
+  return tries > 1 ? `${label} · 试了 ${tries} 次` : label;
+}
 /** what stands in the way of 补录 (ingest.backfill_stop) */
 export const BACKFILL_STOP: Record<string, string> = {
   paused: "队列暂停中", queued: "先印新视频", trial: "先跑试跑", weekly: "周额度留给新视频", "5h": "5 小时额度留给新视频",

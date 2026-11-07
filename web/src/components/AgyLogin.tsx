@@ -10,17 +10,18 @@ type Bucket = { window: string; remaining: number | null; disabled: boolean };
 type Login = {
   state: "idle" | "checking" | "starting" | "url" | "verifying" | "done" | "already" | "failed" | "expired" | "cancelled";
   url?: string; expires_in?: number; error?: string | null;
-  quota?: { groups?: { name: string; buckets: Bucket[] }[]; production_group?: string };
+  quota?: { groups?: { name: string; buckets: Bucket[] }[]; in_use?: string[] };
 };
 
 const CLI = "lzc-cli docker -- exec -it cloudlazycatappassetizer-worker-1 /lzcapp/var/assetizer/home/.local/bin/agy";
 const BUSY = ["checking", "starting", "verifying"];
 const ENDED = ["failed", "expired", "cancelled", "idle"];  // idle: the server no longer has it (the web process restarted)
 
+/** The week left on the tightest of the groups of agy's quota the stages draw on */
 function weekLeft(q: Login["quota"]) {
-  const g = q?.groups?.find((x) => x.name === q.production_group);
-  const b = g?.buckets.find((x) => x.window === "weekly" && !x.disabled);
-  return b?.remaining == null ? null : Math.round(b.remaining * 100);
+  const ws = (q?.groups || []).filter((g) => q?.in_use?.includes(g.name))
+    .flatMap((g) => g.buckets.filter((b) => b.window === "weekly" && !b.disabled && b.remaining != null).map((b) => b.remaining as number));
+  return ws.length ? Math.round(Math.min(...ws) * 100) : null;
 }
 
 export function AgyLoginSheet({ onClose }: { onClose: () => void }) {

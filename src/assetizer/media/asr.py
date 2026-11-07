@@ -118,7 +118,7 @@ class RemoteWhisper:
 
 
 def probe(url: str, token: str | None) -> dict:
-    """The 机房 test of the GPU box (scripts/gpu_asr/server.py): does it answer, and does it take our token? No audio
+    """The 设置 page's test of the GPU box (scripts/gpu_asr/server.py): does it answer, and does it take our token? No audio
     is sent: an empty body is refused after the token check, 401 for a wrong token and 400 otherwise."""
     from ..util import now
 

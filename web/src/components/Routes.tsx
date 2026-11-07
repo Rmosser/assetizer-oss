@@ -1,5 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useMedia } from "../hooks";
+import { linkProps } from "../router";
+import { VENDOR_NAME } from "../util";
 import { pct } from "./Figures";
 import type { Save } from "./Knobs";
 import { Sheet, type SheetHandle } from "./Sheet";
@@ -9,16 +11,17 @@ const PROVIDER: Record<string, string> = { agy: "Gemini", tuzi: "Gemini（兔子
 const VIDEO_STEPS = new Set(["understanding", "boundary"]);
 const BLIND = "看不了视频";
 const VENDOR_FAMILY: Record<string, string> = { codex: "chatgpt", claude: "claude", grok: "grok", gemini: "gemini", agy: "gemini" };
-/** one name per subscription, whichever part of the page says it */
-export const VENDOR_NAME: Record<string, string> = { agy: "Gemini", codex: "ChatGPT", claude: "Claude", grok: "Grok" };
 const VENDOR_ORDER = ["agy", "codex", "claude", "grok"];
 const isAgy = (route: string) => route === "agy" || route.startsWith("agy/");
+/** Where a picker may also say no model at all (knobs.NO_FALLBACK) */
+export const NO_ROUTE = "off";
 /** Off the list of whoever lists it: agy for its models, magpie for the rest. No list yet says nothing. */
-const withdrawn = (route: string, models: any[]) => route !== "tuzi" && route !== "agy" && !models.some((m) => m.id === route)
+const withdrawn = (route: string, models: any[]) => route !== NO_ROUTE && route !== "tuzi" && route !== "agy" && !models.some((m) => m.id === route)
   && models.some((m) => (m.vendor === "agy") === isAgy(route));
 
 /** A route's name: the provider's, the model's as magpie lists it, else its id with the provider left off */
 function modelName(route: string, models: any[]): string {
+  if (route === NO_ROUTE) return "不换";
   return PROVIDER[route] || models.find((m) => m.id === route)?.name || route.split("/").pop() || route;
 }
 
@@ -32,14 +35,14 @@ export function familyOf(route: string, models: any[]): string {
 /** What a subscription has left, beside its models where one is being picked */
 export type Left = { left?: number; note?: string; bad?: boolean };
 
-type Opt = { id: string; name: string; off?: boolean; tag?: string; zhu?: boolean; family?: string };
+type Opt = { id: string; name: string; off?: boolean; tag?: string; zhu?: boolean; family?: string; left?: Left | null };
 type Section = { key: string; name?: string; tag?: string; family?: string; left?: Left | null; opts: Opt[] };
 
-function sections(value: string, models: any[], video: boolean, lefts: Record<string, Left | null>): Section[] {
+function sections(value: string, models: any[], video: boolean, lefts: Record<string, Left | null>, none: boolean): Section[] {
   const opt = (m: any, told = false): Opt => ({ id: m.id, name: m.name, off: video && !m.watches, tag: video && !m.watches && !told ? BLIND : undefined });
   // on a stage that watches video everyone but Gemini gets frames: said once per subscription, not on every row
   const framed = (ms: any[]) => (!video ? undefined : ms.some((m) => m.watches) ? "抽帧" : BLIND);
-  const known = value === "agy" || value === "tuzi" || models.some((m) => m.id === value);
+  const known = value === NO_ROUTE || value === "agy" || value === "tuzi" || models.some((m) => m.id === value);
   const out = withdrawn(value, models);
   const own = models.filter((m) => !m.group);
   const vendors = [...new Set<string>(own.map((m) => m.vendor))].sort((a, b) => {
@@ -48,12 +51,16 @@ function sections(value: string, models: any[], video: boolean, lefts: Record<st
   });
   const groups = models.filter((m) => m.group);
   return [
+    ...(none ? [{ key: NO_ROUTE, opts: [{ id: NO_ROUTE, name: modelName(NO_ROUTE, models) }] }] : []),
     ...(known ? [] : [{ key: "gone", opts: [{ id: value, name: modelName(value, models), tag: out ? "已取消" : undefined, zhu: out, family: familyOf(value, models) }] }]),
     ...vendors.map((v) => {
       const ms = own.filter((m) => m.vendor === v);
       const tag = v === "agy" ? undefined : framed(ms);  // Gemini watches the video itself
-      const opts: Opt[] = ms.map((m) => opt(m, tag === BLIND));
-      return { key: v, name: VENDOR_NAME[v] || (ms[0].label || "").split(" · ").pop() || v, tag, family: VENDOR_FAMILY[v] || "other", left: lefts[v],
+      // agy keeps a quota per group of models (lefts by model): where its models draw on more than one, each says what its group has left
+      const each = v === "agy" && new Set(ms.map((m) => m.quota ?? m.id)).size > 1;
+      const opts: Opt[] = ms.map((m) => ({ ...opt(m, tag === BLIND), left: each ? lefts[m.id] : undefined }));
+      return { key: v, name: VENDOR_NAME[v] || (ms[0].label || "").split(" · ").pop() || v, tag, family: VENDOR_FAMILY[v] || "other",
+        left: v !== "agy" ? lefts[v] : each ? undefined : lefts[ms[0].id],
         opts: v === "agy" && value === "tuzi" ? [...opts, { id: "tuzi", name: PROVIDER.tuzi }] : opts };
     }),
     ...(groups.length ? [{ key: "group", name: "路由分组", tag: framed(groups), opts: groups.map((m) => ({ ...opt(m, framed(groups) === BLIND), family: familyOf(m.id, models) })) }] : []),
@@ -86,17 +93,17 @@ function Option({ o, on, solo, pick }: { o: Opt; on: boolean; solo?: { family?: 
       {family && <i className="pig" aria-hidden />}
       <span className="n">{o.name}</span>
       {o.tag && <em>{o.tag}</em>}
-      {solo && <LeftMark l={solo.left} />}
+      <LeftMark l={solo ? solo.left : o.left} />
       {on && tick}
     </button>
   );
 }
 
 /** A stage and the model it goes to. The list opens under the cell, with what each subscription has left beside its
- *  models; on a phone it comes up as a sheet. */
-function RoutePicker({ value, models, video, name, live, bad, lefts, onPick }: {
-  value: string; models: any[]; video: boolean; name: string; live: boolean; bad: boolean;
-  lefts: Record<string, Left | null>; onPick: (r: string) => void;
+ *  models; on a phone it comes up as a sheet. `none`: 不换 is one of the choices; `note`: a word under the name. */
+export function RoutePicker({ value, models, video, name, bad, lefts, onPick, none = false, note }: {
+  value: string; models: any[]; video: boolean; name: string; bad: boolean;
+  lefts: Record<string, Left | null>; onPick: (r: string) => void; none?: boolean; note?: string;
 }) {
   const phone = useMedia("(max-width: 720px)");
   const [open, setOpen] = useState(false);
@@ -169,7 +176,7 @@ function RoutePicker({ value, models, video, name, live, bad, lefts, onPick }: {
   const list = (
     <div role="listbox" aria-label={name} id={id} className="eg-pick-list" onKeyDown={onKey}
       onKeyUp={(e) => { if (e.key === " " && typed.current.space) { e.preventDefault(); typed.current.space = false; } }}>
-      {sections(value, models, video, lefts).map((s) => (
+      {sections(value, models, video, lefts, none).map((s) => (
         <div key={s.key} role="group" aria-label={s.name} className={s.family ? `p-${s.family}` : undefined}>
           {s.opts.length === 1 && s.name && s.key !== "group" ? (
             <Option o={{ ...s.opts[0], tag: s.opts[0].tag || s.tag }} on={s.opts[0].id === value} solo={{ family: s.family, left: s.left }} pick={pick} />
@@ -185,11 +192,11 @@ function RoutePicker({ value, models, video, name, live, bad, lefts, onPick }: {
   );
 
   return (
-    <div ref={root} className={`eg-route p-${familyOf(value, models)}${bad || gone ? " bad" : ""}${live ? " live" : ""}${open ? " open" : ""}`}>
+    <div ref={root} className={`eg-route p-${familyOf(value, models)}${bad || gone ? " bad" : ""}${open ? " open" : ""}${value === NO_ROUTE ? " none" : ""}`}>
       <button ref={trigger} type="button" className="eg-route-b" aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? id : undefined}
         aria-label={`${name}：${modelName(value, models)}`} onClick={() => (open ? close() : setOpen(true))}
         onKeyDown={(e) => { if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); setOpen(true); } }}>
-        <span className="eg-route-k">{name}</span>
+        <span className="eg-route-k">{name}{note && <small>{note}</small>}</span>
         <span className="eg-route-v">
           <span className="t">{modelName(value, models)}</span>
           {gone ? <em>已取消</em> : video && !gemini ? <em>抽帧</em> : null}
@@ -207,14 +214,14 @@ function RoutePicker({ value, models, video, name, live, bad, lefts, onPick }: {
 }
 
 /** 分工: which model each stage uses (stage_providers over llm_provider), from what magpie lists */
-export function RouteCells({ kn, steps, label, save, models, routes, missing, live, lefts }: {
+export function RouteCells({ kn, steps, label, save, models, routes, missing, lefts }: {
   kn: any; steps: string[]; label: Record<string, string>; save: Save; models: any[];
-  routes: { default: string; stages: Record<string, string> }; missing: string[]; live: string[]; lefts: Record<string, Left | null>;
+  routes: { default: string; stages: Record<string, string> }; missing: string[]; lefts: Record<string, Left | null>;
 }) {
-  // a pick shows at once; the page's next read of the box replaces it
+  // a pick shows at once; the page's next read of the box replaces it, and one that was refused goes back
   const [picks, setPicks] = useState<Record<string, string>>({});
   useEffect(() => setPicks({}), [kn]);
-  const sending = useRef<Promise<void>>(Promise.resolve());
+  const sending = useRef<Promise<unknown>>(Promise.resolve());
   const main = picks.default || routes.default;
   const route = (k: string) => picks[k] || routes.stages[k] || main;
   const pick = (k: string, r: string) => {
@@ -222,15 +229,49 @@ export function RouteCells({ kn, steps, label, save, models, routes, missing, li
     const stay = k === "default" && models.find((m) => m.id === r)?.watches === false
       ? Object.fromEntries(steps.filter((s) => VIDEO_STEPS.has(s)).map((s) => [s, route(s)])) : {};
     setPicks((was) => ({ ...was, ...stay, [k]: r }));
-    sending.current = sending.current.then(() => save(k === "default" ? { llm_provider: r } : { stage_route: { [k]: r } }));
+    sending.current = sending.current.then(async () => {
+      if (!await save(k === "default" ? { llm_provider: r } : { stage_route: { [k]: r } })) setPicks({});
+    });
   };
   return (
     <div className="eg-routes">
       {steps.map((k) => (
-        <RoutePicker key={k} value={route(k)} models={models} video={VIDEO_STEPS.has(k)} name={label[k]} live={live.includes(k)}
+        <RoutePicker key={k} value={route(k)} models={models} video={VIDEO_STEPS.has(k)} name={label[k]}
           bad={missing.includes(route(k))} lefts={lefts} onPick={(r) => pick(k, r)} />
       ))}
-      <RoutePicker value={main} models={models} video={false} name="其余" live={false} bad={missing.includes(main)} lefts={lefts} onPick={(r) => pick("default", r)} />
+      <RoutePicker value={main} models={models} video={false} name="其余" bad={missing.includes(main)} lefts={lefts} onPick={(r) => pick("default", r)} />
+    </div>
+  );
+}
+
+/** How many lines of 分工 go to a model that is no longer there */
+export function lostRoutes(steps: string[], routes: { default: string; stages: Record<string, string> }, models: any[], missing: string[]): number {
+  return [...steps.map((k) => routes.stages[k] || routes.default), routes.default].filter((r) => missing.includes(r) || withdrawn(r, models)).length;
+}
+
+/** 分工 as the 机房 shows it: who is doing each stage, and how each is doing. The choosing is on the 设置 page. */
+export function RouteLinks({ steps, label, models, routes, missing, live }: {
+  steps: string[]; label: Record<string, string>; models: any[];
+  routes: { default: string; stages: Record<string, string> }; missing: string[]; live: string[];
+}) {
+  const cell = (k: string, name: string, value: string, video: boolean) => {
+    const gone = withdrawn(value, models);
+    return (
+      <div key={k} className={`eg-route p-${familyOf(value, models)}${missing.includes(value) || gone ? " bad" : ""}${live.includes(k) ? " live" : ""}`}>
+        <a className="eg-route-b" {...linkProps("/settings#models")} aria-label={`${name}：${modelName(value, models)}`}>
+          <span className="eg-route-k">{name}</span>
+          <span className="eg-route-v">
+            <span className="t">{modelName(value, models)}</span>
+            {gone ? <em>已取消</em> : video && !isAgy(value) && value !== "tuzi" ? <em>抽帧</em> : null}
+          </span>
+        </a>
+      </div>
+    );
+  };
+  return (
+    <div className="eg-routes">
+      {steps.map((k) => cell(k, label[k], routes.stages[k] || routes.default, VIDEO_STEPS.has(k)))}
+      {cell("default", "其余", routes.default, false)}
     </div>
   );
 }

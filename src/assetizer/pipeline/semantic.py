@@ -6,6 +6,7 @@ import re
 from .. import db
 from ..contracts import prompts as P
 from ..llm import ContractError
+from ..providers.agy import ProviderError
 from ..util import fmt_tc, parse_tc, ulid
 from . import fidelity
 from .context import RunContext, StageWarning
@@ -386,9 +387,15 @@ def _write_from_source(ctx: RunContext, units: list[dict], by_id: dict, source: 
         if not problems:
             continue
         note = "\n【这一节上一次没有通过检查，请重写】" + "；".join(problems) + "。\n"
-        o = llm.structured(ctx.calls, f"article-rewrite-{u['label']}",
-                           P.transcript_sections_prompt(ctx.playbook, [_source_brief(u, source)], recs([u]), feedback=note),
-                           P.SECTIONS_SCHEMA)
+        try:
+            o = llm.structured(ctx.calls, f"article-rewrite-{u['label']}",
+                               P.transcript_sections_prompt(ctx.playbook, [_source_brief(u, source)], recs([u]), feedback=note),
+                               P.SECTIONS_SCHEMA)
+        except ProviderError as e:
+            if e.kind != "CONTENT_SAFETY":
+                raise
+            o = {"sections": []}  # the filter stops the rewrite, not the section: the draft stands, for a person to look at
+            db.exec("UPDATE runs SET retry=NULL WHERE id=?", ctx.id)
         again = next((s["markdown"] for s in o["sections"] if s["label"] == u["label"]), "")
         left = fidelity.section_problems(u.get("role") or "TOPIC", text, again) if again else problems
         # 写长了要改短，所以只拦住比原稿和原话都短太多的重写

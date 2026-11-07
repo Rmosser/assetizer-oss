@@ -8,6 +8,7 @@ import Issues from "./pages/Issues";
 import Reader from "./pages/Reader";
 import ChannelPage from "./pages/Channel";
 import Engine from "./pages/Engine";
+import Settings from "./pages/Settings";
 
 function Seal() {
   return <span className="seal" aria-hidden>课</span>;
@@ -202,11 +203,11 @@ export default function App() {
   }, []);
   const decisions = data?.decisions ?? 0;
   const alerts = (data?.alerts ?? []).filter((a: any) => a.severity !== "info").length;
-  const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : "issues";
+  const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : path.startsWith("/settings") ? "settings" : "issues";
 
   useEffect(() => {
     document.documentElement.dataset.chrome = "shown";
-    if (!path.startsWith("/issue/")) document.title = tab === "channels" ? "频道 · 课代表" : tab === "engine" ? "机房 · 课代表" : "课代表";
+    if (!path.startsWith("/issue/")) document.title = tab === "channels" ? "频道 · 课代表" : tab === "engine" ? "机房 · 课代表" : tab === "settings" ? "设置 · 课代表" : "课代表";
   }, [path, tab]);
 
   let page;
@@ -215,6 +216,7 @@ export default function App() {
   else if (path === "/share") page = <Share />;
   else if (tab === "channels") page = <ChannelPage />;
   else if (tab === "engine") page = <Engine />;
+  else if (tab === "settings") page = <Settings />;
   else page = <Issues />;
 
   return (
@@ -234,6 +236,9 @@ export default function App() {
           </a>
           <a {...linkProps("/engine")} className={tab === "engine" ? "on" : ""} aria-current={tab === "engine" ? "page" : undefined}>
             机房{alerts > 0 && <sup className="count" aria-label={`${alerts} 条告警`}>!</sup>}
+          </a>
+          <a {...linkProps("/settings")} className={tab === "settings" ? "on" : ""} aria-current={tab === "settings" ? "page" : undefined}>
+            设置
           </a>
         </nav>
         <div className="tools">
