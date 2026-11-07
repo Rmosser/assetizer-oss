@@ -91,6 +91,8 @@ _TRANSIENT_RE = re.compile(r"\b(429|500|502|503|504)\b|resource_exhausted|unavai
 _QUOTA_RE = re.compile(r"weekly limit|usage limit|limit will reset|refreshes in", re.I)
 _AUTH_RE = re.compile(r"unauthenticated|\b401\b|not logged in|please log ?in|sign in again|invalid_grant|"
                       r"oauth token (?:expired|invalid)|re-?authenticate", re.I)
+# agy on a --model it does not have (1.4.9): "invalid model selection (…): model x is not recognized as a known model…"
+_MODEL_GONE = re.compile(r"invalid model selection|not recognized as a known model", re.I)
 # what a signed-out agy answers to `-p /usage` with stdin closed (1.2.16): "Error: authentication required. Run 'agy'
 # to log in" (its JSON adds "authentication failed or timed out", which a timeout says too: not enough on its own)
 _SIGNED_OUT = re.compile(r"authentication required|not (?:signed|logged) in|please (?:log|sign) ?in|sign in again|"
@@ -160,6 +162,8 @@ def classify_error(text: str) -> str:
     t = (text or "").lower()
     if "output token limit" in t or "max_tokens" in t or "output limit" in t:
         return "PROVIDER_OUTPUT_LIMIT"
+    if _MODEL_GONE.search(t):
+        return "PROVIDER_MODEL"
     if "invalid_argument" in t and ("schema" in t or "function_declarations" in t):
         return "PROVIDER_SCHEMA_REJECTED"
     if "quota" in t or "exceeded your" in t or "billing" in t or _QUOTA_RE.search(t):
@@ -176,8 +180,9 @@ class AgyProvider:
 
     _version: tuple[float, str] | None = None  # (when looked up, version); agy updates itself, so look again
 
-    def __init__(self, settings: config.Settings | None = None):
+    def __init__(self, settings: config.Settings | None = None, model: str | None = None):
         self.s = settings or config.get()
+        self.model = model or self.s.agy_model
 
     def version(self) -> str:
         if AgyProvider._version is None or time.monotonic() - AgyProvider._version[0] > 600:
@@ -213,7 +218,7 @@ class AgyProvider:
         # (MUBB14vJc9U-r5, 2026-10-22). They hold nothing the model was not already given, so reading them is benign.
         own_inputs = {str((call_dir / n).resolve()) for n in ("prompt.md", "schema.json", "stdin-message.jsonl")}
         write_text(call_dir / "prompt.md", prompt)
-        model = model_for(self.s.agy_model, effort)
+        model = model_for(self.model, effort)
         cmd = [
             self.s.agy_bin, "--model", model,
             "--disable-slash-commands", "--dangerously-skip-permissions",
@@ -491,6 +496,18 @@ class AgyProvider:
             return {**out, "error": kind, "detail": said.strip()[-300:]}
         return {**out, "ok": True, "groups": groups}
 
+    def models(self) -> list[dict]:
+        """The Gemini models agy offers (`agy models`, no turn, no quota spent); [] when it does not say."""
+        d = self.s.home / "health" / "agy-usage"
+        d.mkdir(parents=True, exist_ok=True)
+        with USAGE_LOCK:
+            try:
+                out = subprocess.run([self.s.agy_bin, "models"], cwd=d, input="", capture_output=True, text=True, timeout=90,
+                                     env=dict(os.environ, GOGC="50", GOMEMLIMIT="384MiB")).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                return []
+        return parse_models(out, self.s.agy_model)
+
     def media_health(self) -> dict:
         """Can agy still read a video the way the watchdog allows, at the size proxies are made to? A 10-second clip with
         a random number in its middle, padded to just under VIEW_FILE_LIMIT: the answer must be that number, so the
@@ -500,7 +517,7 @@ class AgyProvider:
         d = self.s.home / "health" / "agy-media"
         shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True)
-        out = {"ok": False, "version": self.version(), "tool": None, "parameters": None, "error": None, "bytes": None,
+        out = {"ok": False, "version": self.version(), "model": self.model, "tool": None, "parameters": None, "error": None, "bytes": None,
                "checked_at": now()}
         code = str(random.randint(1000, 9999))
         clip = d / "canary.mp4"
@@ -517,6 +534,54 @@ class AgyProvider:
             return {**out, "error": e.kind, "tool": dev.get("tool"), "parameters": sorted(dev.get("parameters") or {})}
         right = re.sub(r"\D", "", r.text) == code
         return {**out, "ok": right, "tool": r.receipt.get("media_tool"), "error": None if right else "WRONG_ANSWER"}
+
+
+def parse_models(text: str, prefer: str) -> list[dict]:
+    """`agy models` (id, tab, name; one line per level) as one row per model. Each stage says its own level (model_for),
+    so the page offers models, not levels: the id kept has the level of the box's model, which is what a call that says
+    none runs at."""
+    level = re.fullmatch(r".*-(low|medium|high)", prefer)
+    rows: dict[str, dict] = {}
+    for line in text.splitlines():
+        cells = line.split("\t")
+        if len(cells) != 2 or not cells[0].startswith("gemini-"):
+            continue
+        m = re.fullmatch(r"(.*)-(low|medium|high)", cells[0])
+        if (m[1] if m else cells[0]) not in rows or (m and level and m[2] == level[1]):
+            rows[m[1] if m else cells[0]] = {"id": cells[0], "name": re.sub(r"\s*\((?:low|medium|high)\)\s*$", "", cells[1], flags=re.I)}
+    return list(rows.values())
+
+
+def read_models() -> list[dict]:
+    """Keep what agy offers (setting agy_models); what it last said stands while it says nothing."""
+    from .. import db
+    rows = AgyProvider().models()
+    if rows:
+        db.set_setting("agy_models", rows)
+    return rows
+
+
+def _name(model: str) -> str:
+    """A name for a model agy has not listed yet: gemini-3.8-flash-high → Gemini 3.8 Flash."""
+    return " ".join(w.capitalize() for w in re.sub(r"-(low|medium|high)$", "", model).split("-"))
+
+
+def route_models() -> list[dict]:
+    """agy's models as the page's model list has them (magpie_state.model_view). Until agy has been asked: the models
+    the routes use, so a stage reads by its model's name and is not taken for one that was withdrawn."""
+    from .. import db
+    from . import AGY_PREFIX, is_agy, resolve, routes
+    rows = db.setting("agy_models") or [{"id": r[len(AGY_PREFIX):], "name": _name(r[len(AGY_PREFIX):])}
+                                        for r in dict.fromkeys([resolve("agy"), *routes()]) if is_agy(r)]
+    return [{"id": AGY_PREFIX + m["id"], "name": m["name"], "vendor": "agy", "group": False, "watches": True} for m in rows]
+
+
+def missing_routes() -> list[str]:
+    """The routes on agy's models that agy no longer lists."""
+    from .. import db
+    from . import AGY_PREFIX, is_agy, routes
+    listed = {AGY_PREFIX + m["id"] for m in db.setting("agy_models") or []}
+    return [r for r in routes() if is_agy(r) and listed and r not in listed]
 
 
 def parse_usage(payload: dict) -> list[dict]:

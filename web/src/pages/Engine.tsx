@@ -576,7 +576,7 @@ export default function Engine() {
   const mSt = m.state || {};
   const subs: any[] = mSt.subs || [];
   const vendors: string[] = m.vendors || [];
-  const models: any[] = mSt.models || [];
+  const models: any[] = [...(data.agy_models || []), ...(mSt.models || [])];
   const paused = data.paused;
   const counts = data.counts || {};
   const stages: Record<string, string> = data.providers?.stages || {};

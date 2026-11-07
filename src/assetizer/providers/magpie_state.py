@@ -229,7 +229,8 @@ def view() -> dict:
     used = routes()
     listed = {m["id"] for m in models}
     missing = [r for r in used if is_model(r) and models and r not in listed]
-    return {"url": base_url(), "state": st, "routes": {"default": resolve(knobs.get("llm_provider")), "stages": stages}, "missing": missing,
+    from .agy import missing_routes
+    return {"url": base_url(), "state": st, "routes": {"default": resolve(knobs.get("llm_provider")), "stages": stages}, "missing": missing + missing_routes(),
             "vendors": [v for v in dict.fromkeys(vendor_of(r, models) for r in used) if v],
             "fallback": quota_view(db.setting("magpie_quota")), "report": db.setting("magpie_report")}
 

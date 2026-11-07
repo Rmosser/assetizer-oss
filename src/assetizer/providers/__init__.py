@@ -1,7 +1,8 @@
 """Model providers. The setting ``llm_provider`` (per box) picks a route: "agy" (default, Antigravity CLI on the Google
-AI Pro quota), "tuzi" (Gemini through the 兔子 API gateway, pay-as-you-go), "magpie" (the gateway's default model) or
-a model the gateway lists, by its id: "codex/gpt-6.1-terra", "claude/claude-sonnet-5-5", "group/<id>". What goes
-through magpie reads frames and a transcript in place of video.
+AI Pro quota, with the box's ASSETIZER_MODEL), a model `agy models` lists ("agy/gemini-4-argon-high"), "tuzi" (Gemini
+through the 兔子 API gateway, pay-as-you-go), "magpie" (the gateway's default model) or a model the gateway lists, by
+its id: "codex/gpt-6.1-terra", "claude/claude-sonnet-5-5", "group/<id>". What goes through magpie reads frames and a
+transcript in place of video.
 
 ``stage_providers`` sends some stages elsewhere, e.g. {"knowledge": "codex/gpt-6.1-terra", "selection": "magpie"}:
 the text-only stages that need accuracy rather than prose go to the ChatGPT quota, so the Gemini quota is spent on
@@ -9,9 +10,17 @@ watching video and writing the article (design §R5)."""
 from __future__ import annotations
 
 
+AGY_PREFIX = "agy/"
+
+
 def is_model(choice: str | None) -> bool:
     """A model id of the gateway rather than a provider's name."""
-    return bool(choice) and "/" in choice
+    return bool(choice) and "/" in choice and not is_agy(choice)
+
+
+def is_agy(choice: str | None) -> bool:
+    """One of agy's models rather than the gateway's."""
+    return bool(choice) and choice.startswith(AGY_PREFIX)
 
 
 def _make(choice: str):
@@ -22,7 +31,7 @@ def _make(choice: str):
         from .magpie import MagpieProvider
         return MagpieProvider(model=choice if is_model(choice) else None)
     from .agy import AgyProvider
-    return AgyProvider()
+    return AgyProvider(model=choice[len(AGY_PREFIX):] if is_agy(choice) else None)
 
 
 def get():
@@ -38,12 +47,15 @@ def stage_key(stage: str) -> str:
 
 
 def resolve(choice: str | None) -> str:
-    """What a stored route means now: "agy", "tuzi" or a model id ("magpie" is the gateway's default model)."""
+    """What a stored route means now: "tuzi", or a model id ("magpie" is the gateway's default model, "agy" the box's)."""
     if choice == "magpie":
         from .. import db
         from .magpie import DEFAULT_MODEL
         return db.setting("magpie_model") or DEFAULT_MODEL
-    return choice or "agy"
+    if not choice or choice == "agy":
+        from .. import config
+        return AGY_PREFIX + config.get().agy_model
+    return choice
 
 
 def for_stage(stage: str):
@@ -64,5 +76,5 @@ def in_use() -> list:
     subscription draw on one quota, so asking one is enough; a routing group may span several, so each is asked."""
     seen: dict[str, str] = {}
     for r in routes():
-        seen.setdefault(r if r.startswith("group/") or not is_model(r) else r.split("/")[0], r)
+        seen.setdefault(r if r.startswith("group/") or "/" not in r else r.split("/")[0], r)
     return [_make(r) for r in seen.values()]

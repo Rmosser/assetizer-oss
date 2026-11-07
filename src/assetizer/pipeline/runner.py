@@ -52,6 +52,7 @@ PAUSE_KINDS = {"AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "PROVIDER_MODEL"}
 RETRIED_WAITS = ("YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "LIVE_IN_PROGRESS", "NETWORK", "YTDLP_OUTDATED")  # put back every 30 minutes
 MEDIA_CHECK_EVERY = 600      # seconds: while idle, look this often whether agy updated itself
 MEDIA_RECHECK_PAUSED = 3600  # seconds: while paused for AGY_MEDIA_READ, repeat the media self-test this often
+MODELS_EVERY = 3600          # seconds between two reads of the models agy offers (no turn, no quota spent)
 QUOTA_EVERY = 900            # seconds between two reads of agy's quota while it is in use (no turn, no quota spent)
 MAGPIE_EVERY = 300           # seconds between two reads of magpie's subscriptions and models (asks no vendor)
 
@@ -59,7 +60,7 @@ ALERT_TEXT = {
     "AGY_AUTH_REQUIRED": ("模型登录已失效，生产已暂停",
                           "在「机房」点「登录 agy」，用 Google 授权后贴回授权码；登录后队列自动继续。"),
     "PROVIDER_QUOTA": ("模型配额暂时用尽，生产已暂停", "系统每 10 分钟自动探测一次，恢复后自动继续。"),
-    "PROVIDER_MODEL": ("工序用的模型已不在 magpie，生产已暂停", "在 magpie 里重新勾选，或在「分工」里换一个模型；系统每 10 分钟探测一次，恢复后自动继续。"),
+    "PROVIDER_MODEL": ("工序用的模型已取消，生产已暂停", "在「分工」里换一个模型，或在 magpie 里重新勾选；系统每 10 分钟探测一次，恢复后自动继续。"),
     "YOUTUBE_AUTH": ("YouTube 需要登录或会员权限",
                      "确认 Chrome 登录的是有频道会员权限的账号，并让 CookieCloud 插件同步一次；还没配置 CookieCloud 时，"
                      "在「机房」→「YouTube 会话」里配置。修好后在那里做一次视频测试，通过就立刻继续；否则系统每 30 分钟自动重试。"),
@@ -489,12 +490,30 @@ def media_provider():
     return next((p for p in providers.in_use() if p.name == "agy"), providers.get())
 
 
+def media_providers() -> list:
+    """Each Gemini model a stage that watches video goes to (a model may read video differently), else media_provider."""
+    on = [p for p in map(providers.for_stage, knobs.VIDEO_STAGES) if p.name == "agy"]
+    return list({p.model: p for p in on}.values()) or [media_provider()]
+
+
+def media_tested() -> str:
+    """What a pass of the self-test holds for: this agy, and the models other than the box's own that it was run on."""
+    p = media_providers()
+    others = sorted(x.model for x in p if x.name == "agy" and x.model != config.get().agy_model)
+    return " ".join([p[0].version(), *others])
+
+
 def media_self_test() -> dict:
-    """Run agy's media self-test and keep the result for the 机房; a pass remembers the agy version it passed on."""
-    h = media_provider().media_health()
+    """Run agy's media self-test on the models that watch video and keep the result for the 机房, the first that fails
+    if one does; a pass remembers what it passed on."""
+    h: dict = {}
+    for p in media_providers():
+        h = p.media_health()
+        if not h.get("ok"):
+            break
     db.set_setting("agy_media_health", h)
     if h.get("ok"):
-        db.set_setting("agy_media_version", h.get("version"))
+        db.set_setting("agy_media_version", media_tested())
     return h
 
 
@@ -522,8 +541,9 @@ def media_alert(h: dict) -> None:
         how = "读了自检视频，却没答对画面里的数字"
     else:
         how = f"读视频自检出错（{h.get('error')}）"
+    which = f"（{h['model']}）" if h.get("model") else ""
     db.raise_alert("AGY_MEDIA_READ", "critical", "agy 读不了视频，生产已暂停",
-                   f"agy {h.get('version')} {how}。系统每小时自检一次，通过后自动继续。需要改代码时，把这条告警交给维护者。")
+                   f"agy {h.get('version')}{which} {how}。系统每小时自检一次，通过后自动继续。需要改代码时，把这条告警交给维护者。")
     pause_queue("AGY_MEDIA_READ")
 
 
@@ -640,7 +660,7 @@ class Worker:
     def __init__(self, poll: float = 5.0):
         self.poll = poll
         self.stop = False
-        self.last = {"health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
+        self.last = {"models": 0.0, "health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
                      "memory": 0.0, "digest": 0.0, "playback": 0.0, "quota": 0.0, "magpie": 0.0, "alerts": 0.0, "icons": 0.0}
         self.asking_avatars: threading.Thread | None = None
         self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it
@@ -702,7 +722,7 @@ class Worker:
             self.last["media"] = t
             # runs still held for it (the queue was resumed by hand meanwhile) are tested for as well as an agy update
             held = db.one("SELECT 1 FROM runs WHERE production='WAITING' AND wait_reason='AGY_MEDIA_READ'")
-            if held or media_provider().version() != db.setting("agy_media_version"):  # agy updated itself (or was never checked)
+            if held or media_tested() != db.setting("agy_media_version"):  # agy updated itself, a stage went to another model (or never checked)
                 h = media_self_test()
                 db.event("worker", f"agy {h.get('version')} 读视频自检{'通过' if h.get('ok') else '没通过'}",
                          level="info" if h.get("ok") else "warn")
@@ -730,13 +750,16 @@ class Worker:
                 auth_alert(providers.get().name)
         if t - self.last["quota"] > QUOTA_EVERY and any(p.name == "agy" for p in providers.in_use()):
             self.last["quota"] = t  # the 机房 page's quota bars and their week-long trend
-            from ..providers.agy import AgyProvider, record_usage
+            from ..providers.agy import AgyProvider, read_models, record_usage
             q = record_usage(AgyProvider().usage())
             self.signed_out = self.signed_out + 1 if q.get("error") == "AGY_AUTH_REQUIRED" else 0
             if self.signed_out >= 2:  # twice in a row: say so before a run fails on it
                 auth_alert("agy")
             elif q.get("ok"):
                 agy_answers()
+                if t - self.last["models"] > MODELS_EVERY:
+                    self.last["models"] = t  # the 分工's list of Gemini models
+                    read_models()
         if t - self.last["magpie"] > MAGPIE_EVERY:
             self.last["magpie"] = t  # the 机房 page's subscriptions and models; agy's calls told to magpie's Usage page
             from ..providers import magpie_state

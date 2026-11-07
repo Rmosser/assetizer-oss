@@ -117,7 +117,7 @@ agy 和 yt-dlp 更新得勤，改适配代码时要参考它们最近的表现�
   lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; cat > /lzcapp/var/assetizer/data/secrets/magpie-api-key'
   ```
 
-  地址和模型在设置 `magpie_url`、`magpie_model`、`tuzi_model`；哪道工序用哪个模型在机房「分工」（设置 `stage_providers`，默认 provider 是 `llm_provider`）。
+  地址和模型在设置 `magpie_url`、`magpie_model`、`tuzi_model`；哪道工序用哪个模型在机房「分工」（设置 `stage_providers`，默认 provider 是 `llm_provider`）；Gemini 的型号列表来自 `agy models`（设置 `agy_models`），`agy` 这个值指环境变量 `ASSETIZER_MODEL`。
 
 - **YouTube**：用 CookieCloud，在「机房」→「YouTube 会话」里按面板步骤配置（[cookiecloud-credentials-ui.md](cookiecloud-credentials-ui.md)）。容器走的代理节点换 IP 后，读取会报 `ip_not_allowed`：令牌不用动，把面板显示的出口 IP 加进 CookieCloud Setup 的 `/setup/read-allowlist` 并同步，旧 IP 删掉。
 

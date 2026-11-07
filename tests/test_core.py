@@ -6179,7 +6179,7 @@ def test_a_stage_can_be_sent_to_a_model_the_gateway_lists(home):
     assert providers.for_stage("article-outline").model == "group/text"
     assert isinstance(providers.for_stage("merge"), AgyProvider)
     # one provider per subscription: two of Codex's models draw on one quota; a group is asked for itself
-    assert sorted(getattr(p, "model", "agy") for p in providers.in_use()) == ["agy", "claude/claude-sonnet-5-5", "codex/gpt-6.1-terra", "group/text"]
+    assert sorted(p.model for p in providers.in_use()) == ["claude/claude-sonnet-5-5", "codex/gpt-6.1-terra", AgyProvider().model, "group/text"]
     assert knobs.get("stage_providers")["selection"] == "codex/gpt-6.1-sol"
     knobs.save({"stage_providers": {"knowledge": "grok/grok-4.7@500k"}, "llm_provider": "group/text"})
     assert db.setting("llm_provider") == "group/text" and db.setting("stage_providers") == {"knowledge": "grok/grok-4.7@500k"}
@@ -6408,3 +6408,86 @@ def test_a_call_made_while_reporting_waits_for_the_next_round(gateway, home, mon
     assert told == 3  # every call told, none skipped by the cursor and none twice
     rids = [r["rid"] for batch in gateway["posted"] for r in batch]
     assert len(rids) == len(set(rids)) == 3
+
+
+# ---------------------------------------------------------------- 分工: agy's own models
+AGY_MODELS = """gemini-4-argon-medium\tGemini 4 Argon (Medium)
+gemini-4-argon-high\tGemini 4 Argon (High)
+gemini-4-argon-low\tGemini 4 Argon (Low)
+gemini-3.8-flash-high\tGemini 3.8 Flash (High)
+gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)
+claude-opus-5-5-high\tClaude Opus 5.5 (High)
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
+"""
+
+
+def test_agy_models_are_listed_once_each_at_the_level_of_the_box_model():
+    from assetizer.providers.agy import parse_models
+    out = parse_models("Fetching available models...\n" + AGY_MODELS, "gemini-3.8-flash-high")
+    assert out == [{"id": "gemini-4-argon-high", "name": "Gemini 4 Argon"}, {"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash"}]
+    assert parse_models(AGY_MODELS, "gemini-3.8-flash-medium")[1]["id"] == "gemini-3.8-flash-medium"
+    assert parse_models("Error: Please sign in to view available models.\n", "gemini-3.8-flash-high") == []
+
+
+def test_a_route_to_an_agy_model_runs_agy_with_it(home, monkeypatch):
+    from assetizer import config, db, knobs, providers
+    from assetizer.providers.agy import AgyProvider, model_for
+    base = config.get().agy_model
+    assert providers.resolve("agy") == providers.resolve(None) == f"agy/{base}"  # a stored "agy" keeps meaning the box's model
+    knobs.save({"stage_route": {"understanding": "agy/gemini-4-argon-high"}})
+    p = providers.for_stage("understand-CH01")
+    assert isinstance(p, AgyProvider) and p.model == "gemini-4-argon-high"
+    assert model_for(p.model, "medium") == "gemini-4-argon-medium"  # the stage still says the level
+    assert isinstance(providers.for_stage("merge"), AgyProvider) and providers.for_stage("merge").model == base
+    # one subscription: two of its models are asked once, and nothing about them is magpie's
+    assert [q.name for q in providers.in_use()] == ["agy"]
+    assert not providers.is_model("agy/gemini-4-argon-high")
+    # a stage sent to the model the default already means needs no entry
+    knobs.save({"stage_route": {"knowledge": f"agy/{base}"}})
+    assert set(db.setting("stage_providers")) == {"understanding"}
+    for bad in ("agy/-p", "agy/claude-opus-5-5-high", "agy/"):
+        with pytest.raises(knobs.KnobError):
+            knobs.save({"stage_route": {"merge": bad}})
+
+
+def test_the_page_gets_agy_models_and_marks_one_agy_no_longer_lists(home):
+    from assetizer import config, db, knobs
+    from assetizer.providers.agy import missing_routes, route_models
+    base = config.get().agy_model
+    knobs.save({"stage_route": {"article": "agy/gemini-4-argon-high"}})
+    # agy not asked yet: the models in use, by name, and none of them withdrawn
+    assert [(m["id"], m["name"]) for m in route_models()] == [(f"agy/{base}", "Gemini 3.8 Flash"), ("agy/gemini-4-argon-high", "Gemini 4 Argon")]
+    assert missing_routes() == []
+    db.set_setting("agy_models", [{"id": base, "name": "Gemini 3.8 Flash"}])
+    assert [m["id"] for m in route_models()] == [f"agy/{base}"] and route_models()[0]["watches"] is True
+    assert missing_routes() == ["agy/gemini-4-argon-high"]
+
+
+def test_agy_saying_it_has_no_such_model_pauses_like_magpie_saying_so():
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import classify_error
+    said = 'invalid model selection (--model "gemini-nope-high" --effort ""): model gemini-nope-high is not recognized as a known model'
+    assert classify_error(said) == "PROVIDER_MODEL" and "PROVIDER_MODEL" in runner.PAUSE_KINDS
+
+
+def test_the_media_self_test_runs_on_each_gemini_model_that_watches_video(home, monkeypatch):
+    from assetizer import config, db, knobs
+    from assetizer.pipeline import runner
+    from assetizer.providers.agy import AgyProvider
+    tested = []
+    def health(self):
+        tested.append(self.model)
+        return {"ok": self.model != "gemini-bad-high", "version": "1.5.0", "model": self.model}
+    monkeypatch.setattr(AgyProvider, "media_health", health)
+    monkeypatch.setattr(AgyProvider, "version", lambda self: "1.5.0")
+    base = config.get().agy_model
+    assert runner.media_self_test()["ok"] and tested == [base]
+    assert db.setting("agy_media_version") == "1.5.0" == runner.media_tested()  # the box's own model: as before
+    knobs.save({"stage_route": {"boundary": "agy/gemini-4-argon-high"}})
+    assert runner.media_tested() != db.setting("agy_media_version")  # a model that has not read a video here is due a test
+    tested.clear()
+    assert runner.media_self_test()["ok"] and tested == [base, "gemini-4-argon-high"]
+    assert runner.media_tested() == db.setting("agy_media_version")
+    knobs.save({"stage_route": {"understanding": "agy/gemini-bad-high"}})
+    h = runner.media_self_test()
+    assert not h["ok"] and h["model"] == "gemini-bad-high"

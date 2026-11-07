@@ -13,9 +13,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import config, db
+from .providers import resolve
 
 PROVIDERS = ("agy", "magpie", "tuzi")  # tuzi stays accepted for boxes still on it; the 机房 offers agy and magpie's models
 MODEL_ID = re.compile(r"[\w.\-]+/[\w.\-@:+ /]{1,120}")  # a model of the gateway: codex/gpt-6.1-terra, grok/grok-4.7@500k, group/<id>
+AGY_ID = re.compile(r"agy/gemini-[\w.\-]{1,100}")  # one of agy's: goes on its command line
 STAGES = ("understanding", "merge", "knowledge", "article", "selection", "boundary", "review")  # providers.stage_key
 STAGE_NAMES = dict(zip(STAGES, ("理解", "合并", "知识", "文章", "选片", "边界", "预审")))
 VIDEO_STAGES = ("understanding", "boundary")
@@ -58,7 +60,9 @@ class KnobError(ValueError):
 
 
 def route_ok(v: Any) -> bool:
-    return isinstance(v, str) and (v in PROVIDERS or bool(MODEL_ID.fullmatch(v)))
+    if not isinstance(v, str):
+        return False
+    return bool(AGY_ID.fullmatch(v)) if v.startswith("agy/") else v in PROVIDERS or bool(MODEL_ID.fullmatch(v))
 
 
 def watches(route: str) -> bool:
@@ -193,7 +197,7 @@ def save(body: Any) -> dict:
     for key, v in values.items():
         before = get(key)
         if KNOBS[key].kind == "stages":  # a stage sent where the default goes anyway needs no entry
-            v = {s: p for s, p in (v or {}).items() if p != main} or None
+            v = {s: p for s, p in (v or {}).items() if resolve(p) != resolve(main)} or None
         if v is None:
             db.exec("DELETE FROM settings WHERE key=?", key)
         else:

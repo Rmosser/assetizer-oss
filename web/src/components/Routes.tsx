@@ -10,8 +10,12 @@ const VIDEO_STEPS = new Set(["understanding", "boundary"]);
 const BLIND = "看不了视频";
 const VENDOR_FAMILY: Record<string, string> = { codex: "chatgpt", claude: "claude", grok: "grok", gemini: "gemini", agy: "gemini" };
 /** one name per subscription, whichever part of the page says it */
-export const VENDOR_NAME: Record<string, string> = { codex: "ChatGPT", claude: "Claude", grok: "Grok" };
-const VENDOR_ORDER = ["codex", "claude", "grok"];
+export const VENDOR_NAME: Record<string, string> = { agy: "Gemini", codex: "ChatGPT", claude: "Claude", grok: "Grok" };
+const VENDOR_ORDER = ["agy", "codex", "claude", "grok"];
+const isAgy = (route: string) => route === "agy" || route.startsWith("agy/");
+/** Off the list of whoever lists it: agy for its models, magpie for the rest. No list yet says nothing. */
+const withdrawn = (route: string, models: any[]) => route !== "tuzi" && route !== "agy" && !models.some((m) => m.id === route)
+  && models.some((m) => (m.vendor === "agy") === isAgy(route));
 
 /** A route's name: the provider's, the model's as magpie lists it, else its id with the provider left off */
 function modelName(route: string, models: any[]): string {
@@ -36,6 +40,7 @@ function sections(value: string, models: any[], video: boolean, lefts: Record<st
   // on a stage that watches video everyone but Gemini gets frames: said once per subscription, not on every row
   const framed = (ms: any[]) => (!video ? undefined : ms.some((m) => m.watches) ? "抽帧" : BLIND);
   const known = value === "agy" || value === "tuzi" || models.some((m) => m.id === value);
+  const out = withdrawn(value, models);
   const own = models.filter((m) => !m.group);
   const vendors = [...new Set<string>(own.map((m) => m.vendor))].sort((a, b) => {
     const at = (v: string) => (VENDOR_ORDER.includes(v) ? VENDOR_ORDER.indexOf(v) : VENDOR_ORDER.length);
@@ -43,11 +48,13 @@ function sections(value: string, models: any[], video: boolean, lefts: Record<st
   });
   const groups = models.filter((m) => m.group);
   return [
-    ...(known ? [] : [{ key: "gone", opts: [{ id: value, name: modelName(value, models), tag: models.length ? "已取消" : undefined, zhu: models.length > 0, family: familyOf(value, models) }] }]),
-    { key: "agy", name: "Gemini", family: "gemini", left: lefts.agy, opts: [{ id: "agy", name: "Gemini" }, ...(value === "tuzi" ? [{ id: "tuzi", name: PROVIDER.tuzi }] : [])] },
+    ...(known ? [] : [{ key: "gone", opts: [{ id: value, name: modelName(value, models), tag: out ? "已取消" : undefined, zhu: out, family: familyOf(value, models) }] }]),
     ...vendors.map((v) => {
       const ms = own.filter((m) => m.vendor === v);
-      return { key: v, name: VENDOR_NAME[v] || (ms[0].label || "").split(" · ").pop() || v, tag: framed(ms), family: VENDOR_FAMILY[v] || "other", left: lefts[v], opts: ms.map((m) => opt(m, framed(ms) === BLIND)) };
+      const tag = v === "agy" ? undefined : framed(ms);  // Gemini watches the video itself
+      const opts: Opt[] = ms.map((m) => opt(m, tag === BLIND));
+      return { key: v, name: VENDOR_NAME[v] || (ms[0].label || "").split(" · ").pop() || v, tag, family: VENDOR_FAMILY[v] || "other", left: lefts[v],
+        opts: v === "agy" && value === "tuzi" ? [...opts, { id: "tuzi", name: PROVIDER.tuzi }] : opts };
     }),
     ...(groups.length ? [{ key: "group", name: "路由分组", tag: framed(groups), opts: groups.map((m) => ({ ...opt(m, framed(groups) === BLIND), family: familyOf(m.id, models) })) }] : []),
   ];
@@ -100,8 +107,8 @@ function RoutePicker({ value, models, video, name, live, bad, lefts, onPick }: {
   const sheet = useRef<SheetHandle>(null);
   const typed = useRef({ s: "", at: 0, space: false });
   const id = useId();
-  const gemini = value === "agy" || value === "tuzi";
-  const gone = !gemini && !models.some((m) => m.id === value);
+  const gemini = isAgy(value) || value === "tuzi";
+  const gone = withdrawn(value, models);
 
   const close = (refocus = true) => {
     setOpen(false);
@@ -178,14 +185,14 @@ function RoutePicker({ value, models, video, name, live, bad, lefts, onPick }: {
   );
 
   return (
-    <div ref={root} className={`eg-route p-${familyOf(value, models)}${bad || (gone && models.length) ? " bad" : ""}${live ? " live" : ""}${open ? " open" : ""}`}>
+    <div ref={root} className={`eg-route p-${familyOf(value, models)}${bad || gone ? " bad" : ""}${live ? " live" : ""}${open ? " open" : ""}`}>
       <button ref={trigger} type="button" className="eg-route-b" aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? id : undefined}
         aria-label={`${name}：${modelName(value, models)}`} onClick={() => (open ? close() : setOpen(true))}
         onKeyDown={(e) => { if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); setOpen(true); } }}>
         <span className="eg-route-k">{name}</span>
         <span className="eg-route-v">
           <span className="t">{modelName(value, models)}</span>
-          {gone && models.length > 0 ? <em>已取消</em> : video && !gemini ? <em>抽帧</em> : null}
+          {gone ? <em>已取消</em> : video && !gemini ? <em>抽帧</em> : null}
           <span className="chev" aria-hidden />
         </span>
       </button>

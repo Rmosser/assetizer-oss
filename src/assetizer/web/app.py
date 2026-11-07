@@ -472,6 +472,7 @@ def engine():
     from .. import ingest
     from ..pipeline.runner import worker_slots
     from ..providers import magpie_state
+    from ..providers.agy import route_models
     s = config.get()
     magpie_state.read_if_stale()
     du = shutil.disk_usage(s.home)
@@ -485,7 +486,7 @@ def engine():
                        SUM(production IN ('WAITING','INTERRUPTED')) waiting FROM runs""")
     return {
         "disk": {"total": du.total, "free": du.free, **_dir_sizes(s)},
-        "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model,
+        "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model, "agy_models": route_models(),
         "quota": {"agy": db.setting("agy_quota"), "agy_log": db.setting("agy_quota_log") or []},
         "magpie": magpie_state.view(),
         "providers": _providers(), "slots": worker_slots(), "drain_seconds": _drain(),
