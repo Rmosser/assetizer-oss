@@ -6,7 +6,7 @@ import { BackfillPanel } from "../components/BackfillPanel";
 import { Cmd } from "../components/Cmd";
 import { CookieCloudSheet } from "../components/CookieCloud";
 import { AsrForm, DiskRows, NotionRows, ParallelRows, Row, type Save, Stepper, TelegramForm, useKnobs } from "../components/Knobs";
-import { type Left, lostRoutes, NO_ROUTE, RouteCells, RoutePicker } from "../components/Routes";
+import { type Left, lostRoutes, NO_ROUTE, RouteCells, RoutePicker, TopicRouteCells } from "../components/Routes";
 import { Fault, Stale, Unroll } from "../components/States";
 import { useLeaving, useMedia, usePoll } from "../hooks";
 import { returning, useRestoreScroll } from "../router";
@@ -16,7 +16,7 @@ import { ago, bytes, errorLabel, smooth } from "../util";
    itself; a form with text in it saves when asked to. /settings#<section> goes straight to one; #cc opens CookieCloud. */
 
 const SECTIONS: { k: string; name: string }[][] = [
-  [{ k: "models", name: "模型分工" }, { k: "retry", name: "自动重试" }, { k: "slots", name: "并行" }, { k: "backfill", name: "补录" }, { k: "disk", name: "磁盘" }],
+  [{ k: "models", name: "模型分工" }, { k: "retry", name: "自动重试" }, { k: "slots", name: "并行" }, { k: "backfill", name: "补录" }, { k: "topics", name: "专题" }, { k: "disk", name: "磁盘" }],
   [{ k: "agy", name: "Gemini" }, { k: "magpie", name: "Magpie" }, { k: "youtube", name: "YouTube" }, { k: "notion", name: "Notion" }, { k: "asr", name: "GPU 转写" }, { k: "notify", name: "通知" }],
 ];
 const ALL = SECTIONS.flat();
@@ -167,20 +167,23 @@ function Fallback({ data, models, lefts, save }: { data: any; models: any[]; lef
 function Disk({ data, save }: { data: any; save: Save }) {
   const d = data.disk;
   const pc = (x: number) => `${Math.max(0.4, (x / d.total) * 100)}%`;
-  const other = Math.max(0, d.total - d.free - d.media - d.runs - d.packages);
+  const tp = d.topics || 0;
+  const other = Math.max(0, d.total - d.free - d.media - d.runs - d.packages - tp);
   return (
     <>
       <div className="st-block">
-        <div className="diskbar" role="img" aria-label={`媒体 ${bytes(d.media)}，工作区 ${bytes(d.runs)}，素材包 ${bytes(d.packages)}`}>
+        <div className="diskbar" role="img" aria-label={`媒体 ${bytes(d.media)}，工作区 ${bytes(d.runs)}，素材包 ${bytes(d.packages)}${tp ? `，专题 ${bytes(tp)}` : ""}`}>
           <i className="media" style={{ width: pc(d.media) }} />
           <i className="work" style={{ width: pc(d.runs) }} />
           <i className="pk" style={{ width: pc(d.packages) }} />
+          {tp > 0 && <i className="tp" style={{ width: pc(tp) }} />}
           <i className="other" style={{ width: pc(other) }} />
         </div>
         <div className="legend">
           <span className="media">媒体 {bytes(d.media)}</span>
           <span className="work">工作区 {bytes(d.runs)}</span>
           <span className="pk">素材包 {bytes(d.packages)}</span>
+          {tp > 0 && <span className="tp">专题 {bytes(tp)}</span>}
         </div>
       </div>
       <DiskRows kn={data.knobs} save={save} />
@@ -248,6 +251,20 @@ function Youtube({ data, lamp, onCc }: { data: any; lamp: string; onCc: () => vo
           <div className="st-acts"><button type="button" className="btn sm" onClick={startBrowser}>启动远程登录屏幕</button></div>
         </details>
       )}
+    </>
+  );
+}
+
+const share = (v: number) => `${Math.round(v * 100)}%`;
+
+/** 专题: how many of its videos are read at once (within 同时印), and what of each quota it leaves untouched (run.held) */
+function TopicRows({ kn, save }: { kn: any; save: Save }) {
+  return (
+    <>
+      <Row name="同时读"><Stepper k="topic_slots" value={kn.topic_slots} lo={1} hi={8} fmt={(v) => `${v} 期`} save={save} label="同时读" /></Row>
+      <h3 className="st-group">额度留底</h3>
+      <Row name="每周额度"><Stepper k="topic_min_weekly" value={kn.topic_min_weekly} lo={0} hi={0.9} step={0.05} fmt={share} save={save} label="专题留下的周额度" /></Row>
+      <Row name="5 小时额度"><Stepper k="topic_min_5h" value={kn.topic_min_5h} lo={0} hi={0.9} step={0.05} fmt={share} save={save} label="专题留下的 5 小时额度" /></Row>
     </>
   );
 }
@@ -340,6 +357,12 @@ export default function Settings() {
           </Sec>
           <Sec id="slots" title="并行"><ParallelRows kn={kn} save={save} /></Sec>
           <Sec id="backfill" title="补录"><BackfillPanel kn={kn} view={data.backfill} save={save} /></Sec>
+          <Sec id="topics" title="专题">
+            <div className="st-routes">
+              <TopicRouteCells routes={data.providers?.topic || {}} save={save} models={models} missing={missing} lefts={lefts} />
+            </div>
+            <TopicRows kn={kn} save={save} />
+          </Sec>
           <Sec id="disk" title="磁盘" line={lines.disk}><Disk data={data} save={save} /></Sec>
           <Sec id="agy" title="Gemini" line={lines.agy}><Gemini data={data} /></Sec>
           <Sec id="magpie" title="Magpie" line={lines.magpie}><Magpie data={data} lamp={lines.magpie!.lamp} /></Sec>

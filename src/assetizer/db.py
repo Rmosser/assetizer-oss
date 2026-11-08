@@ -311,6 +311,59 @@ CREATE TABLE IF NOT EXISTS notify_outbox (           -- Telegram messages it cou
   at TEXT NOT NULL,
   text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS topics (                  -- 专题：一个问题和一批视频（design §R8），不进刊、不写 Notion
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  question TEXT NOT NULL,
+  notes TEXT,                                          -- 要什么、不要什么
+  rev INTEGER NOT NULL DEFAULT 1,                      -- 问题改过几次：改了就按新问题从看计划起重读
+  last_no INTEGER NOT NULL DEFAULT 0,                  -- 给过的最大期号：回答按 V 号引用，移出的号不再给别的视频
+  paused INTEGER NOT NULL DEFAULT 0,
+  synth TEXT,                                          -- JSON: the latest 综合
+  synth_state TEXT,                                    -- NULL | QUEUED | RUNNING | DONE | FAILED
+  synth_error TEXT,
+  synth_of TEXT,                                       -- JSON: what the 综合 was made from (topics.run.signature)
+  synth_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS videos (                  -- 专题的视频：媒体和中立底稿按视频存，几个专题共用
+  id TEXT PRIMARY KEY,                                 -- youtube video id
+  url TEXT NOT NULL,
+  title TEXT,
+  channel TEXT,
+  duration REAL,
+  published_at TEXT,
+  info TEXT,
+  media_path TEXT,
+  media_height INTEGER,
+  media_state TEXT NOT NULL DEFAULT 'ABSENT',          -- ABSENT | CACHED | PURGED
+  draft TEXT,                                          -- JSON: what the 底稿 holds (language, segments, frames), once made
+  used_at TEXT,                                        -- last read for a topic: media kept `retention_days` after it
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS topic_videos (
+  topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  video_id TEXT NOT NULL REFERENCES videos(id),
+  no INTEGER NOT NULL,                                 -- 第几期 in the topic, what the 综合 cites
+  state TEXT NOT NULL,                                 -- QUEUED RUNNING WAITING DONE FAILED
+  step TEXT,                                           -- topics.run.STEPS
+  progress TEXT,                                       -- JSON: {"done", "of"} of the step's calls
+  wait_reason TEXT,
+  error_class TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  rev INTEGER NOT NULL DEFAULT 1,                      -- the topic's rev this read is for
+  done_rev INTEGER,                                    -- rev of the notes shown (an older one while a new read runs)
+  fit TEXT,                                            -- high | some | none: how much it answers the question
+  gist TEXT,                                           -- one line: what it has for the question
+  excluded INTEGER NOT NULL DEFAULT 0,                 -- the user: leave it out of the 综合
+  force INTEGER NOT NULL DEFAULT 0,                    -- read it through even though the plan found it off the question
+  added_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  PRIMARY KEY (topic_id, video_id)
+);
+CREATE INDEX IF NOT EXISTS topic_videos_state ON topic_videos(state);
 """
 
 _local = threading.local()

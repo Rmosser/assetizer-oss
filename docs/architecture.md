@@ -8,10 +8,10 @@
 
 | 进程 | 入口 | 职责 |
 |---|---|---|
-| web | `python -m assetizer.cli web` → `src/assetizer/web/app.py`（FastAPI） | 界面与 API；不跑生产流水线，但学习目标的编译（后台线程）和起草在这里调用模型，试跑入队时也直接派发第一条；机房的 agy 网页登录（`providers/agy_login.py`，伪终端里的 agy 登录界面）、手动读额度、频道的立即扫描（后台线程）也在这里 |
-| worker | `python -m assetizer.cli worker` → `pipeline/runner.py` 的 `Worker` | 生产、交付、试跑与补录派发、自动收录、健康探测、读 agy 额度（每 15 分钟）、保留期清理（原始媒体；日志每天一次，见 [operations.md](operations.md)「日志与迭代」）、调试样片的低清版（`playback.py`）、通知 |
+| web | `python -m assetizer.cli web` → `src/assetizer/web/app.py`（FastAPI） | 界面与 API；不跑生产流水线，但学习目标的编译（后台线程）和起草在这里调用模型，试跑入队时也直接派发第一条；机房的 agy 网页登录（`providers/agy_login.py`，伪终端里的 agy 登录界面）、手动读额度、频道的立即扫描（后台线程）、新专题读链接里的视频列表（yt-dlp，不下载）也在这里；专题的接口不调模型，只排进 worker |
+| worker | `python -m assetizer.cli worker` → `pipeline/runner.py` 的 `Worker` | 生产、交付、试跑与补录派发、自动收录、健康探测、读 agy 额度（每 15 分钟）、保留期清理（原始媒体；日志每天一次，见 [operations.md](operations.md)「日志与迭代」）、调试样片与专题视频的低清版（`playback.py`）、专题的读与综合（`topics/run.py`）、通知 |
 
-数据目录里：`assetizer.db`（SQLite，WAL）、`runs/<run_id>/`（每次运行的产物与检查点）、`media/`（原始视频与工作文件）、`playback/`（调试样片的 360p 低清版，供频道页原片栏播放，滚动释放）、`packages/`（发布素材包，每期一份，按最后一次跑到 PACKAGE 的运行重建）、`compile/`（编译时的模型答复）、`logs/`（yt-dlp 的原话，留 30 天）、`cache/magpie-media/`（magpie 的抽帧缓存，目前不清理）、`health/`（模型自检的临时目录）、`bench/`（基准的报告与媒体）、`secrets/`（凭据文件，见下）、`run/`（worker 心跳与正常退出标记）。
+数据目录里：`assetizer.db`（SQLite，WAL）、`runs/<run_id>/`（每次运行的产物与检查点）、`media/`（原始视频与工作文件）、`playback/`（调试样片的 360p 低清版，供频道页原片栏播放，滚动释放）、`packages/`（发布素材包，每期一份，按最后一次跑到 PACKAGE 的运行重建）、`compile/`（编译时的模型答复）、`logs/`（yt-dlp 的原话，留 30 天）、`cache/magpie-media/`（magpie 的抽帧缓存，目前不清理）、`health/`（模型自检的临时目录）、`bench/`（基准的报告与媒体）、`topics/`（专题：`media/<视频>/` 原片与 `drafts/<视频>/` 底稿按视频存，`<专题>/r<修订>/<视频>/` 是每次读的计划、回看与笔记，`<专题>/synth/` 是综合的模型答复）、`secrets/`（凭据文件，见下）、`run/`（worker 心跳与正常退出标记）。
 
 凭据只从环境变量 `ASSETIZER_<NAME>` 或 `secrets/<name>` 读取（`config.secret`）：`notion-token`、CookieCloud、Telegram、`magpie-api-key`、`tuzi-api-key` 等。仓库里不放任何凭据。
 
@@ -53,6 +53,10 @@ CLEANUP                                                     非阻塞
 - 自动收录（`ingest.py`）：对开启了收录的频道（定稿时开启，回到调试期关闭）每 30 分钟查一次新视频，只收开启之后发布、且不短于最短时长（0–240 分钟）的视频；还读不到时长的（直播刚结束、首播还没开始）先等，24 小时内拿到时长再判；以前只被当成太短取消过的期，列表里再出现且时长够了就重新收。频道用 yt-dlp 带登录态平铺列出视频与直播 tab（最短时长低于 3 分钟时加 Shorts；Shorts 没有日期，之前扫描没列出过的才算新），公开 RSS 只在列表读不到时兜底；每次扫描记下会员视频收不收得进来（`members`，见 [design.md](design.md) §R6-6）。worker 每轮开始时记下时间（设置 `ingest_round`），页面的「下次」由它推算。每次扫描的结果（发现、新收、已在、已登记、太短、出错、会员视频）留最近 10 次在频道的收录设置里；看板的「立即扫描」做同样的一次，不改变 worker 的轮次。一个频道扫描出错不影响其他频道；「立即扫描」和 worker 同时收到同一期时，后到的一方算作「已在」。
 - 补录（`ingest.py` 的 `enqueue_backfill` / `dispatch_backfill`）：已定稿频道在看板里按日期挑旧视频（`/backfill/candidates?since=&until=`，web 在后台用 yt-dlp 列到够深，最多 1000 期，留 10 分钟），或用「贴链接」补一条列表里看不到的不公开视频（`/backfill/link`，先读视频确认是本频道的），进 `backfill_queue`；worker 只在有空闲路数、没有别的排队、没有试跑等着、且额度够时派（优先级 -1，`runs.origin = 'backfill'`）。`backfill_pace()` 算现在几路：平时一路；`backfill_hours`（东八区整点，机房里涂）涂到的钟点和 `backfill_burst`（`{"until"}`，`null` 是不限时）生效期间 `backfill_fast_slots` 路（默认 8，不超过 `worker_slots`），到点后正在跑的跑完，降到一路再派新的，规则见 [design.md](design.md) §R6-5。`backfill_view()` 给机房和看板同一份：排队多少、在跑几期、几路、到几点、什么挡着（`backfill_stop()`）。回到调试期时取消排队的补录；「取消排队」和回到调试期只取消还没派出的期，worker 先把要派的那一期标成已派出、再去查库，正在派的那一期照常付印。看板的「试一期」用 `/candidates?limit=5`（接口上限 15，留 5 分钟）找最新还没收、不太短的一期，按正常优先级立即付印。
 
+## 专题
+
+专题（[topics.md](topics.md)、[design §R8](design.md)）不走上面的流水线、不建运行：每期在 `topic_videos` 里有自己的状态与步骤（`ACQUIRE → DRAFT → PLAN → LOOK → SECOND → WRITE`，有没把握的再 `LOOK2 → SECOND2 → REVISE`），读完再综合。worker 在派完生产和试跑、补录之前调 `topics.run.dispatch`：先派要做的综合，再在 `topic_slots` 之内派下一期；一期占一个并行槽（`Worker.active` 里的 `topic:<专题>:<视频>`），不占运行。分工用到的订阅低于专题的额度留底（`run.held`）时不派新的；槽满又有运行排队时，在读的一期在下一步之前让出槽（`run.crowded`）；同一个视频的底稿同时只有一个专题在录（`run.drafting`）。四道工序的模型由 `knobs.topic_routes` 决定，`providers.for_stage` 遇到 `draft`、`look`、`second`、`topic` 开头的工序名就走它，不看 `stage_providers`。
+
 ## 交付到 Notion
 
 - 每个频道有自己的目标库与属性映射（设置 `notion:<频道>`，`notion/mapping.py`）；没有频道目标的期写入课代表自己的数据库（设置 `notion_database_id`，没有时在 `notion_parent_page_id` 下自动创建）。
@@ -72,13 +76,13 @@ CLEANUP                                                     非阻塞
 
 ## 主要数据表
 
-`channels`、`channel_prompts`（学习目标版本）、`playbooks`（规程版本）、`sources`（每一期：采用的运行 `current_run_id`、是否钉住 `adopt_pinned`、交付状态 `delivery`、题眼 `headline`）、`runs`（`origin`：manual / ingest / backfill / trial / lock（定稿单排入或等着的），2026-10-28 之前的为空；`stop_at`：「清空」要它停下）、`stages`、`backfill_queue`（补录）、`units`（知识单元）、`sections`、`assets`（截图、片段、海报）、`flags`（校注）、`samples`（调试样片）、`trial_queue`、`notion_blocks`、`alerts`（`notified_at`：推送过没有，非紧急的等 10 分钟）、`notify_outbox`（没发出去的 Telegram 通知）、`decisions`、`events`、`settings`、`model_calls`、`speakers`、`run_votes`（旧的「喜欢 / 备注」，只保留数据）。表结构与迁移都在 `db.py`（启动时自动补列）。
+`channels`、`channel_prompts`（学习目标版本）、`playbooks`（规程版本）、`sources`（每一期：采用的运行 `current_run_id`、是否钉住 `adopt_pinned`、交付状态 `delivery`、题眼 `headline`）、`runs`（`origin`：manual / ingest / backfill / trial / lock（定稿单排入或等着的），2026-10-28 之前的为空；`stop_at`：「清空」要它停下）、`stages`、`backfill_queue`（补录）、`units`（知识单元）、`sections`、`assets`（截图、片段、海报）、`flags`（校注）、`samples`（调试样片）、`trial_queue`、`notion_blocks`、`alerts`（`notified_at`：推送过没有，非紧急的等 10 分钟）、`notify_outbox`（没发出去的 Telegram 通知）、`decisions`、`events`、`settings`、`model_calls`、`speakers`、`run_votes`（旧的「喜欢 / 备注」，只保留数据）；专题的 `topics`（问题、修订号、综合）、`videos`（专题的视频，原片与底稿按视频，几个专题共用）、`topic_videos`（一个专题里的一期：状态、步骤、判断、是否算进回答）。表结构与迁移都在 `db.py`（启动时自动补列）。
 
 ## 前端
 
-React 19 + Vite + TypeScript，源码在 `web/src`，构建产物写入 `src/assetizer/web/static`（不进 Git）。页面：刊（`Issues.tsx`）、对照视图（`Reader.tsx`）、频道（`Channel.tsx`：总览 `components/channel/Overview.tsx`、看板 `Board.tsx`、调试台与其余 `components/channel/`）、机房（`Engine.tsx`）、设置（`Settings.tsx`）。数字与小图表（数字块、额度条、按天的柱、出刊日历、横条、走势线）在 `components/Figures.tsx`，三页共用；agy 登录面板 `components/AgyLogin.tsx` 挂在 App 上，告警里的「登录 agy」打开它；模型列表和机房的只读分工格在 `components/Routes.tsx`，设置页的行和表单在 `components/Knobs.tsx`，灯和读数（机房的系统列表与设置页同一套词）在 `box.ts`。全局样式与色板在 `styles.css`，频道页样式在 `channel.css`。
+React 19 + Vite + TypeScript，源码在 `web/src`，构建产物写入 `src/assetizer/web/static`（不进 Git）。页面：刊（`Issues.tsx`）、对照视图（`Reader.tsx`）、频道（`Channel.tsx`：总览 `components/channel/Overview.tsx`、看板 `Board.tsx`、调试台与其余 `components/channel/`）、专题（`Topics.tsx` 总览、`Topic.tsx` 一个专题、`TopicVideo.tsx` 一期，组件在 `components/topic/`，样式在 `topic.css`）、机房（`Engine.tsx`）、设置（`Settings.tsx`）。数字与小图表（数字块、额度条、按天的柱、出刊日历、横条、走势线）在 `components/Figures.tsx`，三页共用；agy 登录面板 `components/AgyLogin.tsx` 挂在 App 上，告警里的「登录 agy」打开它；模型列表和机房的只读分工格在 `components/Routes.tsx`，设置页的行和表单在 `components/Knobs.tsx`，灯和读数（机房的系统列表与设置页同一套词）在 `box.ts`。全局样式与色板在 `styles.css`，频道页样式在 `channel.css`。
 
-页面读的接口：导航角标与频道页的告警灯读轻量的 `/api/status`；刊读 `/api/overview`（全部期次、同时在印的每一期 `running`、`drain_seconds`；期次和看板一样由 `_issues` 一次批量读出，不按期逐条查，2000 期约 15 条查询）；机房读 `/api/engine`（10 秒）与 `/api/engine/stats`（60 秒）；设置页读 `/api/settings`（10 秒）；频道总览读 `/api/channels`（每个频道带 `stats`），看板读 `/api/channels/{cid}/board`。轮询的页面在切回、重新获得焦点或恢复联网时立即再读一次（`hooks.ts` 的 `useBack`）；调试台空闲时每 60 秒、有试跑在跑或排队时每 15 秒读一次。
+页面读的接口：导航角标与频道页的告警灯读轻量的 `/api/status`；刊读 `/api/overview`（全部期次、同时在印的每一期 `running`、`drain_seconds`；期次和看板一样由 `_issues` 一次批量读出，不按期逐条查，2000 期约 15 条查询）；机房读 `/api/engine`（10 秒）与 `/api/engine/stats`（60 秒）；设置页读 `/api/settings`（10 秒）；频道总览读 `/api/channels`（每个频道带 `stats`），看板读 `/api/channels/{cid}/board`；专题总览读 `/api/topics`（8 秒），一个专题读 `/api/topics/{id}`（有在读的 4 秒，否则 20 秒），一期读 `/api/topics/{id}/videos/{vid}`（在读时 5 秒）。轮询的页面在切回、重新获得焦点或恢复联网时立即再读一次（`hooks.ts` 的 `useBack`）；调试台空闲时每 60 秒、有试跑在跑或排队时每 15 秒读一次。
 
 ## 访问控制
 

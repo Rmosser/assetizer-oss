@@ -223,7 +223,8 @@ DRAFT_SCHEMA = P.obj({"raw_prompt": P.STR})
 def draft_prompt(channel_name: str, why: str, sample_titles: list[str]) -> str:
     """Draft a raw channel prompt from the user's stated reason (user edits before compiling)."""
     root = config.get().home / "compile" / f"draft-{sha256_text(channel_name + why)[:10]}"
-    o = LLM().structured(root, "draft", f"""{P.TOOL_RULE}
+    # named under 编译: a call named "draft…" is a 专题's 底稿 to providers.for_stage, and would go where that goes
+    o = LLM().structured(root, "compile-draft", f"""{P.TOOL_RULE}
 禁止工具与媒体。用户决定长期追踪频道「{channel_name}」。
 用户说明的原因：{why}
 该频道近期标题（仅用于了解题材，不是事实来源）：{json.dumps(sample_titles[:10], ensure_ascii=False)}

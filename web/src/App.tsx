@@ -9,6 +9,9 @@ import Reader from "./pages/Reader";
 import ChannelPage from "./pages/Channel";
 import Engine from "./pages/Engine";
 import Settings from "./pages/Settings";
+import Topics from "./pages/Topics";
+import TopicPage from "./pages/Topic";
+import TopicVideo from "./pages/TopicVideo";
 
 function Seal() {
   return <span className="seal" aria-hidden>课</span>;
@@ -165,6 +168,8 @@ function Share() {
   return <main className="page"><div className="state-block"><h3>{msg}</h3></div></main>;
 }
 
+const TAB_NAME: Record<string, string> = { channels: "频道", topics: "专题", engine: "机房", settings: "设置" };
+
 /** Phones: the masthead slides away while reading down and returns on the way up. */
 function useChromeAutoHide() {
   useEffect(() => {
@@ -203,17 +208,23 @@ export default function App() {
   }, []);
   const decisions = data?.decisions ?? 0;
   const alerts = (data?.alerts ?? []).filter((a: any) => a.severity !== "info").length;
-  const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/engine") ? "engine" : path.startsWith("/settings") ? "settings" : "issues";
+  const tab = path.startsWith("/channels") ? "channels" : path.startsWith("/topics") ? "topics" : path.startsWith("/engine") ? "engine" : path.startsWith("/settings") ? "settings" : "issues";
+  const topic = path.match(/^\/topics\/(\d+)(?:\/([\w-]{11}))?\/?$/);
+  const inTopic = !!topic;
 
   useEffect(() => {
     document.documentElement.dataset.chrome = "shown";
-    if (!path.startsWith("/issue/")) document.title = tab === "channels" ? "频道 · 课代表" : tab === "engine" ? "机房 · 课代表" : tab === "settings" ? "设置 · 课代表" : "课代表";
-  }, [path, tab]);
+    // an issue and a topic name their own page
+    if (!path.startsWith("/issue/") && !inTopic) document.title = TAB_NAME[tab] ? `${TAB_NAME[tab]} · 课代表` : "课代表";
+  }, [path, tab, inTopic]);
 
   let page;
   const m = path.match(/^\/issue\/([^/]+)/);
   if (m) page = <Reader id={decodeURIComponent(m[1])} />;
   else if (path === "/share") page = <Share />;
+  else if (topic && topic[2]) page = <TopicVideo tid={+topic[1]} vid={topic[2]} />;
+  else if (topic) page = <TopicPage id={+topic[1]} />;
+  else if (tab === "topics") page = <Topics />;
   else if (tab === "channels") page = <ChannelPage />;
   else if (tab === "engine") page = <Engine />;
   else if (tab === "settings") page = <Settings />;
@@ -233,6 +244,9 @@ export default function App() {
           </a>
           <a {...linkProps("/channels")} className={tab === "channels" ? "on" : ""} aria-current={tab === "channels" ? "page" : undefined}>
             频道{decisions > 0 && <sup className="count" aria-label={`${decisions} 件待你拍板`}>{decisions}</sup>}
+          </a>
+          <a {...linkProps("/topics")} className={tab === "topics" ? "on" : ""} aria-current={tab === "topics" ? "page" : undefined}>
+            专题
           </a>
           <a {...linkProps("/engine")} className={tab === "engine" ? "on" : ""} aria-current={tab === "engine" ? "page" : undefined}>
             机房{alerts > 0 && <sup className="count" aria-label={`${alerts} 条告警`}>!</sup>}

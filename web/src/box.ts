@@ -8,7 +8,8 @@ export type Bucket = { window: string; remaining: number | null; reset_at: strin
 export type Group = { name: string; models: string; buckets: Bucket[] };
 
 /** stage keys of model calls (providers.stage_key) */
-export const STEP: Record<string, string> = { understanding: "理解", merge: "合并", knowledge: "知识", article: "文章", selection: "选片", boundary: "边界", review: "预审", compile: "编译", health: "探测", media: "自检" };
+export const STEP: Record<string, string> = { understanding: "理解", merge: "合并", knowledge: "知识", article: "文章", selection: "选片", boundary: "边界", review: "预审", compile: "编译", health: "探测", media: "自检",
+  draft: "底稿", look: "回看", second: "复核", topic: "写作" };
 export const MAIN_STEPS = ["understanding", "merge", "knowledge", "article", "selection", "boundary", "review"];
 
 export const MAGPIE_DOWN: Record<string, string> = { UNREACHABLE: "连不上 magpie", BAD_KEY: "Key 失效", HELD: "这个 Key 读不到额度", NO_KEY: "没有放 Key", REFUSED: "magpie 拒收" };

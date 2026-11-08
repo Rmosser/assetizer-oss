@@ -415,22 +415,31 @@ _sizes_lock = threading.Lock()
 
 
 def _dir_sizes(s) -> dict:
-    """Bytes under media / runs / packages. The 机房 and 设置 pages ask every 10 seconds and on the box these hold tens of GB in
+    """Bytes under media / runs / packages / topics. The 机房 and 设置 pages ask every 10 seconds and on the box these hold tens of GB in
     tens of thousands of files, so after the first count the last one is answered and a recount runs in the
     background, at most once a minute."""
     import time
 
     def count() -> dict:
-        def size(p: Path) -> int:
+        def size(p: Path, keep: set | None = None, skip: set | None = None) -> int:
             total = 0
             for f in p.rglob("*") if p.exists() else ():
                 try:  # the worker removes files all the time: one gone between listing and stat is skipped
                     if f.is_file() and not f.is_symlink():
-                        total += f.stat().st_size
+                        st = f.stat()
+                        if skip is not None and (st.st_dev, st.st_ino) in skip:
+                            continue
+                        if keep is not None:
+                            keep.add((st.st_dev, st.st_ino))
+                        total += st.st_size
                 except OSError:
                     pass
             return total
-        return {"media": size(s.media_dir), "runs": size(s.runs_dir), "packages": size(s.packages_dir)}
+        originals: set = set()
+        media = size(s.media_dir, keep=originals)
+        # a topic's original is often a channel's one under a second name (topics/run.py acquire): counted once, as media
+        return {"media": media, "runs": size(s.runs_dir), "packages": size(s.packages_dir),
+                "topics": size(s.topics_dir, skip=originals)}
 
     def recount() -> None:
         try:
@@ -457,7 +466,10 @@ def _dir_sizes(s) -> dict:
 def _providers() -> dict:
     from ..providers import in_use, resolve
     return {"default": resolve(knobs.get("llm_provider")), "stages": {k: resolve(v) for k, v in knobs.get("stage_providers").items()},
-            "in_use": list(dict.fromkeys(p.name for p in in_use()))}
+            "in_use": list(dict.fromkeys(p.name for p in in_use())),
+            # 专题's steps: where each goes now, and the ones set on the page (the rest follow their defaults)
+            "topic": {k: resolve(v) for k, v in knobs.topic_routes().items()},
+            "topic_set": {k: resolve(v) for k, v in knobs.get("topic_providers").items()}}
 
 
 def _box() -> dict:
@@ -515,6 +527,9 @@ def engine():
         **_box(),
         "slots": worker_slots(), "drain_seconds": _drain(),
         "counts": {k: counts[k] or 0 for k in ("running", "queued", "waiting")},
+        # 专题's reads and answers under way: each holds one of the slots 在印 counts against (topics/run.py dispatch)
+        "topics": {"reading": db.one("""SELECT (SELECT COUNT(*) FROM topic_videos WHERE state='RUNNING')
+                                         + (SELECT COUNT(*) FROM topics WHERE synth_state='RUNNING') n""")["n"]},
         "runs": runs, "calls": calls,
         "events": db.q("SELECT * FROM events ORDER BY id DESC LIMIT 80"),
         "stage_labels": STAGE_LABELS,
@@ -2152,6 +2167,12 @@ def notion_default(body: NotionDefault):
         db.set_setting("notion_schema", None)
     db.event("notion", f"没有目标库的视频改写到「{_page_title(page) or pid}」下的课代表数据库")
     return {"parent": pid, "title": _page_title(page)}
+
+
+# ------------------------------------------------------------------ 专题
+from .topics import router as topics_router  # noqa: E402
+
+app.include_router(topics_router)
 
 
 # ------------------------------------------------------------------ SPA

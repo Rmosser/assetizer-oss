@@ -18,6 +18,7 @@
 | 模型调用、提示词、结构化输出、哪家 provider 跑哪道工序 | [architecture.md](architecture.md)「生产流水线」、[design.md](design.md) §R-1、§R-16、§R-17、§R5-4、§R5-5 | `llm.py`、`providers/__init__.py`、`providers/agy.py`、`providers/magpie.py`、`providers/tuzi.py`、`contracts/prompts.py` |
 | 知识单元、文章、截图、片段、字幕、校注预审 | [design.md](design.md) §R-2～§R-9 | `pipeline/semantic.py`、`pipeline/media_stages.py`、`pipeline/finish.py`、`media/` |
 | 原话模式 | [design.md](design.md) §R7 | `pipeline/fidelity.py`、`pipeline/semantic.py`、`pipeline/finish.py` |
+| 专题：一个问题、一批视频、合成一个回答 | [topics.md](topics.md)、[design.md](design.md) §R8 | `topics/`（`run.py` 调度、`draft.py` 底稿、`look.py` 回看、`write.py` 计划笔记与综合、`prompts/`）、`web/topics.py`、`web/src/pages/Topics.tsx`、`Topic.tsx`、`TopicVideo.tsx`、`web/src/components/topic/` |
 | 学习目标编译、规程、稿纸批注、重新编译 | [channel-page.md](channel-page.md) §3.4 | `compiler.py`、`web/app.py`（重新编译与编译状态） |
 | 频道调试：样片、试跑、采用、对比、定稿 | [channel-page.md](channel-page.md) §3 | `tuning.py`、`pipeline/runner.py`（跑完自动采用）、`web/app.py`（定稿单查库）、`delivery.py` |
 | 频道页的界面、点亮与连线、展开并排、断点、样式坑 | [channel-page.md](channel-page.md) | `web/src/pages/Channel.tsx`、`web/src/components/channel/`、`web/src/channel.css` |
@@ -35,7 +36,7 @@
 | 其他页面：刊、对照视图、机房、设置，统计口径 | [architecture.md](architecture.md)「前端」、[design.md](design.md) §R6-1、§R6-2 | `web/src/pages/`、`web/src/components/Figures.tsx`、`web/app.py`（`/api/engine/stats`） |
 | 为什么这样设计（长期决定与理由） | [design.md](design.md) | — |
 | 内容原则：视频是唯一事实来源 | [`contracts/policy.md`](../src/assetizer/contracts/policy.md) | — |
-| 改完怎么检查 | [quality.md](quality.md) | `tests/test_core.py` |
+| 改完怎么检查 | [quality.md](quality.md) | `tests/test_core.py`、`tests/test_topics.py` |
 | 发版、升级、回滚、凭据、登录、测试副本、直接看容器、容器出站 | [operations.md](operations.md) | `scripts/lzc/`、`lzc-manifest.yml` |
 | 哪些复杂度是给模型和工具的限制打的补丁、每周基准怎么跑 | [benchmarks.md](benchmarks.md) | `src/assetizer/bench/` |
 

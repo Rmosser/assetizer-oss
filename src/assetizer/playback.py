@@ -1,5 +1,6 @@
 """原片栏的低清版：调试中频道的样片各转一份 360p mp4，频道页的原片栏就能在本地播放
-（会员视频、没登录 YouTube 的设备也能看）。没有低清版时，原片栏用 YouTube 内嵌。
+（会员视频、没登录 YouTube 的设备也能看）。没有低清版时，原片栏用 YouTube 内嵌。专题的视频也转一份（专题页从
+笔记引的那一刻播放），但排在样片后面：先转样片，超过上限时先删专题的。
 
 只在调试期需要，所以滚动释放：
 - 样片所在频道定稿（样片随定稿写入 Notion）或样片被移出，就删；滚动生产的期数从不生成。
@@ -66,12 +67,23 @@ def _ts(iso: str | None) -> float:
 
 
 def wanted() -> dict[str, dict]:
-    """The samples of channels still being tuned, with their original media and when they were last added or run."""
+    """The samples of channels still being tuned, and the videos of topics (专题: the page plays the original from the
+    times its notes cite), with their original media and when they were last added or run."""
     rows = db.q("""SELECT s.id, s.media_state, s.media_path, MAX(sm.added_at) added,
                           (SELECT MAX(r.created_at) FROM runs r WHERE r.source_id = s.id) ran
                    FROM samples sm JOIN channels c ON c.id = sm.channel_id JOIN sources s ON s.id = sm.source_id
                    WHERE c.stage = 'TUNING' GROUP BY s.id""")
-    return {r["id"]: r for r in rows}
+    out = {r["id"]: r for r in rows}
+    for r in db.q("""SELECT v.id, v.media_state, v.media_path, MAX(tv.added_at) added, v.used_at ran
+                     FROM videos v JOIN topic_videos tv ON tv.video_id = v.id GROUP BY v.id"""):
+        out.setdefault(r["id"], {**r, "topic": True})
+    return out
+
+
+def _rank(row: dict, activity: float) -> tuple:
+    """Which copy matters more: a tuning sample before a topic's video (a topic can hold dozens and must not push the
+    samples out), then the more recently active."""
+    return (not row.get("topic"), activity)
 
 
 def _activity(row: dict, p: Path | None) -> float:
@@ -108,7 +120,7 @@ def sweep() -> dict:
         else:
             keep.append((a, p))
     total = sum(p.stat().st_size for _, p in keep)
-    for a, p in sorted(keep):
+    for a, p in sorted(keep, key=lambda ap: _rank(want.get(ap[1].stem, {}), ap[0])):
         if total <= max_bytes():
             break
         total -= p.stat().st_size
@@ -127,12 +139,13 @@ def _next(want: dict[str, dict]) -> tuple[str, Path] | None:
         src, out, a = Path(r["media_path"] or "/nonexistent"), path(sid), _activity(r, None)
         if out and not out.exists() and r["media_state"] == "CACHED" and src.exists() \
                 and time.time() - _failed.get(sid, 0) > RETRY_AFTER and a > _capped.get(sid, -1):
-            cands.append((a, sid, src))
+            cands.append((_rank(r, a), sid, src))
     if not cands:
         return None
-    a, sid, src = max(cands)
+    rank, sid, src = max(cands)
     kept = _copies(want)
-    if kept and sum(p.stat().st_size for _, p in kept) >= max_bytes() and a <= min(k for k, _ in kept):
+    if kept and sum(p.stat().st_size for _, p in kept) >= max_bytes() and \
+            rank <= min(_rank(want.get(p.stem, {}), k) for k, p in kept):
         return None
     return sid, src
 

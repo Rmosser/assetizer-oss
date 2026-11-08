@@ -548,6 +548,7 @@ export default function Engine() {
             <div className="eg-fig"><span className="eg-l">在印</span><b>{counts.running ?? 0}<small>/{data.slots}</small></b></div>
             <div className="eg-fig"><span className="eg-l">排队</span><b>{counts.queued ?? 0}</b></div>
             {data.backfill.pending > 0 && <div className="eg-fig"><span className="eg-l">补录</span><b>{data.backfill.pending}</b></div>}
+            {data.topics?.reading > 0 && <div className="eg-fig"><span className="eg-l">专题</span><b>{data.topics.reading}</b></div>}
             <div className={`eg-fig${counts.waiting ? " warn" : ""}`}><span className="eg-l">等待</span><b>{counts.waiting ?? 0}</b></div>
           </div>
           <Press runs={data.runs} labels={data.stage_labels || {}} family={family} />

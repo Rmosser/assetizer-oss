@@ -170,6 +170,12 @@ def trials_done(n: int) -> None:
     send(f"🧪 调试台排队的试跑都跑完了（这一批 {n} 个），可以去对比投票。\n{link()}".strip())
 
 
+def topic_answered(tid: int, question: str, n: int, ok: bool = True) -> None:
+    """A topic's batch is read through and its answer put together (topics/run.py), or putting it together failed."""
+    head = f"🔎 专题读完了（{n} 期）" if ok else "🔎 专题读完了，综合没成，到页面上再试"
+    send(f"{head}：{question[:80]}\n{link(f'/topics/{tid}')}".strip())
+
+
 def digest() -> str:
     """The last 24 hours in a few lines."""
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat(timespec="seconds")

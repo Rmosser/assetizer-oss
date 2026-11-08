@@ -4,7 +4,8 @@ import { media } from "../api";
 import { typeset } from "../cjk";
 import { reduceMotion, smooth, tc } from "../util";
 
-type Shot = { id: number; start: number; meta?: { reason?: string } };
+/** A screenshot (media id), or any image by its address (`src`, the 专题 pages' frames) */
+type Shot = { id: number | string; start: number; src?: string; meta?: { reason?: string } };
 
 /** Screenshot viewer: <dialog>, swipe/arrow between the unit's frames, tap to zoom on phones. */
 export function Lightbox({ shots, index, onClose }: { shots: Shot[]; index: number; onClose: () => void }) {
@@ -54,7 +55,7 @@ export function Lightbox({ shots, index, onClose }: { shots: Shot[]; index: numb
       <div className={`lb-track${zoom ? " locked" : ""}`} ref={track} onScroll={onScroll}>
         {shots.map((x, k) => (
           <figure key={x.id} className={`lb-frame${zoom && k === i ? " zoom" : ""}`}>
-            <img src={media(x.id)} alt={x.meta?.reason || ""} onClick={() => setZoom(!zoom)} />
+            <img src={x.src || media(x.id as number)} alt={x.meta?.reason || ""} onClick={() => setZoom(!zoom)} />
           </figure>
         ))}
       </div>

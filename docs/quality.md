@@ -15,7 +15,7 @@ npm --prefix web ci
 
 | 检查 | 命令 | 说明 |
 |---|---|---|
-| 后端测试 | `.venv/bin/pytest -q` | 全部在 `tests/test_core.py`；`home` fixture 给每个测试一个隔离的数据库；Notion 调用全部打桩（`FakeNotion`），不会写真实 Notion |
+| 后端测试 | `.venv/bin/pytest -q` | 在 `tests/test_core.py`，专题在 `tests/test_topics.py`（替身模型走完整的读与综合，不下载、不调模型）；`home` fixture 给每个测试一个隔离的数据库；Notion 调用全部打桩（`FakeNotion`），不会写真实 Notion |
 | 定向测试 | `.venv/bin/pytest -q -k <关键词>` | 改哪块先跑哪块 |
 | 前端类型检查 + 构建 | `cd web && npm run build` | `tsc -b` 加 `vite build`，产物写入 `src/assetizer/web/static`（不进 Git） |
 | 前端工具函数 | `cd web && npm run test:util` | 中文数字（期数）和失败原因的标签；不用 build，也不用浏览器 |
@@ -34,7 +34,9 @@ export ASSETIZER_HOME=$(mktemp -d)
 
 本地实例没有样片和运行，也没有 Notion token，适合看空状态和布局。要看真实数据，把包装到 devbox，再经 SSH 隧道打开容器里的界面（见 [operations.md](operations.md)）。
 
-至少在 1600、1280、390 三种宽度和深色模式下各看一遍。频道页的检查要点见 [channel-page.md](channel-page.md) 第 11 节。设置页还要看 320 宽（主导航一行、名字不折行），以及有红灯、黄灯和全新未配置的样子：在 Playwright 里 `page.route("**/api/settings", …)` 改真实返回最快。
+至少在 1600、1280、390 三种宽度和深色模式下各看一遍。频道页的检查要点见 [channel-page.md](channel-page.md) 第 11 节。主导航五个标签，320、360、414、640 宽都要一行放下、不出横向滚动。设置页还要看 320 宽（名字不折行），以及有红灯、黄灯和全新未配置的样子：在 Playwright 里 `page.route("**/api/settings", …)` 改真实返回最快。
+
+专题的三页要有读完的期才有内容：本地空实例只看得到空状态和选片的布局，选片读链接要本机装有 yt-dlp（没有时每行报「取不到视频信息」），也可以照前面的办法改 `/api/topics/peek` 的返回。重点看出处标签和紧跟的标点不拆行、900 宽以下回答和视频分成两个标签、手机上播放器播放时吸顶、深色下出处标签的对比度。
 
 调试台（矩阵、三栏、展开并排）可以用模拟数据看，不要后端、Notion 和模型（先 build）：
 

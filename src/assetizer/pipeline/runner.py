@@ -665,7 +665,7 @@ class Worker:
         self.last = {"models": 0.0, "health": 0.0, "retry": 0.0, "retention": 0.0, "ingest": 0.0, "probe": 0.0, "media": 0.0,
                      "memory": 0.0, "digest": 0.0, "playback": 0.0, "quota": 0.0, "magpie": 0.0, "alerts": 0.0, "icons": 0.0}
         self.asking_avatars: threading.Thread | None = None
-        self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it
+        self.active: dict[str, threading.Thread] = {}  # run id → the thread producing it; "topic:<tid>:<vid>" a topic's read
         self.finished: dict[str, str] = {}             # run id → final state, until reap() picks it up
         self.signed_out = 0                            # quota reads in a row that found agy signed out
 
@@ -683,6 +683,8 @@ class Worker:
             db.exec("UPDATE stages SET status='PENDING' WHERE run_id=? AND status='RUNNING'", r["id"])
             db.event("run", "Worker 重启，从断点继续", r["id"], "warn")
         db.exec("UPDATE sources SET delivery='NOT_STARTED' WHERE delivery='DELIVERING'")
+        from ..topics import run as topics
+        topics.recover()
         finish.sweep_agy_state()
         if n:
             db.event("worker", f"清理了 {n} 个遗留 agy 进程", level="warn")
@@ -773,6 +775,8 @@ class Worker:
         if t - self.last["retention"] > 3600:
             self.last["retention"] = t
             retention()
+        from ..topics import run as topics
+        topics.housekeeping(t)
         if t - self.last["playback"] > 60:
             self.last["playback"] = t
             from .. import playback
@@ -857,8 +861,10 @@ class Worker:
             return True
         if len(self.active) < worker_slots():
             from ..ingest import dispatch_backfill
+            from ..topics import run as topics
             from ..tuning import dispatch_next
-            if dispatch_next() or dispatch_backfill():  # 调试台's next trial, else the next 补录 video
+            # 调试台's next trial, else a topic's next video (it takes a slot of its own, not a run), else the next 补录 video
+            if dispatch_next() or topics.dispatch(self) or dispatch_backfill():
                 return True
         batch = db.setting("trial_batch")
         # the batch is done when no trial waits or runs — whatever else (补录, a new video) is still in production

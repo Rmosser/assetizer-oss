@@ -42,10 +42,10 @@
   font-family: "AZ Punct"; font-weight: 700 900; font-display: block; src: url("./fonts/az-punct-serif-700.woff2") format("woff2");
   unicode-range: U+3000-3003, U+3008-3011, U+3014-301F, U+FF01-FF0F, U+FF1A-FF20, U+FF3B-FF40, U+FF5B-FF65, U+2018-2019, U+201C-201D, U+2026;
 }
-/* the masthead date and the approval seal: a 4 KB 900-weight subset, no flash of fallback */
+/* the masthead date, the page titles and the approval seal: a 5 KB 900-weight subset, no flash of fallback */
 @font-face {
   font-family: "AZ Display"; font-weight: 900; font-display: block; src: url("./fonts/az-display-900.woff2") format("woff2");
-  unicode-range: U+3007, U+4E00, U+4E8C, U+4E09, U+56DB, U+4E94, U+516D, U+4E03, U+516B, U+4E5D, U+5341, U+6708, U+65E5, U+5E74, U+661F, U+671F, U+9891, U+9053, U+673A, U+623F, U+520A, U+5BA1, U+5B9A;
+  unicode-range: U+3007, U+4E00, U+4E8C, U+4E09, U+56DB, U+4E94, U+516D, U+4E03, U+516B, U+4E5D, U+5341, U+6708, U+65E5, U+5E74, U+661F, U+671F, U+9891, U+9053, U+673A, U+623F, U+520A, U+5BA1, U+5B9A, U+4E13, U+9898, U+8BBE, U+7F6E;
 }
 
 :root {
@@ -299,7 +299,8 @@ h1, h2, h3, h4, h5, .yaomu-row .t, .musts a, .dek, .toc-title h3, /* no text-wra
 .seg { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 999px; padding: 2px; }
 .seg button { height: 28px; padding: 0 12px; border-radius: 999px; font: 500 12.5px var(--sans); color: var(--ink-2); transition: background 0.2s, color 0.2s; }
 .seg button.on { background: var(--ink); color: var(--paper); }
-.seg button:not(.on):hover { color: var(--ink); }
+.seg button:not(.on):not(:disabled):hover { color: var(--ink); }
+.seg button:disabled { opacity: 0.35; }
 
 .switch { display: inline-flex; align-items: center; gap: 10px; min-height: 32px; font: 500 13px var(--sans); color: var(--ink-2); }
 .switch i { position: relative; width: 32px; height: 20px; border-radius: 10px; background: color-mix(in srgb, var(--ink) 18%, transparent); transition: background 0.2s; flex: none; }
@@ -1317,6 +1318,7 @@ details.cc-help .cmd { margin-top: var(--s2); }
 .diskbar .media, .legend .media::before { background: var(--ink-2); }
 .diskbar .work, .legend .work::before { background: var(--ink); }
 .diskbar .pk, .legend .pk::before { background: var(--ink-3); }
+.diskbar .tp, .legend .tp::before { background: var(--ink-4); }   /* 专题: its originals and drafts */
 .diskbar .other { background: var(--rule-2); }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: var(--s2); font: 12px var(--sans); color: var(--ink-2); }
 .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
@@ -1469,7 +1471,9 @@ details.cc-help .cmd { margin-top: var(--s2); }
 @media (max-width: 640px) {
   :root { --mh: 52px; --rh: 46px; }
   .brand .seal { width: 28px; height: 28px; font-size: 16px; }
-  .nav a { padding-inline: 11px calc(11px - 0.12em); font-size: 15.5px; }
+  /* the five tabs share the row between the seal and the buttons, as wide as they used to be where there is room */
+  .nav { justify-self: center; width: 100%; max-width: 270px; gap: 0; }
+  .nav a { flex: 1 1 auto; justify-content: center; padding-inline: 2px calc(2px - 0.12em); font-size: 15.5px; }
   /* the edition line on a phone: date and figures each one compact row, so what needs you stays near the top */
   .dateline, .pagehead { padding: var(--s4) 0 var(--s3); gap: var(--s3); }
   .dl-date .md, .pagehead h1 { font-size: 34px; }
@@ -1688,7 +1692,7 @@ a.chip:hover { text-decoration: underline; }
 
 /* the cells of 分工 as rows: the whole row opens the list, the model's color by its name */
 .st-routes .eg-routes { display: block; }
-.st-routes .eg-route + .eg-route { border-top: 1px solid var(--rule); }
+.st-routes .eg-route + .eg-route, .st-routes + .st-row { border-top: 1px solid var(--rule); }   /* 专题: its knobs under its routes */
 .st-routes .eg-route-b { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); width: calc(100% + 20px); min-height: 52px; margin-inline: -10px; padding: 4px 10px; border-radius: 6px; background: none; }
 .st-routes .eg-route-b::before { display: none; }
 .st-routes .eg-route-b:hover, .st-routes .eg-route.open .eg-route-b { background: var(--card-2); box-shadow: none; }
@@ -1705,15 +1709,15 @@ a.chip:hover { text-decoration: underline; }
 
 .settings .ch-toast.bad { max-width: min(560px, calc(100vw - 32px)); border-radius: 12px; background: var(--zhu); color: #fff; }
 
-/* the narrowest phones: four tabs beside the seal and two buttons; the way back to a default goes with the words beside the name */
+/* the narrowest phones: five tabs beside the seal and two buttons; the way back to a default goes with the words beside the name */
 @media (max-width: 400px) {
   .st-dflt { margin-left: -8px; }
-  .nav { gap: 0; }
-  .nav a { padding-inline: 8px calc(8px - 0.12em); }
+  .tools .iconbtn { width: 40px; }
 }
 @media (max-width: 340px) {
   .masthead { column-gap: var(--s1); }
-  .nav a { padding-inline: 5px calc(5px - 0.12em); }
+  .nav a { letter-spacing: 0.06em; padding-inline: 1px calc(1px - 0.06em); }
+  .nav a.on::after { transform: translateX(calc(-50% - 0.03em)); }
   .tools .iconbtn { width: 36px; }
 }
 

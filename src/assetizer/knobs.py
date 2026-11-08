@@ -22,6 +22,12 @@ AGY_ID = re.compile(r"agy/gemini-[\w.\-]{1,100}")  # one of agy's: goes on its c
 STAGES = ("understanding", "merge", "knowledge", "article", "selection", "boundary", "review")  # providers.stage_key
 STAGE_NAMES = dict(zip(STAGES, ("理解", "合并", "知识", "文章", "选片", "边界", "预审")))
 VIDEO_STAGES = ("understanding", "boundary")
+# 专题 (topics/): its own four steps, routed apart from production (setting `topic_providers`), so their quotas, logins and
+# models never pause the channels' queue or hold back 补录 (providers.routes leaves them out)
+TOPIC_STAGES = ("draft", "look", "second", "topic")
+TOPIC_NAMES = dict(zip(TOPIC_STAGES, ("底稿", "回看", "复核", "写作")))
+TOPIC_VIDEO = ("draft", "look")      # watch video: Gemini, or a model of the gateway that takes images
+TOPIC_TEXT = "claude/claude-opus-5-5"  # the plans, notes and answers, when magpie lists it (else where 知识 goes)
 # How often the call that failed is tried again, by what failed it (design §R6-10). Kinds not listed are never tried again:
 # a login, a quota or a model taken off the list waits for the user or the health probe, not for another call.
 RETRY_DEFAULTS = {"CONTENT_SAFETY": 2, "CONTRACT": 1, "MODALITY_ROUTING_DEVIATION": 2, "MEDIA_READ_FAILED": 0,
@@ -37,7 +43,7 @@ NO_FALLBACK = "off"
 @dataclass(frozen=True)
 class Knob:
     label: str
-    kind: str  # "int" "float" "provider" "stages" "url" "hours" "burst" "retries" "fallback"
+    kind: str  # "int" "float" "provider" "stages" "topic_stages" "url" "hours" "burst" "retries" "fallback"
     lo: float = 0
     hi: float = 0
     default: Any = None
@@ -62,6 +68,10 @@ KNOBS: dict[str, Knob] = {
     "backfill_hours": Knob("补录高频时段", "hours", default=[]),  # hours of the day, 东八区
     "backfill_burst": Knob("补录临时高频", "burst", default=None),  # {"until": when | None (until it is switched off)}
     "digest_hour": Knob("每日摘要（点）", "int", 0, 23, 9),
+    "topic_providers": Knob("专题分工", "topic_stages", default={}),
+    "topic_slots": Knob("专题同时读", "int", 1, 8, 3),
+    "topic_min_weekly": Knob("专题留下的周额度", "float", 0, 0.9, 0.2),
+    "topic_min_5h": Knob("专题留下的 5 小时额度", "float", 0, 0.9, 0.15),
 }
 _URL = re.compile(r"https?://[^\s/]+(:\d+)?/?")
 
@@ -150,6 +160,8 @@ def get(key: str) -> Any:
             return v if route_ok(v) else default(key)
         if k.kind == "stages":
             return {s: p for s, p in v.items() if s in STAGES and route_ok(p)} if isinstance(v, dict) else {}
+        if k.kind == "topic_stages":
+            return {s: p for s, p in v.items() if s in TOPIC_STAGES and route_ok(p)} if isinstance(v, dict) else {}
         if k.kind == "hours":
             return sorted({h for h in v if isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23}) if isinstance(v, list) else []
         if k.kind == "burst":
@@ -184,6 +196,34 @@ def fallback_route() -> str | None:
     return None if v == NO_FALLBACK else v or get("stage_providers").get("knowledge") or get("llm_provider")
 
 
+def topic_default(stage: str) -> str:
+    """Where a step of a topic goes when it is not set: the steps that watch video where 理解 goes (agy if that cannot
+    watch), the second look and the writing to Claude Opus when magpie lists it (an independent eye, and the long drafts
+    fit its context), else where 知识 goes."""
+    stages = get("stage_providers")
+    if stage in TOPIC_VIDEO:
+        video = stages.get("understanding") or get("llm_provider")
+        return video if watches(video) else "agy"
+    listed = {m.get("id") for m in (db.setting("magpie_state") or {}).get("models") or []}
+    return TOPIC_TEXT if TOPIC_TEXT in listed else stages.get("knowledge") or get("llm_provider")
+
+
+def topic_routes() -> dict[str, str]:
+    """Where each step of a topic goes now: as set on the 设置 page, else its default."""
+    set_ = get("topic_providers")
+    return {s: set_.get(s) or topic_default(s) for s in TOPIC_STAGES}
+
+
+def takes_images(route: str) -> bool:
+    """Whether a route can be the second look: shown at most twelve images in a call (topics.look.SECOND_IMAGES), so
+    Claude's subscription can, as long as the model takes images at all."""
+    route = resolve(route)
+    if route.startswith("agy/"):
+        return True
+    listed = next((m for m in (db.setting("magpie_state") or {}).get("models") or [] if m.get("id") == route), None)
+    return "image" in (listed.get("inputs") or []) if listed else True
+
+
 def _check(key: str, v: Any) -> Any:
     """The value to store, or KnobError. None resets to the default."""
     k = KNOBS[key]
@@ -206,6 +246,14 @@ def _check(key: str, v: Any) -> Any:
             raise KnobError(key, f"{k.label}的工序或模型不认识")
         if blind := [s for s, p in v.items() if s in VIDEO_STAGES and not watches(p)]:
             raise KnobError(key, f"{STAGE_NAMES[blind[0]]}要看视频，这个模型看不了")
+        return v
+    if k.kind == "topic_stages":
+        if not isinstance(v, dict) or not all(s in TOPIC_STAGES and route_ok(p) for s, p in v.items()):
+            raise KnobError(key, f"{k.label}的工序或模型不认识")
+        if blind := [s for s, p in v.items() if s in TOPIC_VIDEO and not watches(p)]:
+            raise KnobError(key, f"{TOPIC_NAMES[blind[0]]}要看视频，这个模型看不了")
+        if "second" in v and not takes_images(v["second"]):
+            raise KnobError(key, "复核要看图，这个模型看不了")
         return v
     if k.kind == "hours":
         if not isinstance(v, list) or not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in v):
@@ -240,6 +288,13 @@ def save(body: Any) -> dict:
         if not isinstance(pick, dict):
             raise KnobError("stage_route", f"{KNOBS['stage_providers'].label}的工序或模型不认识")
         body = {**{k: v for k, v in body.items() if k != "stage_route"}, "stage_providers": {**get("stage_providers"), **pick}}
+    if "topic_route" in body:  # likewise one step of the topics; null puts it back to its default
+        pick = body["topic_route"]
+        if not isinstance(pick, dict):
+            raise KnobError("topic_route", f"{KNOBS['topic_providers'].label}的工序或模型不认识")
+        both = {**get("topic_providers"), **pick}
+        body = {**{k: v for k, v in body.items() if k != "topic_route"},
+                "topic_providers": {s: p for s, p in both.items() if p is not None}}
     if "retry_count" in body:  # likewise one kind of error's count; null puts it back to the default
         pick = body["retry_count"]
         if not isinstance(pick, dict):
@@ -262,6 +317,8 @@ def save(body: Any) -> dict:
             v = {s: p for s, p in (v or {}).items() if resolve(p) != resolve(main)} or None
         if KNOBS[key].kind == "retries":  # nor a count the same as the default, so a later better default reaches it
             v = {e: n for e, n in (v or {}).items() if n != RETRY_DEFAULTS[e]} or None
+        if KNOBS[key].kind == "topic_stages":  # nor a step sent where it goes anyway
+            v = {s: p for s, p in (v or {}).items() if resolve(p) != resolve(topic_default(s))} or None
         if v is None:
             db.exec("DELETE FROM settings WHERE key=?", key)
         else:
@@ -270,6 +327,9 @@ def save(body: Any) -> dict:
         if now != before and KNOBS[key].kind == "stages":  # just the stages that moved, with what they go to now
             changed += [f"{STAGE_NAMES[s]} {before.get(s, main_before)} → {now.get(s, main)}" for s in STAGES
                         if before.get(s) != now.get(s) and before.get(s, main_before) != now.get(s, main)]
+        elif now != before and KNOBS[key].kind == "topic_stages":
+            changed += [f"专题{TOPIC_NAMES[s]} {resolve(before.get(s) or topic_default(s))} → {resolve(now.get(s) or topic_default(s))}"
+                        for s in TOPIC_STAGES if before.get(s) != now.get(s)]
         elif now != before and KNOBS[key].kind == "retries":
             changed += [f"{KNOBS[key].label}：{RETRY_NAMES[e]} {before[e]} → {now[e]} 次" for e in RETRY_DEFAULTS if before[e] != now[e]]
         elif now != before:

@@ -8,8 +8,8 @@ export type SheetHandle = { close: (then?: () => void) => void };
  *  On phones the grip really drags: pull down past 80px to close, less and it settles back.
  *  Every close plays the sheet out first; content that closes it itself calls `ref.close(then)`,
  *  where `then` (default onClose) is what unmounts the sheet. */
-export function Sheet({ title, onClose, tall = false, children, ref: handle }: {
-  title?: React.ReactNode; onClose: () => void; tall?: boolean; children: React.ReactNode; ref?: React.Ref<SheetHandle>;
+export function Sheet({ title, onClose, tall = false, className = "", children, ref: handle }: {
+  title?: React.ReactNode; onClose: () => void; tall?: boolean; className?: string; children: React.ReactNode; ref?: React.Ref<SheetHandle>;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const drag = useRef<{ y: number; dy: number } | null>(null);
@@ -29,7 +29,16 @@ export function Sheet({ title, onClose, tall = false, children, ref: handle }: {
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (!d.open) d.showModal();
+    if (!d.open) {
+      d.showModal();
+      // showModal focuses the first field; content that wants another marks it (React's autoFocus runs before the dialog
+      // opens, and a field already filled in is taken up where it ends)
+      const el = d.querySelector<HTMLElement>("[data-autofocus]");
+      if (el) {
+        el.focus();
+        if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) { try { el.setSelectionRange(el.value.length, el.value.length); } catch { /* not text */ } }
+      }
+    }
     const onCancel = (e: Event) => { e.preventDefault(); close(); };
     d.addEventListener("cancel", onCancel);
     document.documentElement.classList.add("modal-open");
@@ -42,7 +51,7 @@ export function Sheet({ title, onClose, tall = false, children, ref: handle }: {
     d.style.transform = dy > 0 ? `translateY(${dy}px)` : "";
   };
   return createPortal(
-    <dialog ref={ref} className={`sheet${tall ? " tall" : ""}${leaving ? " leaving" : ""}`} aria-labelledby={title ? id : undefined}
+    <dialog ref={ref} className={`sheet${tall ? " tall" : ""}${className ? ` ${className}` : ""}${leaving ? " leaving" : ""}`} aria-labelledby={title ? id : undefined}
       onClick={(e) => { if (e.target === ref.current) close(); }}>
       <div className="sheet-body">
         <div className="sheet-grip" aria-hidden

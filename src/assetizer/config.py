@@ -66,6 +66,11 @@ class Settings:
         return self.home / "packages"
 
     @property
+    def topics_dir(self) -> Path:
+        """专题: media and 底稿 by video, the reads by topic (topics/__init__.py)."""
+        return self.home / "topics"
+
+    @property
     def secrets_dir(self) -> Path:
         return self.home / "secrets"
 

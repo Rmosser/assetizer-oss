@@ -41,6 +41,7 @@ FRAME_TOKENS, FRAME_SHARE = 1100, 0.6  # a smaller context gets fewer frames, at
 FRAME_BYTES = 36 * 1024 * 1024  # of frames in one call, about 48 MB once in base64: Codex takes 52 MB and refuses 71 (tried 2026-11-05)
 LEVELS = ("low", "medium", "high", "xhigh", "max")
 FRAME_WIDTH = 1280
+IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 MEDIA_NOTE = ("\n\n【视频的给法】上文要求读取的视频没有直接给你，而是换成了下面两样：按画面变化截取的帧（每帧前标注它在本视频中的时间），"
               "以及同一段的语音转写（同样是本视频中的时间）。把它们当作那段视频来理解：画面看帧，说话看转写。"
               "时间码一律用这两样里给出的本视频时间，不要自己推算。你没有任何工具可调用。")
@@ -158,11 +159,22 @@ class MagpieProvider:
         return key
 
     def _media_parts(self, media: list[str]) -> tuple[list[dict], dict]:
+        """A video becomes its frames and transcript; an image goes as it is, labelled 图 1, 图 2… in the order given (the
+        prompt names them so: topics.look's second look)."""
         parts, info = [], {"frames": 0, "transcript_segments": 0}
+        videos = [m for m in media if Path(m).suffix.lower() not in IMAGE_TYPES]
+        n = 0
         for m in media:
             v = Path(m)
+            if mime := IMAGE_TYPES.get(v.suffix.lower()):
+                n += 1
+                parts.append({"type": "input_text", "text": f"图 {n}"})
+                parts.append({"type": "input_image", "detail": "high",
+                              "image_url": f"data:{mime};base64," + base64.b64encode(v.read_bytes()).decode()})
+                info["images"] = n
+                continue
             cache = self.s.home / "cache" / "magpie-media" / _media_id(v)
-            shots = within(spread(frames(v, cache / "frames"), self._frame_cap()), FRAME_BYTES // len(media))
+            shots = within(spread(frames(v, cache / "frames"), self._frame_cap()), FRAME_BYTES // len(videos))
             speech = transcript(v, cache)
             for t, f in shots:
                 parts.append({"type": "input_text", "text": f"画面 [{fmt_tc(t)}]"})
@@ -184,7 +196,7 @@ class MagpieProvider:
             if r.get("status") == "SUCCESS" and (call_dir / "response.txt").exists():
                 return CallResult((call_dir / "response.txt").read_text(), r, reused=True)
         level = _effort(self.s, effort)
-        text_prompt = prompt + (MEDIA_NOTE if media else "")
+        text_prompt = prompt + (MEDIA_NOTE if any(Path(m).suffix.lower() not in IMAGE_TYPES for m in media or []) else "")
         write_text(call_dir / "prompt.md", text_prompt)
         receipt: dict = {
             "provider": self.name, "kind": kind, "model_requested": f"{self.model}@{level}", "agy_version": self.version(),

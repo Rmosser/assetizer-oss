@@ -43,7 +43,7 @@
    - `lzc-cli docker -- ps -a | grep assetizer`：app / web / worker 三个容器都是 healthy；
    - 版本：`lzc-cli docker -- exec cloudlazycatappassetizer-web-1 grep ^version /lzcapp/pkg/package.yml`；
    - worker 日志：`lzc-cli docker -- logs --tail 200 cloudlazycatappassetizer-worker-1`；
-   - 打开入口，看刊、频道、机房、设置四页。
+   - 打开入口，看刊、频道、专题、机房、设置五页。
 
    `lzc-cli app status` 的 `Installed` 只说明装上了；lzc-cli 2.0.9 的 `app log` 未实现。
 

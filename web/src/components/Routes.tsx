@@ -244,6 +244,39 @@ export function RouteCells({ kn, steps, label, save, models, routes, missing, le
   );
 }
 
+/** 专题's four steps (knobs.TOPIC_STAGES), routed apart from production: 底稿 and 回看 watch the video, 复核 is shown the
+ *  frames again (a model that takes images), 写作 plans, writes and puts the answer together. Picking a step's default
+ *  route clears it (knobs.save keeps only what differs). */
+export const TOPIC_STEPS = ["draft", "look", "second", "topic"] as const;
+export const TOPIC_STEP: Record<string, string> = { draft: "底稿", look: "回看", second: "复核", topic: "写作" };
+const TOPIC_VIDEO = new Set(["draft", "look"]);
+
+export function TopicRouteCells({ routes, save, models, missing, lefts }: {
+  routes: Record<string, string>; save: Save; models: any[]; missing: string[]; lefts: Record<string, Left | null>;
+}) {
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  useEffect(() => setPicks({}), [routes]);
+  const sending = useRef<Promise<unknown>>(Promise.resolve());
+  const seeing = models.filter((m) => m.vendor === "agy" || (m.inputs || []).includes("image"));
+  const pick = (k: string, r: string) => {
+    setPicks((was) => ({ ...was, [k]: r }));
+    sending.current = sending.current.then(async () => {
+      if (!await save({ topic_route: { [k]: r } })) setPicks({});
+    });
+  };
+  return (
+    <div className="eg-routes">
+      {TOPIC_STEPS.map((k) => {
+        const value = picks[k] || routes[k] || "agy";
+        return (
+          <RoutePicker key={k} value={value} models={k === "second" ? seeing : models} video={TOPIC_VIDEO.has(k)} name={TOPIC_STEP[k]}
+            bad={missing.includes(value)} lefts={lefts} onPick={(r) => pick(k, r)} />
+        );
+      })}
+    </div>
+  );
+}
+
 /** How many lines of 分工 go to a model that is no longer there */
 export function lostRoutes(steps: string[], routes: { default: string; stages: Record<string, string> }, models: any[], missing: string[]): number {
   return [...steps.map((k) => routes.stages[k] || routes.default), routes.default].filter((r) => missing.includes(r) || withdrawn(r, models)).length;

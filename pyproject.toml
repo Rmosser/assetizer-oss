@@ -30,4 +30,4 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-assetizer = ["contracts/*.json", "contracts/*.md", "web/static/**/*"]
+assetizer = ["contracts/*.json", "contracts/*.md", "topics/prompts/*.md", "web/static/**/*"]

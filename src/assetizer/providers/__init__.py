@@ -59,8 +59,11 @@ def resolve(choice: str | None) -> str:
 
 
 def for_stage(stage: str):
-    from .. import db
-    choice = (db.setting("stage_providers") or {}).get(stage_key(stage))
+    from .. import db, knobs
+    key = stage_key(stage)
+    if key in knobs.TOPIC_STAGES:  # a topic's step: routed on its own (knobs.topic_routes)
+        return _make(knobs.topic_routes()[key])
+    choice = (db.setting("stage_providers") or {}).get(key)
     return _make(choice) if choice else get()
 
 
@@ -73,8 +76,12 @@ def safety_fallback(stage: str) -> tuple[str, object] | None:
     if not route:
         return None
     key = stage_key(stage)
-    own = (db.setting("stage_providers") or {}).get(key) or db.setting("llm_provider") or "agy"
-    if resolve(route) == resolve(own) or (key in knobs.VIDEO_STAGES and not knobs.watches(resolve(route))):
+    if key in knobs.TOPIC_STAGES:
+        own = knobs.topic_routes()[key]
+    else:
+        own = (db.setting("stage_providers") or {}).get(key) or db.setting("llm_provider") or "agy"
+    video = key in knobs.VIDEO_STAGES or key in knobs.TOPIC_VIDEO
+    if resolve(route) == resolve(own) or (video and not knobs.watches(resolve(route))):
         return None
     return resolve(route), _make(route)
 
