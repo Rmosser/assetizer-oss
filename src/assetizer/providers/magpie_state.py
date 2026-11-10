@@ -30,6 +30,8 @@ STALE_AFTER = 60        # seconds: the page asks for a new read when what it sho
 TIMEOUT = 15
 TREND_DAYS = 8
 TREND_POINTS = 120
+CREDIT_GAP = 240        # seconds: credits read nearer than this to the last reading replace it
+CREDIT_POINTS = 3000
 REPORT_BATCH = 500
 REPORT_DAYS = 30        # the first report goes this far back: as far as the 机房's own statistics
 WINDOWS = {"5 hours": ("5h", "5 小时"), "7 days": ("weekly", "每周")}
@@ -144,6 +146,27 @@ def sub_id(q: dict) -> str:
     return f"{q.get('provider')}|{(q.get('user') or '').lower()}"
 
 
+def log_credits(subs: list[dict], at: str | None = None) -> None:
+    """Each ChatGPT account's credits as read, by sub_id, as [time, credits] oldest first (setting
+    `magpie_credit_logs`): magpie keeps no such history, and 约够印 N 期 on credits is reckoned from it. A run of
+    the same amount keeps its first and last reading; a reading nearer than CREDIT_GAP to the one before the last moves the last, so readings stay that far apart."""
+    logs = dict(db.setting("magpie_credit_logs") or {})
+    t = datetime.fromisoformat(at or now())
+    cut = (t - timedelta(days=TREND_DAYS)).isoformat(timespec="seconds")
+    for s in subs:
+        if s.get("credits") is None:
+            continue
+        pts = [p for p in logs.get(sub_id(s)) or [] if p[0] >= cut]
+        point = [t.isoformat(timespec="seconds"), s["credits"]]
+        if len(pts) >= 2 and (pts[-1][1] == pts[-2][1] == s["credits"]
+                              or t - datetime.fromisoformat(pts[-2][0]) < timedelta(seconds=CREDIT_GAP)):
+            pts[-1] = point
+        else:
+            pts.append(point)
+        logs[sub_id(s)] = pts[-CREDIT_POINTS:]
+    db.set_setting("magpie_credit_logs", logs)
+
+
 # ---------------------------------------------------------------- reading
 _lock = threading.Lock()
 
@@ -169,6 +192,7 @@ def read(*, vendors: bool = False) -> dict:
             state["subs"] = [sub_view(q) for q in _ask("/v1/magpie/quotas?kept=1").get("data") or []
                              if q.get("kind") in (None, "subscription") or q.get("windows")]
             state["read_at"] = now()
+            log_credits(state["subs"])
             try:
                 trends = _trends()
                 for s in state["subs"]:

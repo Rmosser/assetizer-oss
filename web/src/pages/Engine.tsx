@@ -48,12 +48,13 @@ const refreshIcon = (
 
 /** A quota window as a bar in the model's color: amber when low, vermilion when used up on the group production draws
  *  on. `old`: the last reading of something that no longer answers, greyed; `stale`: from before the window started over. */
-function Window({ b, label, production, stale, old }: { b?: Bucket; label: string; production: boolean; stale?: boolean; old?: boolean }) {
+function Window({ b, label, production, stale, old, credits }: { b?: Bucket; label: string; production: boolean; stale?: boolean; old?: boolean; credits?: boolean }) {
   if (!b) return null;
   const weekly = b.window === "weekly";
   if (b.disabled) return <Meter label={label} left={null} tone="off" right="不计" sub="周额度用尽时" />;
   const left = b.remaining;
   const out = left != null && left <= 0;
+  if (out && credits) return <p className="eg-row"><span>{label}</span>{resets(b.reset_at, weekly, true)}</p>;  // the credits carry on: only when it is back
   const tone = left == null ? "off" : old ? "old" : out && production ? "out" : left < 0.2 ? "low" : "ok";
   return <Meter label={label} left={left} tone={tone} right={stale ? "待更新" : undefined} sub={old ? undefined : resets(b.reset_at, weekly, out)} />;
 }
@@ -70,7 +71,7 @@ function TileHead({ name, href, title, refresh, busy, note }: { name: string; hr
 
 function Figure({ issues }: { issues?: number | null }) {
   if (issues == null) return null;
-  return <p className="eg-tile-fig">约够印 <b>{issues}</b> 期</p>;
+  return <p className="eg-tile-fig">约够印 <b>{big(issues)}</b> 期</p>;
 }
 
 /** A group of agy's quota a stage draws on (agyGroups), or, with `g` left out, Gemini before one is known. Only the
@@ -145,20 +146,19 @@ function SubTile({ s, m, runway, waiting, refresh, busy }: {
   const read = fallback?.at ? `截至 ${ago(fallback.at)}的调用` : st.read_at ? `${ago(s.read_at || st.read_at)}${old ? "的读数" : "读取"}` : null;
   const said = troubled ? <span className="zhu" title={s.error}>{signedOut ? "账号要重新登录" : "读不到额度"}</span>
     : err ? <span className={down ? "zhu" : undefined} title={st.detail || undefined}>{MAGPIE_DOWN[err] || err}</span>
-    : out && waiting.length ? <span>{waiting.join("、")}在等额度</span>
-    : credits && waiting.length ? <span>{waiting.join("、")}在用积分</span> : null;
+    : out && waiting.length ? <span>{waiting.join("、")}在等额度</span> : null;
   return (
     <article className={`eg-tile p-${subFamily(s)}${bad ? " bad" : ""}${old ? " old" : ""}`} aria-label={`${subName(s)} 额度`}>
       <TileHead name={subName(s)} href={edit} title={[s.plan, s.user].filter(Boolean).join(" · ") || undefined} refresh={refresh} busy={busy} note={read || undefined} />
-      {credits ? <p className="eg-tile-fig">积分 <b>{creditText(s.credits)}</b></p> : !old && <Figure issues={out ? 0 : runway?.issues} />}
+      {credits && runway?.issues == null ? <p className="eg-tile-fig">积分 <b>{creditText(s.credits)}</b></p> : !old && <Figure issues={out ? 0 : runway?.issues} />}
       {windows.length > 0 ? (
         <div className="eg-meters">
+          {credits && runway?.issues != null && <p className="eg-row"><span>积分</span><b>{creditText(s.credits)}</b></p>}
           {windows.map((b) => (
-            <Window key={b.window} b={b} label={b.label || (b.window === "5h" ? "5 小时" : b.window === "weekly" ? "每周" : b.window)} production={!credits} old={old} stale={stale(b)} />
+            <Window key={b.window} b={b} label={b.label || (b.window === "5h" ? "5 小时" : b.window === "weekly" ? "每周" : b.window)} production old={old} stale={stale(b)} credits={credits} />
           ))}
         </div>
       ) : <p className="eg-tile-none">{troubled ? "读不到额度" : "还没读到额度"}</p>}
-      {!credits && !old && s.credits > 0 && <p className="eg-tile-cred">积分 <b>{creditText(s.credits)}</b></p>}
       {said && (
         <footer className="eg-tile-note">
           {said}
@@ -481,7 +481,7 @@ export default function Engine() {
   const runwayKey = (s: any) => `${s.provider}|${(s.user || "").toLowerCase()}`;
   const reach = [
     ...(q.agy?.ok ? agyUsed.map((g) => ({ name: groupName(g), fam: "gemini", out: isOut(g.buckets), issues: stats.data?.agy_runways?.[g.name]?.issues as number | undefined })) : []),
-    ...(down ? [] : cards.filter((s) => !s.error && !onCredits(s)).map((s) => ({ name: subName(s), fam: subFamily(s), out: isOut(s.windows), issues: stats.data?.runways?.[runwayKey(s)]?.issues as number | undefined }))),
+    ...(down ? [] : cards.filter((s) => !s.error).map((s) => ({ name: subName(s), fam: subFamily(s), out: !onCredits(s) && isOut(s.windows), issues: stats.data?.runways?.[runwayKey(s)]?.issues as number | undefined }))),
   ].map((x) => (x.out ? { ...x, issues: 0 } : x)).filter((x) => x.issues != null).sort((a, b) => Number(b.out) - Number(a.out) || a.issues! - b.issues!);
   const tight = reach[0];
   const dry = !!tight?.out;  // used up, not merely too little left for a whole issue
@@ -544,7 +544,7 @@ export default function Engine() {
             {tight && (
               <div className={`eg-hero p-${tight.fam}${tight.issues === 0 ? " out" : ""}`}>
                 <span className="eg-l">约够印</span>
-                <b>{tight.issues}<small>期</small></b>
+                <b>{big(tight.issues)}<small>期</small></b>
                 <span className="eg-who"><i className="pig" aria-hidden />{tight.name}{dry && back && <em>{resets(back, true, true)}</em>}</span>
               </div>
             )}

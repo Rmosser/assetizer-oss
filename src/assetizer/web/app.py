@@ -697,13 +697,51 @@ def _runway() -> dict | None:
     return max(_agy_runways().values(), key=lambda r: r["per_issue"], default=None)
 
 
+CREDIT_SPAN_GAP = 3600   # seconds without credits going that still count as one stretch of spending them
+CREDIT_FINISH = 3600     # seconds after the last credits went within which an issue finishing was printed on them
+
+
+def _credit_runway(log: list, credits: float | None) -> dict | None:
+    """How many more issues an account's credits hold, roughly, once its window is used up: the credits that went over
+    the last week's readings (log: [time, credits]; a rise is a top-up, not spending), divided by the issues finished
+    while they went. Credits go only while a window is used up, so the issues finished at other times are not counted."""
+    from datetime import datetime, timedelta, timezone
+    t = datetime.fromisoformat
+    cut = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    log = [x for x in log if x[0] >= cut]
+    if not credits or len(log) < 2:
+        return None
+    used, spans = 0.0, []
+    for (t0, a), (t1, b) in zip(log, log[1:]):
+        if b >= a:
+            continue
+        used += a - b
+        if spans and (t(t0) - t(spans[-1][1])).total_seconds() <= CREDIT_SPAN_GAP:
+            spans[-1][1] = t1
+        else:
+            spans.append([t0, t1])
+    done = sum(db.one("""SELECT COUNT(*) n FROM runs WHERE finished_at >= ? AND finished_at <= ?
+                         AND production IN ('COMPLETE','COMPLETE_PARTIAL') AND kind NOT IN ('IMPORT','EXPERIMENT')""",
+                      a, min((t(b) + timedelta(seconds=CREDIT_FINISH)).isoformat(timespec="seconds"), nxt))["n"]
+               for (a, b), nxt in zip(spans, [s[0] for s in spans[1:]] + ["9999"]))
+    if done < RUNWAY_MIN_DONE or used <= 0:
+        return None
+    per = used / done
+    return {"per_issue": per, "issues": int(credits / per), "credits": credits}
+
+
 def _sub_runways() -> dict:
-    """约够印 N 期 for each of magpie's subscriptions, by provider and account, from magpie's own readings of its week."""
+    """约够印 N 期 for each of magpie's subscriptions, by provider and account, from magpie's own readings of its week;
+    a ChatGPT account whose window is used up goes on on its credits, and its runway is theirs."""
     from ..providers.magpie_state import sub_id
-    out = {}
+    logs, out = db.setting("magpie_credit_logs") or {}, {}
     for s in (db.setting("magpie_state") or {}).get("subs") or []:
-        week = next((w for w in s.get("windows") or [] if w["window"] == "weekly"), None)
-        if r := _runway_of(s.get("trend") or [], week):
+        windows = s.get("windows") or []
+        if s.get("credits") and any(w["remaining"] == 0 and not w.get("disabled") for w in windows):
+            r = _credit_runway(logs.get(sub_id(s)) or [], s["credits"])
+        else:
+            r = _runway_of(s.get("trend") or [], next((w for w in windows if w["window"] == "weekly"), None))
+        if r:
             out[sub_id(s)] = r
     return out
 

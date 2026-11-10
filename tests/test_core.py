@@ -6454,6 +6454,35 @@ def test_the_engine_page_gets_magpie_and_a_runway_per_subscription(gateway, cc_a
     assert cc_api.post("/api/magpie/refresh", json={}).status_code == 429  # one at a time
 
 
+def test_credits_tell_how_many_issues_they_hold_once_the_window_is_used_up(home):
+    from datetime import datetime, timedelta, timezone
+    from assetizer.providers import magpie_state
+    from assetizer.web.app import _sub_runways
+    t = lambda h: (datetime.now(timezone.utc) - timedelta(hours=h)).isoformat(timespec="seconds")  # noqa: E731
+    sub = {"provider": "codex", "user": "A@example.com", "credits": 1000.0,
+           "windows": [{"window": "weekly", "remaining": 0.0, "reset_at": t(-30), "disabled": False}]}
+    db.set_setting("magpie_state", {"subs": [sub]})
+    # a top-up is not spending; a run of the same amount keeps its first and last; nearer than CREDIT_GAP moves the last
+    for h, c in ((30, 1500.0), (29, 1500.0), (21, 1500.0), (20, 1400.0), (19.5, 1350.0), (12, 1350.0), (10, 900.0), (8.5, 1300.0),
+                 (5.03, 1200.0), (5, 1100.0), (4.99, 1000.0)):
+        magpie_state.log_credits([{**sub, "credits": c}], at=t(h))
+    log = db.setting("magpie_credit_logs")["codex|a@example.com"]
+    assert [x[1] for x in log] == [1500.0, 1500.0, 1400.0, 1350.0, 1350.0, 900.0, 1300.0, 1200.0, 1000.0]
+    for i, c in enumerate((990.0, 980.0, 970.0, 960.0, 950.0)):  # read about every minute: points stay CREDIT_GAP apart
+        magpie_state.log_credits([{**sub, "credits": c}], at=t(4.9 - i * 0.02))
+    assert [x[1] for x in db.setting("magpie_credit_logs")["codex|a@example.com"][-4:]] == [1000.0, 990.0, 960.0, 950.0]
+    # they went 21 → 19.5 h ago, 12 → 10 h, 8.5 → 4.8 h: 100 + 50 + 450 + 350
+    db.exec("INSERT INTO sources(id, created_at, updated_at) VALUES ('v', ?, ?)", t(40), t(40))
+    for i, h in enumerate((25, 19.6, 8.8, 4.5)):  # 25 h: on the window; 8.8 h: over an hour past a stretch, before the next
+        db.exec("INSERT INTO runs(id, source_id, production, created_at, finished_at) VALUES (?, 'v', 'COMPLETE', ?, ?)", f"v-r{i}", t(h + 1), t(h))
+    assert _sub_runways() == {}  # two issues while they went: too few to tell
+    db.exec("INSERT INTO runs(id, source_id, production, created_at, finished_at) VALUES ('v-r9', 'v', 'COMPLETE', ?, ?)", t(12), t(11))
+    r = _sub_runways()["codex|a@example.com"]
+    assert r["per_issue"] == 950 / 3 and r["issues"] == int(1000 / (950 / 3))
+    db.set_setting("magpie_state", {"subs": [{**sub, "windows": [{**sub["windows"][0], "remaining": 0.4}]}]})
+    assert _sub_runways() == {}  # the window has room: credits are not what it goes on
+
+
 def test_stats_tell_tokens_per_subscription(home):
     from assetizer.web.app import _family
     assert [_family(m) for m in ("gemini-3.8-flash-high", "codex/gpt-6.1-terra", "claude/claude-opus-5-5", "grok/grok-4.7", "x/y", None)] == \
