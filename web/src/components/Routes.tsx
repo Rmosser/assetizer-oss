@@ -25,6 +25,26 @@ function modelName(route: string, models: any[]): string {
   return PROVIDER[route] || models.find((m) => m.id === route)?.name || route.split("/").pop() || route;
 }
 
+/** How hard a model thinks (providers.LEVELS), lowest first, and what the page calls each */
+const LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const LEVEL_NAME: Record<string, string> = { minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "极高", ultra: "极限" };
+const GEMINI_LEVELS = ["low", "medium", "high"];
+/** The levels a route takes: as magpie or agy lists the model; Gemini's three for 兔子 */
+export function levelsOf(route: string, models: any[]): string[] {
+  if (route === "tuzi") return GEMINI_LEVELS;
+  return ((models.find((m) => m.id === route)?.levels || []) as string[]).filter((x) => LEVELS.includes(x));
+}
+/** The level of `have` a set one runs at (providers.nearest): itself, else the closest, ties going lower */
+function nearest(level: string, have: string[]): string | undefined {
+  const at = LEVELS.indexOf(level);
+  return [...have].sort((a, b) => Math.abs(LEVELS.indexOf(a) - at) - Math.abs(LEVELS.indexOf(b) - at) || LEVELS.indexOf(a) - LEVELS.indexOf(b))[0];
+}
+/** A cell's level as it shows: none when the code decides, or the model does not think */
+const shownLevel = (route: string, models: any[], set?: string | null) => (set ? nearest(set, levelsOf(route, models)) : undefined);
+
+/** What a cell's level of thinking is set to, and how it is changed; null: the code decides, call by call */
+export type Effort = { value: string | null; onPick: (level: string | null) => void };
+
 /** Whose color a route wears on this page */
 export function familyOf(route: string, models: any[]): string {
   if (route === "agy" || route === "tuzi") return "gemini";
@@ -99,11 +119,40 @@ function Option({ o, on, solo, pick }: { o: Opt; on: boolean; solo?: { family?: 
   );
 }
 
+/** The levels the model in use takes, under its list; 自动 leaves it to each call */
+function Think({ levels, value, pick, back }: { levels: string[]; value?: string; pick: (l: string | null) => void; back: () => void }) {
+  const opts: (string | null)[] = [null, ...levels];
+  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const bs = [...e.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
+    const at = bs.indexOf(document.activeElement as HTMLButtonElement);
+    const go = (i: number) => bs[(i + bs.length) % bs.length]?.focus();
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); go(at + 1); }
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); go(at - 1); }
+    else if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); back(); }
+  };
+  return (
+    <div className="eg-think" role="radiogroup" aria-label="思考强度" onKeyDown={onKey}>
+      <span className="k" aria-hidden>思考</span>
+      <div className="seg">
+        {opts.map((l) => {
+          const on = (l ?? undefined) === value;
+          return (
+            <button key={l ?? "auto"} type="button" role="radio" aria-checked={on} tabIndex={on ? 0 : -1} onClick={() => pick(l)}>
+              {l ? LEVEL_NAME[l] || l : "自动"}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** A stage and the model it goes to. The list opens under the cell, with what each subscription has left beside its
- *  models; on a phone it comes up as a sheet. `none`: 不换 is one of the choices; `note`: a word under the name. */
-export function RoutePicker({ value, models, video, name, bad, lefts, onPick, none = false, note }: {
+ *  models; on a phone it comes up as a sheet. `none`: 不换 is one of the choices; `note`: a word under the name;
+ *  `effort`: the cell also sets how hard its model thinks, under the list, for a model that thinks. */
+export function RoutePicker({ value, models, video, name, bad, lefts, onPick, none = false, note, effort }: {
   value: string; models: any[]; video: boolean; name: string; bad: boolean;
-  lefts: Record<string, Left | null>; onPick: (r: string) => void; none?: boolean; note?: string;
+  lefts: Record<string, Left | null>; onPick: (r: string) => void; none?: boolean; note?: string; effort?: Effort;
 }) {
   const phone = useMedia("(max-width: 720px)");
   const [open, setOpen] = useState(false);
@@ -116,6 +165,9 @@ export function RoutePicker({ value, models, video, name, bad, lefts, onPick, no
   const id = useId();
   const gemini = isAgy(value) || value === "tuzi";
   const gone = withdrawn(value, models);
+  const levels = effort ? levelsOf(value, models) : [];
+  const level = shownLevel(value, models, effort?.value);
+  const think = useRef<HTMLDivElement>(null);
 
   const close = (refocus = true) => {
     setOpen(false);
@@ -161,6 +213,10 @@ export function RoutePicker({ value, models, video, name, bad, lefts, onPick, no
     else if (e.key === "Home") { e.preventDefault(); go(0); }
     else if (e.key === "End") { e.preventDefault(); go(opts.length - 1); }
     else if (e.key === "Escape" && !phone) { e.preventDefault(); close(); }
+    else if (e.key === "Tab" && !phone && !e.shiftKey && think.current) {
+      e.preventDefault();
+      think.current.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
+    }
     else if (e.key === "Tab" && !phone) close(false);
     else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
       const now = Date.now();
@@ -190,15 +246,22 @@ export function RoutePicker({ value, models, video, name, bad, lefts, onPick, no
       ))}
     </div>
   );
+  const backToList = () => (pop.current || root.current)?.querySelector<HTMLElement>('[role="option"][aria-selected="true"], [role="option"]:not([aria-disabled="true"])')?.focus();
+  const footer = levels.length > 0 && effort && (
+    <div ref={think}>
+      <Think levels={levels} value={level} back={backToList} pick={(l) => { if ((l ?? undefined) !== level) effort.onPick(l); }} />
+    </div>
+  );
 
   return (
     <div ref={root} className={`eg-route p-${familyOf(value, models)}${bad || gone ? " bad" : ""}${open ? " open" : ""}${value === NO_ROUTE ? " none" : ""}`}>
       <button ref={trigger} type="button" className="eg-route-b" aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? id : undefined}
-        aria-label={`${name}：${modelName(value, models)}`} onClick={() => (open ? close() : setOpen(true))}
+        aria-label={`${name}：${modelName(value, models)}${level ? `，思考${LEVEL_NAME[level] || level}` : ""}`} onClick={() => (open ? close() : setOpen(true))}
         onKeyDown={(e) => { if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); setOpen(true); } }}>
         <span className="eg-route-k">{name}{note && <small>{note}</small>}</span>
         <span className="eg-route-v">
           <span className="t">{modelName(value, models)}</span>
+          {level && <span className="lv">{LEVEL_NAME[level] || level}</span>}
           {gone ? <em>已取消</em> : video && !gemini ? <em>抽帧</em> : null}
           <span className="chev" aria-hidden />
         </span>
@@ -206,14 +269,31 @@ export function RoutePicker({ value, models, video, name, bad, lefts, onPick, no
       {open && !phone && (
         <div ref={pop} className={`eg-pick${place?.up ? " up" : ""}${place?.end ? " end" : ""}${place ? " placed" : ""}`} style={place ? { maxHeight: place.h } : undefined}>
           {list}
+          {footer}
         </div>
       )}
-      {open && phone && <Sheet ref={sheet} title={name} onClose={() => close(false)}><div className="eg-pick-sheet">{list}</div></Sheet>}
+      {open && phone && <Sheet ref={sheet} title={name} onClose={() => close(false)}><div className="eg-pick-sheet">{list}{footer}</div></Sheet>}
     </div>
   );
 }
 
 /** 分工: which model each stage uses (stage_providers over llm_provider), from what magpie lists */
+/** A cell's level of thinking: shown at once, sent after what was sent before it; one refused goes back */
+function useEfforts(stored: Record<string, string>, save: Save) {
+  const [picks, setPicks] = useState<Record<string, string | null>>({});
+  useEffect(() => setPicks({}), [stored]);
+  const sending = useRef<Promise<unknown>>(Promise.resolve());
+  return (k: string): Effort => ({
+    value: k in picks ? picks[k] : stored[k] ?? null,
+    onPick: (l) => {
+      setPicks((was) => ({ ...was, [k]: l }));
+      sending.current = sending.current.then(async () => {
+        if (!await save({ effort: { [k]: l } })) setPicks({});
+      });
+    },
+  });
+}
+
 export function RouteCells({ kn, steps, label, save, models, routes, missing, lefts }: {
   kn: any; steps: string[]; label: Record<string, string>; save: Save; models: any[];
   routes: { default: string; stages: Record<string, string> }; missing: string[]; lefts: Record<string, Left | null>;
@@ -224,6 +304,7 @@ export function RouteCells({ kn, steps, label, save, models, routes, missing, le
   const sending = useRef<Promise<unknown>>(Promise.resolve());
   const main = picks.default || routes.default;
   const route = (k: string) => picks[k] || routes.stages[k] || main;
+  const effort = useEfforts(kn.efforts || {}, save);
   const pick = (k: string, r: string) => {
     // 其余 going to a model that cannot watch: the stages that watch and had no route of their own stay where they were going
     const stay = k === "default" && models.find((m) => m.id === r)?.watches === false
@@ -237,9 +318,10 @@ export function RouteCells({ kn, steps, label, save, models, routes, missing, le
     <div className="eg-routes">
       {steps.map((k) => (
         <RoutePicker key={k} value={route(k)} models={models} video={VIDEO_STEPS.has(k)} name={label[k]}
-          bad={missing.includes(route(k))} lefts={lefts} onPick={(r) => pick(k, r)} />
+          bad={missing.includes(route(k))} lefts={lefts} onPick={(r) => pick(k, r)} effort={effort(k)} />
       ))}
-      <RoutePicker value={main} models={models} video={false} name="其余" bad={missing.includes(main)} lefts={lefts} onPick={(r) => pick("default", r)} />
+      <RoutePicker value={main} models={models} video={false} name="其余" bad={missing.includes(main)} lefts={lefts} onPick={(r) => pick("default", r)}
+        effort={effort("default")} />
     </div>
   );
 }
@@ -251,9 +333,10 @@ export const TOPIC_STEPS = ["draft", "look", "second", "topic"] as const;
 export const TOPIC_STEP: Record<string, string> = { draft: "底稿", look: "回看", second: "复核", topic: "写作" };
 const TOPIC_VIDEO = new Set(["draft", "look"]);
 
-export function TopicRouteCells({ routes, save, models, missing, lefts }: {
-  routes: Record<string, string>; save: Save; models: any[]; missing: string[]; lefts: Record<string, Left | null>;
+export function TopicRouteCells({ routes, efforts, save, models, missing, lefts }: {
+  routes: Record<string, string>; efforts: Record<string, string>; save: Save; models: any[]; missing: string[]; lefts: Record<string, Left | null>;
 }) {
+  const effort = useEfforts(efforts, save);
   const [picks, setPicks] = useState<Record<string, string>>({});
   useEffect(() => setPicks({}), [routes]);
   const sending = useRef<Promise<unknown>>(Promise.resolve());
@@ -270,7 +353,7 @@ export function TopicRouteCells({ routes, save, models, missing, lefts }: {
         const value = picks[k] || routes[k] || "agy";
         return (
           <RoutePicker key={k} value={value} models={k === "second" ? seeing : models} video={TOPIC_VIDEO.has(k)} name={TOPIC_STEP[k]}
-            bad={missing.includes(value)} lefts={lefts} onPick={(r) => pick(k, r)} />
+            bad={missing.includes(value)} lefts={lefts} onPick={(r) => pick(k, r)} effort={effort(k)} />
         );
       })}
     </div>
@@ -283,18 +366,20 @@ export function lostRoutes(steps: string[], routes: { default: string; stages: R
 }
 
 /** 分工 as the 机房 shows it: who is doing each stage, and how each is doing. The choosing is on the 设置 page. */
-export function RouteLinks({ steps, label, models, routes, missing, live }: {
+export function RouteLinks({ steps, label, models, routes, missing, live, efforts = {} }: {
   steps: string[]; label: Record<string, string>; models: any[];
-  routes: { default: string; stages: Record<string, string> }; missing: string[]; live: string[];
+  routes: { default: string; stages: Record<string, string> }; missing: string[]; live: string[]; efforts?: Record<string, string>;
 }) {
   const cell = (k: string, name: string, value: string, video: boolean) => {
     const gone = withdrawn(value, models);
+    const level = shownLevel(value, models, efforts[k]);
     return (
       <div key={k} className={`eg-route p-${familyOf(value, models)}${missing.includes(value) || gone ? " bad" : ""}${live.includes(k) ? " live" : ""}`}>
-        <a className="eg-route-b" {...linkProps("/settings#models")} aria-label={`${name}：${modelName(value, models)}`}>
+        <a className="eg-route-b" {...linkProps("/settings#models")} aria-label={`${name}：${modelName(value, models)}${level ? `，思考${LEVEL_NAME[level] || level}` : ""}`}>
           <span className="eg-route-k">{name}</span>
           <span className="eg-route-v">
             <span className="t">{modelName(value, models)}</span>
+            {level && <span className="lv">{LEVEL_NAME[level] || level}</span>}
             {gone ? <em>已取消</em> : video && !isAgy(value) && value !== "tuzi" ? <em>抽帧</em> : null}
           </span>
         </a>

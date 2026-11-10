@@ -359,7 +359,7 @@ export default function Settings() {
           <Sec id="backfill" title="补录"><BackfillPanel kn={kn} view={data.backfill} save={save} /></Sec>
           <Sec id="topics" title="专题">
             <div className="st-routes">
-              <TopicRouteCells routes={data.providers?.topic || {}} save={save} models={models} missing={missing} lefts={lefts} />
+              <TopicRouteCells routes={data.providers?.topic || {}} efforts={kn.efforts || {}} save={save} models={models} missing={missing} lefts={lefts} />
             </div>
             <TopicRows kn={kn} save={save} />
           </Sec>

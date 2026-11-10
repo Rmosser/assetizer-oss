@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import config, db
-from .providers import resolve
+from .providers import LEVELS, resolve
 
 PROVIDERS = ("agy", "magpie", "tuzi")  # tuzi stays accepted for boxes still on it; the page offers agy's and magpie's models
 MODEL_ID = re.compile(r"[\w.\-]+/[\w.\-@:+ /]{1,120}")  # a model of the gateway: codex/gpt-6.1-terra, grok/grok-4.7@500k, group/<id>
@@ -38,12 +38,15 @@ RETRY_NAMES = {"CONTENT_SAFETY": "被内容安全过滤拦下", "CONTRACT": "输
 RETRY_MAX = 5
 RETRY_ALIAS = {"MEDIA_READ_COUNT": "MODALITY_ROUTING_DEVIATION"}  # read the file a different number of times: the same deviation
 NO_FALLBACK = "off"
+# A cell of 分工 with no level of thinking set (providers.LEVELS) leaves it to the code: each call says its own (compile high,
+# merge medium…), else the model's default.
+EFFORT_KEYS = (*STAGES, *TOPIC_STAGES, "default")  # "default": 其余, the calls of no stage on the page (compile, audit…)
 
 
 @dataclass(frozen=True)
 class Knob:
     label: str
-    kind: str  # "int" "float" "provider" "stages" "topic_stages" "url" "hours" "burst" "retries" "fallback"
+    kind: str  # "int" "float" "provider" "stages" "topic_stages" "efforts" "url" "hours" "burst" "retries" "fallback"
     lo: float = 0
     hi: float = 0
     default: Any = None
@@ -55,6 +58,7 @@ KNOBS: dict[str, Knob] = {
     "download_slots": Knob("同时下载", "int", 1, 4, 2),
     "llm_provider": Knob("默认模型", "provider", default="agy"),
     "stage_providers": Knob("工序分工", "stages", default={}),
+    "efforts": Knob("思考强度", "efforts", default={}),  # {stage | topic step | "default": level}; unset: as the code says
     "retry_counts": Knob("自动重试", "retries", 0, RETRY_MAX, RETRY_DEFAULTS),  # stored: only what differs from the defaults
     "safety_fallback": Knob("还被拦就换", "fallback", default=None),  # None: where 知识 goes; "off": stay; else a route
     "asr_url": Knob("GPU 转写地址", "url", default=None),
@@ -162,6 +166,8 @@ def get(key: str) -> Any:
             return {s: p for s, p in v.items() if s in STAGES and route_ok(p)} if isinstance(v, dict) else {}
         if k.kind == "topic_stages":
             return {s: p for s, p in v.items() if s in TOPIC_STAGES and route_ok(p)} if isinstance(v, dict) else {}
+        if k.kind == "efforts":
+            return {s: x for s, x in v.items() if s in EFFORT_KEYS and x in LEVELS} if isinstance(v, dict) else {}
         if k.kind == "hours":
             return sorted({h for h in v if isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23}) if isinstance(v, list) else []
         if k.kind == "burst":
@@ -187,6 +193,14 @@ def retry_kind(kind: str) -> str:
 def retries(kind: str) -> int:
     """How often a call that failed this way is tried again. Read at each failure, so a change applies to the next one."""
     return get("retry_counts").get(retry_kind(kind), 0)
+
+
+def effort(stage: str) -> str | None:
+    """The level set on the page for a call's stage (providers.stage_key), or None: the call's own. The calls of no stage
+    on the page go by 其余's."""
+    from .providers import stage_key
+    key = stage_key(stage)
+    return get("efforts").get(key if key in EFFORT_KEYS else "default")
 
 
 def fallback_route() -> str | None:
@@ -255,6 +269,10 @@ def _check(key: str, v: Any) -> Any:
         if "second" in v and not takes_images(v["second"]):
             raise KnobError(key, "复核要看图，这个模型看不了")
         return v
+    if k.kind == "efforts":
+        if not isinstance(v, dict) or not all(s in EFFORT_KEYS and x in LEVELS for s, x in v.items()):
+            raise KnobError(key, f"{k.label}的工序或档位不认识")
+        return v or None
     if k.kind == "hours":
         if not isinstance(v, list) or not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in v):
             raise KnobError(key, f"{k.label}要是 0 到 23 点")
@@ -295,6 +313,12 @@ def save(body: Any) -> dict:
         both = {**get("topic_providers"), **pick}
         body = {**{k: v for k, v in body.items() if k != "topic_route"},
                 "topic_providers": {s: p for s, p in both.items() if p is not None}}
+    if "effort" in body:  # likewise one cell's level; null puts it back to what the code says
+        pick = body["effort"]
+        if not isinstance(pick, dict):
+            raise KnobError("effort", f"{KNOBS['efforts'].label}的工序或档位不认识")
+        both = {**get("efforts"), **pick}
+        body = {**{k: v for k, v in body.items() if k != "effort"}, "efforts": {s: x for s, x in both.items() if x is not None}}
     if "retry_count" in body:  # likewise one kind of error's count; null puts it back to the default
         pick = body["retry_count"]
         if not isinstance(pick, dict):
@@ -330,6 +354,9 @@ def save(body: Any) -> dict:
         elif now != before and KNOBS[key].kind == "topic_stages":
             changed += [f"专题{TOPIC_NAMES[s]} {resolve(before.get(s) or topic_default(s))} → {resolve(now.get(s) or topic_default(s))}"
                         for s in TOPIC_STAGES if before.get(s) != now.get(s)]
+        elif now != before and KNOBS[key].kind == "efforts":
+            name = {**STAGE_NAMES, **{s: f"专题{n}" for s, n in TOPIC_NAMES.items()}, "default": "其余"}
+            changed += [f"{name[s]}思考 {before.get(s, '自动')} → {now.get(s, '自动')}" for s in EFFORT_KEYS if before.get(s) != now.get(s)]
         elif now != before and KNOBS[key].kind == "retries":
             changed += [f"{KNOBS[key].label}：{RETRY_NAMES[e]} {before[e]} → {now[e]} 次" for e in RETRY_DEFAULTS if before[e] != now[e]]
         elif now != before:

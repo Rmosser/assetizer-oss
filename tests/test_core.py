@@ -2978,6 +2978,42 @@ def test_stage_providers_send_text_stages_to_another_provider(home, monkeypatch)
     assert providers.stage_key("selection:repair") == "selection"
 
 
+def test_a_level_of_thinking_set_for_a_cell_stands_over_the_calls_own(cc_api, home, monkeypatch):
+    from assetizer import db, knobs
+    from assetizer.llm import LLM
+    from assetizer.providers.agy import AgyProvider, CallResult, model_for
+    from assetizer.providers.magpie import MagpieProvider
+    asked = []
+
+    def call(self, d, prompt, **kw):
+        asked.append((kw["kind"], kw["effort"]))
+        return CallResult('{"ok": true}', {"status": "SUCCESS"}, False)
+    monkeypatch.setattr(AgyProvider, "call", call)
+    monkeypatch.setattr(MagpieProvider, "call", call)
+    r = cc_api.post("/api/knobs", json={"effort": {"knowledge": "xhigh", "default": "low", "draft": "high"}})
+    assert r.status_code == 200, r.text
+    assert cc_api.post("/api/knobs", json={"effort": {"merge": "max"}}).json()["efforts"] == {
+        "knowledge": "xhigh", "default": "low", "draft": "high", "merge": "max"}  # one cell's pick goes on what is stored
+    assert cc_api.post("/api/knobs", json={"effort": {"merge": None}}).json()["efforts"] == {"knowledge": "xhigh", "default": "low", "draft": "high"}
+    assert cc_api.post("/api/knobs", json={"effort": {"merge": "hard"}}).status_code == 400
+    assert cc_api.post("/api/knobs", json={"effort": {"nope": "low"}}).status_code == 400
+    assert "知识思考 自动 → xhigh" in " ".join(e["message"] for e in db.q("SELECT message FROM events WHERE kind='config'"))
+    assert cc_api.get("/api/settings").json()["knobs"]["efforts"]["knowledge"] == "xhigh"
+    db.set_setting("stage_providers", {"knowledge": "magpie"})
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    llm = LLM()
+    for stage, effort in (("knowledge-detail-03", None), ("selection", "medium"), ("compile", "high"), ("draft-01", "low")):
+        llm.structured(home / "calls", stage, "p", schema, effort=effort)
+    # selection keeps its own; compile is of no stage on the page: 其余's; a topic step its own cell's
+    assert asked == [("knowledge-detail-03", "xhigh"), ("selection", "medium"), ("compile", "low"), ("draft-01", "high")]
+    asked.clear()
+    LLM(provider=AgyProvider()).structured(home / "bench", "knowledge", "p", schema, effort="medium")
+    assert asked == [("knowledge", "medium")]  # a fixed provider (bench, tests) is not the page's
+    assert knobs.effort("understand-CH01") is None
+    assert model_for("gemini-3.8-flash-high", "max") == "gemini-3.8-flash-high"  # agy's Gemini tops out at high
+    assert model_for("gemini-3.8-flash-high", "minimal") == "gemini-3.8-flash-low"
+
+
 # ---------------------------------------------------------------- 原片栏的低清版 (playback.py)
 def _playback_fixture(home, monkeypatch, sizes=None):
     """Channel w in tuning with samples a, b; channel tom locked with sample c; d is no sample. All originals cached.
@@ -6549,7 +6585,8 @@ gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
 def test_agy_models_are_listed_once_each_at_the_level_of_the_box_model():
     from assetizer.providers.agy import parse_models
     out = parse_models("Fetching available models...\n" + AGY_MODELS, "gemini-3.8-flash-high")
-    assert out == [{"id": "gemini-4-argon-high", "name": "Gemini 4 Argon"}, {"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash"}]
+    assert out == [{"id": "gemini-4-argon-high", "name": "Gemini 4 Argon", "levels": ["low", "medium", "high"]},
+                   {"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash", "levels": ["medium", "high"]}]
     assert parse_models(AGY_MODELS, "gemini-3.8-flash-medium")[1]["id"] == "gemini-3.8-flash-medium"
     assert parse_models("Error: Please sign in to view available models.\n", "gemini-3.8-flash-high") == []
 

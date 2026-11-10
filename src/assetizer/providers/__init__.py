@@ -11,6 +11,17 @@ from __future__ import annotations
 
 
 AGY_PREFIX = "agy/"
+# How hard a model thinks, lowest first: magpie's models list theirs (`reasoning_levels`), Gemini through agy or 兔子 takes
+# low, medium and high. A level a model does not take goes to the nearest it does (`nearest`).
+LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+GEMINI_LEVELS = ("low", "medium", "high")
+
+
+def nearest(level: str, have) -> str:
+    """The level of `have` closest to the one asked (ties go lower); one not in LEVELS is taken as high."""
+    at = LEVELS.index(level) if level in LEVELS else LEVELS.index("high")
+    known = sorted((abs(LEVELS.index(x) - at), LEVELS.index(x), x) for x in have if x in LEVELS)
+    return known[0][2] if known else list(have)[0]
 
 
 def is_model(choice: str | None) -> bool:

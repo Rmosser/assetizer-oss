@@ -29,6 +29,7 @@ from pathlib import Path
 from .. import config, db
 from ..util import fmt_tc, now, read_json, write_json, write_text
 from .agy import SAFETY_RE, CallResult, ProviderError, _canary_clip, _seconds, gemini_schema
+from . import LEVELS, nearest
 from .tuzi import IDLE_TIMEOUT, _effort, _http_kind  # noqa: F401
 
 DEFAULT_URL = "https://magpie.prodbox.heiyu.space"
@@ -39,7 +40,6 @@ SCENE = 0.06                  # ffmpeg scene score that counts as a change (char
 MAX_FRAMES = 300              # ~1,100 tokens each at 1280 wide: stays well inside a 500K context
 FRAME_TOKENS, FRAME_SHARE = 1100, 0.6  # a smaller context gets fewer frames, at most this share of it
 FRAME_BYTES = 36 * 1024 * 1024  # of frames in one call, about 48 MB once in base64: Codex takes 52 MB and refuses 71 (tried 2026-11-05)
-LEVELS = ("low", "medium", "high", "xhigh", "max")
 FRAME_WIDTH = 1280
 IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 MEDIA_NOTE = ("\n\n【视频的给法】上文要求读取的视频没有直接给你，而是换成了下面两样：按画面变化截取的帧（每帧前标注它在本视频中的时间），"
@@ -143,11 +143,7 @@ class MagpieProvider:
         have = e["levels"]
         if not have:
             return None
-        if level in have:
-            return level
-        at = LEVELS.index(level) if level in LEVELS else 2
-        known = sorted(((abs(LEVELS.index(x) - at), LEVELS.index(x), x) for x in have if x in LEVELS))
-        return known[0][2] if known else have[0]
+        return level if level in have else nearest(level, have)
 
     def version(self) -> str:
         return f"magpie:{self.model}"
@@ -195,7 +191,7 @@ class MagpieProvider:
             r = read_json(receipt_path)
             if r.get("status") == "SUCCESS" and (call_dir / "response.txt").exists():
                 return CallResult((call_dir / "response.txt").read_text(), r, reused=True)
-        level = _effort(self.s, effort)
+        level = effort if effort in LEVELS else _effort(self.s, None)  # the gateway's models go past high
         text_prompt = prompt + (MEDIA_NOTE if any(Path(m).suffix.lower() not in IMAGE_TYPES for m in media or []) else "")
         write_text(call_dir / "prompt.md", text_prompt)
         receipt: dict = {

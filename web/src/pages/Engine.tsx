@@ -558,7 +558,7 @@ export default function Engine() {
           <Press runs={data.runs} labels={data.stage_labels || {}} family={family} />
           <div className="eg-split">
             <h2 className="eg-l">分工</h2>
-            <RouteLinks steps={MAIN_STEPS} label={STEP} models={models} routes={{ default: main, stages }} missing={m.missing || []} live={liveKeys} />
+            <RouteLinks steps={MAIN_STEPS} label={STEP} models={models} routes={{ default: main, stages }} missing={m.missing || []} live={liveKeys} efforts={data.knobs?.efforts} />
           </div>
         </section>
         <System data={data} />

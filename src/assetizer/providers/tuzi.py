@@ -43,8 +43,9 @@ MEDIA_NOTE = ("\n\n【附件说明】上文要求读取的视频已作为附件�
 
 def _effort(s: config.Settings, effort: str | None) -> str:
     """agy encodes the default effort in the model id (gemini-3.8-flash-high); keep that default here."""
-    if effort in ("low", "medium", "high"):
-        return effort
+    from . import GEMINI_LEVELS, LEVELS, nearest
+    if effort in LEVELS:
+        return nearest(effort, GEMINI_LEVELS)
     m = re.search(r"-(low|medium|high)$", s.agy_model)
     return m[1] if m else "high"
 

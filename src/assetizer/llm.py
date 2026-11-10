@@ -145,7 +145,9 @@ class LLM:
 
     def _attempt(self, p, sub: Path, stage: str, prompt: str, **kw):
         """One call, recorded; the answer knows where it is kept (`meta["dir"]`). The filter's words handed back as an
-        answer fail like the filter's error."""
+        answer fail like the filter's error. A level set on the 设置 page for the stage stands over the call's own."""
+        if not self.fixed and "effort" in kw and (set_ := knobs.effort(stage)):
+            kw = {**kw, "effort": set_}
         try:
             r = p.call(sub, prompt, **kw)
             if is_safety_block(r.text):

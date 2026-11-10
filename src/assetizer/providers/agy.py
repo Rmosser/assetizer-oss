@@ -118,11 +118,13 @@ def _benign(name: str | None, params: dict) -> bool:
 
 
 def model_for(base: str, effort: str | None) -> str:
-    """agy encodes effort in the model id (gemini-3.8-flash-{low,medium,high}); --effort conflicts."""
-    if not effort:
+    """agy encodes effort in the model id (gemini-3.8-flash-{low,medium,high}); --effort conflicts. A level beyond those
+    (xhigh, set on the page for a cell that was on another model) goes to the nearest."""
+    from . import GEMINI_LEVELS, LEVELS, nearest
+    if not effort or effort not in LEVELS:
         return base
     m = re.match(r"^(.*)-(low|medium|high)$", base)
-    return f"{m[1]}-{effort}" if m and effort in ("low", "medium", "high") else base
+    return f"{m[1]}-{nearest(effort, GEMINI_LEVELS)}" if m else base
 
 
 def _seconds(spec: str) -> float:
@@ -544,8 +546,8 @@ class AgyProvider:
 
 def parse_models(text: str, prefer: str) -> list[dict]:
     """`agy models` (id, tab, name; one line per level) as one row per model. Each stage says its own level (model_for),
-    so the page offers models, not levels: the id kept has the level of the box's model, which is what a call that says
-    none runs at."""
+    so the page offers models with the levels each takes (`levels`): the id kept has the level of the box's model, which is
+    what a call that says none runs at."""
     level = re.fullmatch(r".*-(low|medium|high)", prefer)
     rows: dict[str, dict] = {}
     for line in text.splitlines():
@@ -553,8 +555,11 @@ def parse_models(text: str, prefer: str) -> list[dict]:
         if len(cells) != 2 or not cells[0].startswith("gemini-"):
             continue
         m = re.fullmatch(r"(.*)-(low|medium|high)", cells[0])
-        if (m[1] if m else cells[0]) not in rows or (m and level and m[2] == level[1]):
-            rows[m[1] if m else cells[0]] = {"id": cells[0], "name": re.sub(r"\s*\((?:low|medium|high)\)\s*$", "", cells[1], flags=re.I)}
+        base = m[1] if m else cells[0]
+        levels = [*rows[base]["levels"], m[2]] if base in rows and m else [m[2]] if m else []
+        if base not in rows or (m and level and m[2] == level[1]):
+            rows[base] = {"id": cells[0], "name": re.sub(r"\s*\((?:low|medium|high)\)\s*$", "", cells[1], flags=re.I)}
+        rows[base]["levels"] = sorted(set(levels), key=("low", "medium", "high").index)
     return list(rows.values())
 
 
@@ -581,7 +586,9 @@ def route_models() -> list[dict]:
     rows = db.setting("agy_models") or [{"id": r[len(AGY_PREFIX):], "name": _name(r[len(AGY_PREFIX):])}
                                         for r in dict.fromkeys([resolve("agy"), *routes()]) if is_agy(r)]
     groups = (db.setting("agy_quota") or {}).get("groups") or []
+    # rows kept before levels were: the three, for an id that carries one
     return [{"id": AGY_PREFIX + m["id"], "name": m["name"], "vendor": "agy", "group": False, "watches": True,
+             "levels": m.get("levels", ["low", "medium", "high"] if re.search(r"-(low|medium|high)$", m["id"]) else []),
              "quota": (quota_group(groups, m["id"]) or {}).get("name")} for m in rows]
 
 
