@@ -6284,7 +6284,7 @@ def test_the_gateway_read_keeps_subscriptions_and_models_and_never_a_turn(gatewa
     st = magpie_state.read()
     assert st["ok"] and st["error"] is None and st["key"] == {"name": "Home LAN", "limited": False, "read_only": False}
     codex, claude, grok = st["subs"]
-    assert codex["windows"][0] == {"window": "weekly", "label": "每周", "remaining": 0.73, "reset_at": "2026-11-11T06:48:02+00:00", "disabled": False}
+    assert codex["windows"][0] == {"window": "weekly", "label": "周额度", "remaining": 0.73, "reset_at": "2026-11-11T06:48:02+00:00", "disabled": False}
     assert codex["read_at"] == "2026-11-05T07:30:06+00:00" and codex["last_served_at"] == "2026-11-05T07:31:10+00:00"
     assert [w["window"] for w in claude["windows"]] == ["5h", "weekly"]  # a window told as words is left out, the shortest comes first
     assert grok["signed_out"] and grok["windows"] == []

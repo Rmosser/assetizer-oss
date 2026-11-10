@@ -75,7 +75,8 @@ function Figure({ issues }: { issues?: number | null }) {
 }
 
 /** A group of agy's quota a stage draws on (agyGroups), or, with `g` left out, Gemini before one is known. Only the
- *  `first` says how agy itself is doing and folds in the groups no stage uses (`others`). */
+ *  `first` says how agy itself is doing and folds in the Gemini groups no stage uses (`others`): agy's Claude and GPT
+ *  models are none of 课代表's, which takes only Gemini from agy. */
 function GeminiTile({ q, g, first, others, log, runway, version, media, authAlert, refresh, busy }: {
   q: any; g?: Group; first: boolean; others: Group[]; log: [string, number | null, number | null][]; runway: any; version?: string; media: any;
   authAlert: boolean; refresh: () => void; busy: boolean;
@@ -95,7 +96,7 @@ function GeminiTile({ q, g, first, others, log, runway, version, media, authAler
       {g ? (
         <div className="eg-meters">
           <Window b={w("5h")} label="5 小时" production old={old} />
-          <Window b={w("weekly")} label="每周" production old={old} />
+          <Window b={w("weekly")} label="周额度" production old={old} />
         </div>
       ) : <p className="eg-tile-none">{signedOut ? "agy 没有登录" : groups.length ? "认不出在用的组" : "还没读到额度"}</p>}
       {first && (signedOut || old || media?.ok === false || (q && !q.ok && !signedOut)) && (
@@ -113,7 +114,7 @@ function GeminiTile({ q, g, first, others, log, runway, version, media, authAler
             <div key={x.name} className="eg-meters">
               <h4>{x.name}</h4>
               {[...x.buckets].sort((a, b) => BY_WINDOW(a) - BY_WINDOW(b)).map((b, i) => (
-                <Window key={i} b={b} label={b.window === "5h" ? "5 小时" : "每周"} production={false} old={old} />
+                <Window key={i} b={b} label={b.window === "5h" ? "5 小时" : "周额度"} production={false} old={old} />
               ))}
             </div>
           ))}
@@ -155,7 +156,7 @@ function SubTile({ s, m, runway, waiting, refresh, busy }: {
         <div className="eg-meters">
           {credits && runway?.issues != null && <p className="eg-row"><span>积分</span><b>{creditText(s.credits)}</b></p>}
           {windows.map((b) => (
-            <Window key={b.window} b={b} label={b.label || (b.window === "5h" ? "5 小时" : b.window === "weekly" ? "每周" : b.window)} production old={old} stale={stale(b)} credits={credits} />
+            <Window key={b.window} b={b} label={b.label || (b.window === "5h" ? "5 小时" : b.window === "weekly" ? "周额度" : b.window)} production old={old} stale={stale(b)} credits={credits} />
           ))}
         </div>
       ) : <p className="eg-tile-none">{troubled ? "读不到额度" : "还没读到额度"}</p>}
@@ -567,7 +568,7 @@ export default function Engine() {
       <section className="eg-quota" aria-label="额度">
         {inUse.includes("agy") && (agyUsed.length ? agyUsed : [undefined]).map((g, i) => (
           <GeminiTile key={g?.name ?? ""} q={q.agy} g={g} first={i === 0}
-            others={i === 0 ? ((q.agy?.groups || []) as Group[]).filter((x) => !agyUsed.includes(x)) : []}
+            others={i === 0 ? ((q.agy?.groups || []) as Group[]).filter((x) => !agyUsed.includes(x) && /gemini/i.test(`${x.name} ${x.models}`)) : []}
             log={(g && q.agy_log?.[g.name]) || []} runway={g && stats.data?.agy_runways?.[g.name]} version={data.agy_media?.version || q.agy?.version}
             media={data.agy_media} authAlert={authAlert} refresh={refresh} busy={reading} />
         ))}
