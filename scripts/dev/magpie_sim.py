@@ -65,7 +65,7 @@ MODELS = [
     _model("grok/grok-4.6@500k", "Grok 4.6 @ 500k", "Grok", 500000, GROK, TI),
 ]
 GROUP = _model("group/text-fast", "文本快线", "分组", 500000, ["low", "medium", "high"], TI, owner="codex")
-SCENARIOS = {"ok": "正常", "down": "连不上 magpie", "held": "Key 受限", "bad_key": "Key 失效", "signed_out": "ChatGPT 账号掉线"}
+SCENARIOS = {"ok": "正常", "down": "连不上 magpie", "held": "Key 受限", "bad_key": "Key 失效", "signed_out": "ChatGPT 账号掉线", "credits": "ChatGPT 有积分"}
 SUBS = {"codex": "ChatGPT", "claude": "Claude Code", "grok": "Grok", "gemini": "Gemini（agy）", "argon": "Gemini 4 Argon（agy）"}
 # what the fake agy offers (`agy models`). Its /usage gives Argon a group of its own, as agy 1.2.16 did (tests USAGE_JSON),
 # so a stage on another group can be seen; agy 1.5 has no such group and Argon counts with Flash and Pro
@@ -81,6 +81,7 @@ class Sim:
         self.ticked = {m["id"] for m in MODELS}
         self.group = False
         self.drain = 2.0  # points of the week a model call takes
+        self.credits = 72785.81  # the ChatGPT account's, told and spent in the 有积分 scenario: a used-up window goes on on them
         self.blocks = 0  # how many of 文章's next Gemini calls the safety filter stops; -1: all of them
         self.windows = {
             "codex": {"plan": "prolite", "name": "Codex", "w": {"7 days": {"used": 27.0, "resets": utc(days=6)}}},
@@ -119,11 +120,15 @@ class Sim:
 
     def spend(self, sub: str) -> None:
         with self.lock:
+            if sub == "codex" and self.scenario == "credits" and any(w["used"] >= 100 for w in self.windows[sub]["w"].values()):
+                self.credits = max(0.0, round(self.credits - 37.5, 2))
             for name, w in self.windows[sub]["w"].items():
                 w["used"] = min(100.0, w["used"] + self.drain * (3 if name == "5 hours" else 1))
             self.history[sub].append({"at": iso(utc()), "left": round(100 - self.windows[sub]["w"]["7 days"]["used"], 1)})
 
     def out(self, sub: str) -> bool:
+        if sub == "codex" and self.scenario == "credits" and self.credits > 0:
+            return False
         return any(w["used"] >= 100 for w in self.windows[sub]["w"].values())
 
     def catalog(self) -> list[dict]:
@@ -137,6 +142,8 @@ class Sim:
                              for n, w in s["w"].items()]}
             if s["plan"]:
                 q["plan"] = s["plan"]
+            if p == "codex" and self.scenario == "credits":
+                q["balance"] = f"{self.credits:g} credits"
             if p == "codex" and self.scenario == "signed_out":
                 q["error"] = "Codex is signed out; sign in again"
             out.append(q)

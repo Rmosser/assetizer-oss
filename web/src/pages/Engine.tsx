@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { post } from "../api";
-import { agyGroups, ALERT_FIX, boxLines, type Bucket, type Group, groupName, MAGPIE_DOWN, MAIN_STEPS, resets, STEP, subFamily, subName } from "../box";
+import { agyGroups, ALERT_FIX, boxLines, type Bucket, creditText, type Group, groupName, MAGPIE_DOWN, MAIN_STEPS, onCredits, resets, STEP, subFamily, subName } from "../box";
 import { deJargon, issueHeadline } from "../cjk";
 import { agyAlert, openAgyLogin } from "../components/AgyLogin";
 import { about, big, Columns, HBars, hrs, Kpi, Meter, pct, Spark } from "../components/Figures";
@@ -137,25 +137,28 @@ function SubTile({ s, m, runway, waiting, refresh, busy }: {
   const signedOut = !!s.signed_out, troubled = !!s.error;
   const down = err === "UNREACHABLE" || err === "BAD_KEY";
   const old = down || troubled;  // what is shown is the last that could be read
-  const out = !old && windows.some((b) => b.remaining === 0);
+  const credits = !old && !fallback && onCredits(s);  // used up, going on on the account's credits
+  const out = !old && !credits && windows.some((b) => b.remaining === 0);
   const bad = signedOut || out || err === "BAD_KEY" || err === "UNREACHABLE";
   const edit = `${m.url}/?view=providers&edit=${encodeURIComponent(s.provider)}`;
   const pts = (s.trend || []).map((x: [string, number]) => [new Date(x[0]).getTime(), x[1]] as [number, number]);
   const read = fallback?.at ? `截至 ${ago(fallback.at)}的调用` : st.read_at ? `${ago(s.read_at || st.read_at)}${old ? "的读数" : "读取"}` : null;
   const said = troubled ? <span className="zhu" title={s.error}>{signedOut ? "账号要重新登录" : "读不到额度"}</span>
     : err ? <span className={down ? "zhu" : undefined} title={st.detail || undefined}>{MAGPIE_DOWN[err] || err}</span>
-    : out && waiting.length ? <span>{waiting.join("、")}在等额度</span> : null;
+    : out && waiting.length ? <span>{waiting.join("、")}在等额度</span>
+    : credits && waiting.length ? <span>{waiting.join("、")}在用积分</span> : null;
   return (
     <article className={`eg-tile p-${subFamily(s)}${bad ? " bad" : ""}${old ? " old" : ""}`} aria-label={`${subName(s)} 额度`}>
       <TileHead name={subName(s)} href={edit} title={[s.plan, s.user].filter(Boolean).join(" · ") || undefined} refresh={refresh} busy={busy} note={read || undefined} />
-      {!old && <Figure issues={out ? 0 : runway?.issues} />}
+      {credits ? <p className="eg-tile-fig">积分 <b>{creditText(s.credits)}</b></p> : !old && <Figure issues={out ? 0 : runway?.issues} />}
       {windows.length > 0 ? (
         <div className="eg-meters">
           {windows.map((b) => (
-            <Window key={b.window} b={b} label={b.label || (b.window === "5h" ? "5 小时" : b.window === "weekly" ? "每周" : b.window)} production old={old} stale={stale(b)} />
+            <Window key={b.window} b={b} label={b.label || (b.window === "5h" ? "5 小时" : b.window === "weekly" ? "每周" : b.window)} production={!credits} old={old} stale={stale(b)} />
           ))}
         </div>
       ) : <p className="eg-tile-none">{troubled ? "读不到额度" : "还没读到额度"}</p>}
+      {!credits && !old && s.credits > 0 && <p className="eg-tile-cred">积分 <b>{creditText(s.credits)}</b></p>}
       {said && (
         <footer className="eg-tile-note">
           {said}
@@ -181,7 +184,7 @@ function OtherSubs({ subs, old }: { subs: any[]; old: boolean }) {
           {s.error ? <p className="zhu" title={s.error}>{s.signed_out ? "账号要重新登录" : "读不到额度"}</p> : (
             <div className="eg-meters">
               {s.windows.map((b: any) => (
-                <Meter key={b.window} label={b.label} left={b.remaining} tone={old ? "old" : b.remaining === 0 ? "out" : "ok"}
+                <Meter key={b.window} label={b.label} left={b.remaining} tone={old ? "old" : b.remaining === 0 ? (onCredits(s) ? "low" : "out") : "ok"}
                   sub={!old ? resets(b.reset_at, b.window === "weekly", b.remaining === 0) : undefined} />
               ))}
             </div>
@@ -471,14 +474,14 @@ export default function Engine() {
   const agyUsed = inUse.includes("agy") ? agyGroups(q.agy) : [];  // a tile each: one group's quota is not another's
   const agyWindows = agyUsed.flatMap((g) => g.buckets);
   // when a used-up quota comes back: the latest reset among the windows at zero, of the subscriptions in use
-  const zero: Bucket[] = [...agyWindows, ...(down ? [] : cards.flatMap((s) => s.windows))].filter((b) => !b.disabled && b.remaining === 0 && b.reset_at);
+  const zero: Bucket[] = [...agyWindows, ...(down ? [] : cards.filter((s) => !onCredits(s)).flatMap((s) => s.windows))].filter((b) => !b.disabled && b.remaining === 0 && b.reset_at);
   const back = zero.map((b) => b.reset_at!).sort().pop();
   // how long the press can go: the tightest subscription in use, and whose it is
   const isOut = (ws: any[]) => ws.some((b) => !b.disabled && b.remaining === 0);
   const runwayKey = (s: any) => `${s.provider}|${(s.user || "").toLowerCase()}`;
   const reach = [
     ...(q.agy?.ok ? agyUsed.map((g) => ({ name: groupName(g), fam: "gemini", out: isOut(g.buckets), issues: stats.data?.agy_runways?.[g.name]?.issues as number | undefined })) : []),
-    ...(down ? [] : cards.filter((s) => !s.error).map((s) => ({ name: subName(s), fam: subFamily(s), out: isOut(s.windows), issues: stats.data?.runways?.[runwayKey(s)]?.issues as number | undefined }))),
+    ...(down ? [] : cards.filter((s) => !s.error && !onCredits(s)).map((s) => ({ name: subName(s), fam: subFamily(s), out: isOut(s.windows), issues: stats.data?.runways?.[runwayKey(s)]?.issues as number | undefined }))),
   ].map((x) => (x.out ? { ...x, issues: 0 } : x)).filter((x) => x.issues != null).sort((a, b) => Number(b.out) - Number(a.out) || a.issues! - b.issues!);
   const tight = reach[0];
   const dry = !!tight?.out;  // used up, not merely too little left for a whole issue

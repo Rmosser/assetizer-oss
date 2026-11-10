@@ -14,6 +14,9 @@ export const MAIN_STEPS = ["understanding", "merge", "knowledge", "article", "se
 
 export const MAGPIE_DOWN: Record<string, string> = { UNREACHABLE: "连不上 magpie", BAD_KEY: "Key 失效", HELD: "这个 Key 读不到额度", NO_KEY: "没有放 Key", REFUSED: "magpie 拒收" };
 export const subName = (s: any) => VENDOR_NAME[s.provider] || s.name || s.provider;
+/** a ChatGPT account whose window is used up goes on, the vendor spending its credits (magpie_state._credits) */
+export const onCredits = (s: any) => s.credits > 0 && ((s.windows || []) as Bucket[]).some((b) => !b.disabled && b.remaining === 0);
+export const creditText = (n: number) => (n >= 100 ? Math.round(n) : n).toLocaleString("en-US");
 export const subFamily = (s: any) => ({ codex: "chatgpt", claude: "claude", grok: "grok" } as Record<string, string>)[s.provider] || "other";
 
 const WEEKDAY = "日一二三四五六";
@@ -54,7 +57,7 @@ export function quotaLefts(data: any): Record<string, Left | null> {
     lefts[m.id] = q?.error === "AGY_AUTH_REQUIRED" ? { note: "没有登录", bad: true } : q?.ok && g ? leftOf(g.buckets) : null;
   }
   for (const s of st.subs || []) {
-    const l: Left | null = s.signed_out ? { note: "要重新登录", bad: true } : s.error ? { note: "读不到额度" } : down ? null : leftOf(s.windows);
+    const l: Left | null = s.signed_out ? { note: "要重新登录", bad: true } : s.error ? { note: "读不到额度" } : down ? null : onCredits(s) ? { note: "用积分" } : leftOf(s.windows);
     const was = lefts[s.provider];
     if (!was || was.left == null || (l?.left ?? 0) > was.left) lefts[s.provider] = l;  // several accounts: the gateway can use the one with the most
   }

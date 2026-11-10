@@ -6290,6 +6290,11 @@ def test_the_gateway_read_keeps_subscriptions_and_models_and_never_a_turn(gatewa
     assert grok["signed_out"] and grok["windows"] == []
     held_back = magpie_state.sub_view({"provider": "codex", "error": "not read yet: magpie reads allowances only when you ask (Settings → Usage)"})
     assert held_back["error"] is None and not held_back["signed_out"]
+    # a ChatGPT account's credits carry it on past a used-up window; another vendor's balance is not those
+    assert codex["credits"] == 1 and claude["credits"] is None
+    assert magpie_state.sub_view({"provider": "codex", "balance": "72785.81 credits"})["credits"] == 72785.81
+    assert magpie_state.sub_view({"provider": "codex", "balance": "0 credits"})["credits"] is None
+    assert magpie_state.sub_view({"provider": "kimi", "balance": "5 credits"})["credits"] is None
     assert [m["id"] for m in st["models"]] == [m["id"] for m in MODELS["data"]] and st["models"][0]["context"] == 500000
     assert st["models"][3]["group"] and st["models"][2]["inputs"] == ["text"]
     assert all(s.startswith("GET ") for s in gateway["seen"]) and any("kept=1" in s for s in gateway["seen"])

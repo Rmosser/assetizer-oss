@@ -36,6 +36,7 @@ WINDOWS = {"5 hours": ("5h", "5 小时"), "7 days": ("weekly", "每周")}
 SIGNED_OUT = re.compile(r"sign(ed)?[ -]?(in|out)|log[ -]?in|auth|expired|credential", re.I)
 NOT_READ = "not read yet"  # magpie holds its reads until asked: no reading yet, nothing the matter
 LEVELLED = re.compile(r"(.+)-(minimal|low|medium|high)")  # agy's model ids say the level; magpie prices the model, not the level
+CREDITS = re.compile(r"([\d,]+(?:\.\d+)?)\s*credits?", re.I)  # a ChatGPT account's balance as magpie tells it: "72785.81 credits"
 
 
 class Refused(Exception):
@@ -96,6 +97,14 @@ def _window(w: dict) -> dict | None:
             "disabled": False}
 
 
+def _credits(q: dict) -> float | None:
+    """The credits a ChatGPT account holds: with any left, a used-up window does not stop it — the vendor spends them
+    instead (magpie's default; it does not tell an account set not to). None: none, or not a ChatGPT account."""
+    m = q.get("provider") == "codex" and CREDITS.fullmatch((q.get("balance") or "").strip())
+    n = float(m[1].replace(",", "")) if m else 0
+    return n if n > 0 else None
+
+
 def sub_view(q: dict) -> dict:
     windows = [v for w in q.get("windows") or [] if (v := _window(w))]
     windows.sort(key=lambda b: {"5h": 0, "weekly": 1}.get(b["window"], 2))
@@ -103,7 +112,7 @@ def sub_view(q: dict) -> dict:
     if error and error.startswith(NOT_READ):
         error = None
     return {"provider": q.get("provider"), "name": q.get("name") or q.get("provider"), "plan": q.get("plan"), "user": q.get("user"),
-            "kind": q.get("kind"), "windows": windows, "balance": q.get("balance"), "error": error,
+            "kind": q.get("kind"), "windows": windows, "balance": q.get("balance"), "credits": _credits(q), "error": error,
             "signed_out": bool(error and SIGNED_OUT.search(error)),
             "read_at": _when(q.get("readAt") or q.get("asOf")), "last_served_at": _when(q.get("lastServedAt"))}
 
