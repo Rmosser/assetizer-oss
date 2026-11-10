@@ -435,6 +435,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("""UPDATE trial_queue SET status='CANCELLED' WHERE status='PENDING' AND id NOT IN
                         (SELECT MIN(id) FROM trial_queue WHERE status='PENDING' GROUP BY source_id, playbook_id)""")
         conn.execute("CREATE UNIQUE INDEX trial_queue_pending ON trial_queue(source_id, playbook_id) WHERE status='PENDING'")
+    if not conn.execute("SELECT 1 FROM settings WHERE key='migrated:not_available'").fetchone():
+        # "This video is not available." (a members tier above the account's) read as 未分类 until 2026-11-10: 会员权限不够
+        conn.execute("""UPDATE runs SET error_class='VIDEO_MEMBERS' WHERE production='FAILED' AND error_class='UNKNOWN'
+                        AND lower(error) LIKE '%this video is not available%'""")
+        conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('migrated:not_available', 'true')")
 
 
 @contextmanager

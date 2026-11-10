@@ -96,7 +96,7 @@ export const WAIT: Record<string, string> = {
 export const ERRORS: Record<string, string> = {
   PROVIDER_TIMEOUT: "模型超时", PROVIDER_FAILURE: "模型出错", PROVIDER_TRANSIENT: "模型暂时不可用", PROVIDER_OUTPUT_LIMIT: "输出超长",
   CONTENT_SAFETY: "被内容安全过滤拦下", MODALITY_ROUTING_DEVIATION: "模型越界读文件", MEDIA_READ_COUNT: "模型越界读文件", MEDIA_READ_FAILED: "读不了视频", CONTRACT: "输出不合规", DOWNLOAD: "下载失败",
-  TOO_MANY_RESTARTS: "反复重启", VIDEO_REMOVED: "视频已删除", VIDEO_PRIVATE: "视频设为私享", VIDEO_MEMBERS: "会员限定视频",
+  TOO_MANY_RESTARTS: "反复重启", VIDEO_REMOVED: "视频已删除", VIDEO_PRIVATE: "视频设为私享", VIDEO_MEMBERS: "会员权限不够",
   SOURCE_UNAVAILABLE: "视频看不了", STOPPED: "清空时停下", NETWORK: "网络中断", UNKNOWN: "未分类", "?": "未分类",
   SCHEMA_VIOLATION: "输出不合规", FORMAT_NONCOMPLIANCE: "输出不合规", CONTENT_FAILURE: "输出不合规", CONTENT_FAILURE_EMPTY_TOPICS: "输出不合规", MISSING_UNITS: "输出不合规",
 };
@@ -178,7 +178,7 @@ export function hoursText(hours: number[]): string {
 }
 /** a video no login opens: why, for 视频不可用 (a15) */
 export const UNAVAILABLE: Record<string, string> = {
-  VIDEO_REMOVED: "已删除", VIDEO_PRIVATE: "私享", VIDEO_MEMBERS: "会员限定", SOURCE_UNAVAILABLE: "看不了",
+  VIDEO_REMOVED: "已删除", VIDEO_PRIVATE: "私享", VIDEO_MEMBERS: "会员权限不够", SOURCE_UNAVAILABLE: "看不了",
 };
 /** the waits that stop production (vermilion); the others pass by themselves (a live still on air, the network) */
 export const STOPS = ["AGY_AUTH_REQUIRED", "PROVIDER_QUOTA", "PROVIDER_MODEL", "YOUTUBE_AUTH", "YOUTUBE_REFUSED", "DISK_LOW", "AGY_MEDIA_READ", "YTDLP_OUTDATED"];

@@ -257,8 +257,8 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
           <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
             <span className="muted">{failText(i.error_class, i.retry)}</span>
             <span className="attn-acts">
-              {i.error_class === "CONTENT_SAFETY" && <button className="btn ghost sm" disabled={busy === i.id}
-                onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/ignore`)}>忽略</button>}
+              <button className="btn ghost sm" disabled={busy === i.id}
+                onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/ignore`)}>忽略</button>
               <button className="btn sm" disabled={busy === i.id}
                 onClick={() => act(i.id, `/api/runs/${encodeURIComponent(i.latest_run)}/retry`)}>重试</button>
             </span></li>

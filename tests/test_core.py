@@ -5042,9 +5042,39 @@ def test_a_video_no_login_can_open_is_said_unavailable_and_can_be_put_away(home,
     c, h = TestClient(web.app), {"host": "127.0.0.1"}
     issues = {i["id"]: i for i in c.get("/api/overview", headers=h).json()["issues"]}
     assert issues["p"]["error_class"] == "VIDEO_PRIVATE"
-    assert c.post("/api/runs/f-r1/ignore", headers=h, json={}).status_code == 409  # a failure to fix is not put away
+    assert c.post("/api/runs/q-r1/ignore", headers=h, json={}).status_code == 409  # waiting for the login: not a failure
     assert c.post("/api/runs/p-r1/ignore", headers=h, json={}).status_code == 200
     assert db.one("SELECT production, error_class FROM runs WHERE id='p-r1'") == {"production": "CANCELLED", "error_class": "VIDEO_PRIVATE"}
+
+
+NOT_AVAILABLE = "ERROR: [youtube] sj7s4BPYY2o: This video is not available."
+
+
+def test_a_members_video_above_the_accounts_tier_is_said_so_not_unclassified(home, monkeypatch):
+    # a members-only video for a higher tier than the account's: yt-dlp passes on YouTube's "This video is not available."
+    # — signed in, 视频不可用 · 会员权限不够, which 忽略 puts away; with no login, the login is waited for; one that failed
+    # as 未分类 before comes over once
+    from assetizer import db, youtube
+    from assetizer.pipeline import acquire, runner
+    from assetizer.util import now
+    assert youtube.classify(NOT_AVAILABLE, signed_in=True) == "VIDEO_MEMBERS" and youtube.classify(NOT_AVAILABLE) == "AUTH_REQUIRED"
+    assert youtube.classify("ERROR: [youtube] v: The following content is not available on this app.", signed_in=True) == "UNKNOWN"
+    t = now()
+    monkeypatch.setattr(runner, "STAGES", [("RESOLVE", acquire.resolve, True)])
+    db.exec("INSERT INTO sources(id, url, title, delivery, created_at, updated_at) VALUES ('m','m','m','NOT_STARTED',?,?)", t, t)
+    db.exec("INSERT INTO runs(id, source_id, production, created_at) VALUES ('m-r1','m','QUEUED',?)", t)
+    _shut_out(monkeypatch, NOT_AVAILABLE)
+    assert runner._execute("m-r1") == "FAILED"
+    assert db.one("SELECT error_class FROM runs WHERE id='m-r1'")["error_class"] == "VIDEO_MEMBERS"
+    db.exec("INSERT INTO sources(id, url, title, delivery, created_at, updated_at) VALUES ('o','o','o','NOT_STARTED',?,?)", t, t)
+    for rid, error in (("o-r1", f"UNKNOWN: {NOT_AVAILABLE}"), ("o-r2", "UNKNOWN: ERROR: boom")):
+        db.exec("INSERT INTO runs(id, source_id, production, error_class, error, created_at) VALUES (?,'o','FAILED','UNKNOWN',?,?)",
+                rid, error, t)
+    conn = db.connect()
+    conn.execute("DELETE FROM settings WHERE key='migrated:not_available'")
+    db._migrate(conn)
+    assert {r["id"]: r["error_class"] for r in db.q("SELECT id, error_class FROM runs WHERE source_id='o'")} == {
+        "o-r1": "VIDEO_MEMBERS", "o-r2": "UNKNOWN"}
 
 
 def test_a_video_taken_down_after_its_download_is_made_from_the_copy_here(home, monkeypatch):
@@ -7034,7 +7064,8 @@ def test_a_run_the_filter_stopped_can_be_put_away(cc_api, home):
     db.exec("INSERT INTO runs(id, source_id, kind, production, error_class, created_at) VALUES ('s-r1','s','PRODUCTION','FAILED','CONTENT_SAFETY','t'), ('s-r2','s','PRODUCTION','FAILED','PROVIDER_FAILURE','t')")
     assert cc_api.post("/api/runs/s-r1/ignore", json={}).status_code == 200
     assert db.one("SELECT production FROM runs WHERE id='s-r1'")["production"] == "CANCELLED"
-    assert cc_api.post("/api/runs/s-r2/ignore", json={}).status_code == 409
+    assert cc_api.post("/api/runs/s-r2/ignore", json={}).status_code == 200  # any other failure too, rather than 重试
+    assert db.one("SELECT production FROM runs WHERE id='s-r2'")["production"] == "CANCELLED"
 
 
 def test_the_providers_name_their_filters(home, monkeypatch):

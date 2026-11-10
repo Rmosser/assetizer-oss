@@ -9,7 +9,7 @@ import { Sheet } from "../components/Sheet";
 import { Fault, Stale, Unroll, Empty } from "../components/States";
 import { useLeaving, useMedia, usePoll, useStored } from "../hooks";
 import { linkProps, useRestoreScroll } from "../router";
-import { cnDay, cnNum, cnYear, deliveryLabel, failText, mins, parseDay, reduceMotion, tc, UNAVAILABLE } from "../util";
+import { cnDay, cnNum, cnYear, deliveryLabel, failText, mins, parseDay, reduceMotion, tc } from "../util";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -793,7 +793,7 @@ function NotPrinted({ run, reload }: { run: any; reload: () => void }) {
   return (
     <Empty title={failText(run.error_class, run.retry)} action={
       <>
-        {(UNAVAILABLE[run.error_class] || run.error_class === "CONTENT_SAFETY") && <button className="btn" disabled={busy} onClick={() => act("ignore")}>忽略</button>}
+        <button className="btn" disabled={busy} onClick={() => act("ignore")}>忽略</button>
         {run.kind !== "IMPORT" && <button className="btn solid" disabled={busy} onClick={() => act("retry")}>重试</button>}
       </>
     } />

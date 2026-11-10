@@ -8,7 +8,7 @@ import { familyOf, RouteLinks } from "../components/Routes";
 import { Fault, Stale, Unroll } from "../components/States";
 import { usePoll, useStored } from "../hooks";
 import { linkProps, navigate, useRestoreScroll } from "../router";
-import { ago, clock, ERRORS, errorLabel, failText, mergeAlerts, PRODUCTION, retryText, STOPS, UNAVAILABLE, WAIT } from "../util";
+import { ago, clock, ERRORS, errorLabel, failText, mergeAlerts, PRODUCTION, retryText, STOPS, WAIT } from "../util";
 
 /** "CLEANUP 完成" → "清理 完成": stage and error codes in log lines read as their Chinese labels */
 const humanize = (msg: string, labels: Record<string, string>) =>
@@ -385,7 +385,7 @@ function RunRow({ r, title, several, reload }: { r: any; title?: React.ReactNode
       <span className="eg-run-a">
         {(["FAILED", "WAITING", "COMPLETE_PARTIAL"].includes(r.production) || (r.production === "CANCELLED" && r.error_class === "STOPPED")) && r.kind !== "IMPORT" &&
           <button className="btn sm" disabled={busy} onClick={() => act("retry")}>重试</button>}
-        {r.production === "FAILED" && (UNAVAILABLE[r.error_class] || r.error_class === "CONTENT_SAFETY") &&
+        {r.production === "FAILED" &&
           <button className="btn sm" disabled={busy} onClick={() => act("ignore")}>忽略</button>}
       </span>
     </li>

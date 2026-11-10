@@ -915,19 +915,20 @@ def retry(rid: str):
 
 @app.post("/api/runs/{rid}/ignore")
 def ignore(rid: str):
-    """A video no login opens (removed, private, members-only) is put away: nothing to fix, nothing to wait for (a15). So is
-    one the safety filter keeps stopping, once the retries and the other model have not got it through."""
+    """A failed issue is put away: one no login opens (removed, private, members-only: nothing to fix, nothing to wait
+    for, a15), one the safety filter keeps stopping, or any other the user would rather not 重试 (2026-11-10)."""
     from ..youtube import UNAVAILABLE
     r = db.one("SELECT production, error_class FROM runs WHERE id=?", rid)
     if not r:
         raise HTTPException(404)
     if r["production"] == "CANCELLED":  # a second click
         return {"ok": True}
-    safety = r["error_class"] == "CONTENT_SAFETY"
-    if r["production"] != "FAILED" or not (safety or r["error_class"] in UNAVAILABLE):
-        raise HTTPException(409, "只有视频不可用或被内容安全过滤拦下的这一期能忽略")
+    if r["production"] != "FAILED":
+        raise HTTPException(409, "只有失败的这一期能忽略")
     db.exec("UPDATE runs SET production='CANCELLED' WHERE id=? AND production='FAILED'", rid)
-    db.event("run", "被内容安全过滤拦下，已忽略" if safety else f"视频不可用（{UNAVAILABLE[r['error_class']]}），已忽略", rid)
+    kind = r["error_class"]
+    db.event("run", "被内容安全过滤拦下，已忽略" if kind == "CONTENT_SAFETY" else f"视频不可用（{UNAVAILABLE[kind]}），已忽略"
+             if kind in UNAVAILABLE else f"生产失败（{kind or '未分类'}），已忽略", rid)
     return {"ok": True}
 
 

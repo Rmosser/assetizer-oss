@@ -29,7 +29,7 @@ class AcquireError(RuntimeError):
 
 
 # what YouTube did with a video no login opens (a15): no wait would bring it back, the issue is 视频不可用
-UNAVAILABLE = {"VIDEO_REMOVED": "已删除", "VIDEO_PRIVATE": "私享", "VIDEO_MEMBERS": "会员限定", "SOURCE_UNAVAILABLE": "看不了"}
+UNAVAILABLE = {"VIDEO_REMOVED": "已删除", "VIDEO_PRIVATE": "私享", "VIDEO_MEMBERS": "会员权限不够", "SOURCE_UNAVAILABLE": "看不了"}
 
 VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([A-Za-z0-9_-]{11})")
 
@@ -54,7 +54,9 @@ def classify(stderr: str, signed_in: bool = False) -> str:
     shut = signed_in and "cookies are no longer valid" not in t  # rotated cookies: the login is what is missing
     if "private video" in t:
         return "VIDEO_PRIVATE" if shut else "AUTH_REQUIRED"
-    if "members-only" in t or "join this channel" in t:
+    # "This video is not available.": what YouTube says of a members-only video to an account without that tier (a
+    # junior member, or none) and to no login at all — its error screen offers the membership (sponsors_only_video)
+    if "members-only" in t or "join this channel" in t or "this video is not available" in t:
         return "VIDEO_MEMBERS" if shut else "AUTH_REQUIRED"
     if "sign in to confirm your age" in t:
         return "AUTH_REQUIRED"
