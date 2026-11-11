@@ -53,6 +53,23 @@ def _refuse(r: Any, kind: str) -> None:
 Recorder = Callable[[dict], None]
 
 
+def call_recorder(run_id: str) -> Recorder:
+    """The same provider receipt columns for production, topics and channel comments."""
+    from . import db
+    from .util import now
+
+    def record(r: dict) -> None:
+        u = r.get("usage") or {}
+        db.exec("""INSERT INTO model_calls(run_id, stage, attempt, conversation_id, model, agy_version, status, error_class,
+                   wall_seconds, input_tokens, output_tokens, thinking_tokens, peak_rss_kib, view_files, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                run_id, r.get("stage"), r.get("attempt"), r.get("conversation_id"), r.get("actual_model"),
+                r.get("agy_version"), r.get("status"), r.get("error_class"), r.get("wall_seconds"),
+                u.get("input_tokens"), u.get("output_tokens"), u.get("thinking_tokens"), r.get("peak_rss_kib"),
+                r.get("view_file_count"), now())
+    return record
+
+
 class ContractError(RuntimeError):
     def __init__(self, kind: str, message: str = ""):
         super().__init__(f"{kind}: {message}" if message else kind)
@@ -116,12 +133,13 @@ def validate(obj: Any, schema: dict) -> None:
 
 class LLM:
     def __init__(self, provider: AgyProvider | None = None, recorder: Recorder | None = None, session: str | None = None,
-                 watch: Any = None):
+                 watch: Any = None, retry: bool = True):
         self.fixed = provider  # an explicit provider answers every stage (bench, tests); otherwise `stage_providers` routes
         self.p = provider or providers.get()
         self.recorder = recorder
         self.session = session
         self.watch = watch  # the run these calls are for (RunContext): told of retries, and only for a run do we change model
+        self.retry = retry  # channel comments: one call, one contract regeneration, then wait for a new ask
 
     def _bound(self, p):
         if self.session and hasattr(p, "session"):
@@ -167,6 +185,8 @@ class LLM:
         """One call, tried again as the 设置 page says for what failed it. Failing in the end, the error says what the call
         was put through (`retry`, the shape of runs.retry: 试了 4 次). `accept`: the checks another model's answer must pass."""
         p = self.provider(stage)
+        if not self.retry:
+            return self._attempt(p, d, stage, prompt, **kw)
         tried: dict[str, int] = {}
         while True:
             n = sum(tried.values())
@@ -270,7 +290,7 @@ class LLM:
                 check(o)
             return o
 
-        attempts_again = knobs.retries("CONTRACT")
+        attempts_again = knobs.retries("CONTRACT") if self.retry else 1
         n = 0
         feedback = ""  # why the previous answer was rejected: the same prompt again got the same answer (2026-10-27)
 
@@ -298,6 +318,8 @@ class LLM:
                 write_json(d / f"invalid-{n}.json", {"classification": e.kind, "detail": str(e)})
                 last = e
                 if e.kind == "FORMAT_NONCOMPLIANCE" and len(r.text.strip().strip("}{[] \n")) >= 20:
+                    if not self.retry and n > 1:
+                        raise given_up(e)  # regeneration already spent the single extra request
                     break  # real content in a broken envelope → repair below; not a try of its own
                 if n > attempts_again or not self._again("CONTRACT", stage, n, attempts_again):
                     raise given_up(e)

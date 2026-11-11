@@ -43,6 +43,7 @@ def prune(days: int | None = None) -> dict:
     events = db.connect().execute("""DELETE FROM events WHERE ts < ? AND (run_id IS NULL OR run_id NOT IN
                                      (SELECT id FROM runs WHERE production IN ('QUEUED','RUNNING','WAITING','INTERRUPTED')))""",
                                   (_since(days),)).rowcount
+    db.exec("DELETE FROM notion_events WHERE at < ?", _since(30))
     return {"files": files, "events": events}
 
 

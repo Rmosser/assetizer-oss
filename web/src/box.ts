@@ -9,9 +9,11 @@ export type Bucket = { window: string; remaining: number | null; reset_at: strin
 export type Group = { name: string; models: string; buckets: Bucket[] };
 
 /** stage keys of model calls (providers.stage_key) */
-export const STEP: Record<string, string> = { understanding: "理解", merge: "合并", knowledge: "知识", article: "文章", selection: "选片", boundary: "边界", review: "预审", compile: "编译", health: "探测", media: "自检",
+export const STEP: Record<string, string> = { understanding: "理解", merge: "合并", knowledge: "知识", article: "文章", selection: "选片", boundary: "边界", review: "预审", comments: "批注", compile: "编译", health: "探测", media: "自检",
   draft: "底稿", look: "回看", second: "复核", topic: "写作" };
 export const MAIN_STEPS = ["understanding", "merge", "knowledge", "article", "selection", "boundary", "review"];
+/** 分工's cells on the 设置 page: the stages above, then 批注, which reads the asks on an issue's Notion page as text */
+export const ROUTE_STEPS = [...MAIN_STEPS, "comments"];
 
 export const MAGPIE_DOWN: Record<string, string> = { UNREACHABLE: "连不上 magpie", BAD_KEY: "Key 失效", HELD: "这个 Key 读不到额度", NO_KEY: "没有放 Key", REFUSED: "magpie 拒收" };
 export const subName = (s: any) => VENDOR_NAME[s.provider] || s.name || s.provider;

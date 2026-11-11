@@ -41,21 +41,21 @@ class Notion:
         self.c = httpx.Client(base_url=API, timeout=timeout, headers={
             "Authorization": f"Bearer {token}", "Notion-Version": VERSION})
 
-    def _req(self, method: str, path: str, idempotent: bool | None = None, **kw) -> Any:
+    def _req(self, method: str, path: str, idempotent: bool | None = None, *, tries: int = 6, **kw) -> Any:
         """Retry 429 always; retry 5xx/transport errors only for idempotent requests.
         A timed-out page create or block append has usually been applied — the next
         delivery reconciles instead of blindly duplicating it."""
         if idempotent is None:
             idempotent = method in ("GET", "DELETE") or "/send" in path or path.endswith("/complete")
-        for attempt in range(6):
+        for attempt in range(tries):
             try:
                 r = self.c.request(method, path, **kw)
             except httpx.TransportError:
-                if attempt == 5 or not idempotent:
+                if attempt == tries - 1 or not idempotent:
                     raise
                 time.sleep(2 ** attempt)
                 continue
-            if (r.status_code == 429 or (r.status_code in (500, 502, 503, 504) and idempotent)) and attempt < 5:
+            if (r.status_code == 429 or (r.status_code in (500, 502, 503, 504) and idempotent)) and attempt < tries - 1:
                 time.sleep(float(r.headers.get("Retry-After", 2 ** attempt)))
                 continue
             if r.status_code >= 400:
@@ -70,8 +70,8 @@ class Notion:
         return self._req("POST", "/search", idempotent=True, json=body).get("results", [])
 
     # pages / blocks ---------------------------------------------------------
-    def me(self) -> dict:
-        return self._req("GET", "/users/me")
+    def me(self, **kw) -> dict:
+        return self._req("GET", "/users/me", **kw)
 
     def page(self, page_id: str) -> dict:
         return self._req("GET", f"/pages/{page_id}")
@@ -89,11 +89,13 @@ class Notion:
     def archive_page(self, page_id: str) -> dict:
         return self._req("PATCH", f"/pages/{page_id}", idempotent=True, json={"archived": True})
 
-    def append(self, block_id: str, children: list, after: str | None = None) -> dict:
-        """`after`: the block they go right after (else at the end)."""
+    def append(self, block_id: str, children: list, after: str | None = None, *, position: dict | None = None) -> dict:
+        """`after`: insert after that block; `position={type: start}`: before the first block; else append."""
         body: dict = {"children": children}
         if after:
             body["after"] = after
+        elif position:
+            body["position"] = position
         return self._req("PATCH", f"/blocks/{block_id}/children", json=body)
 
     def database(self, page_id: str, title: str, properties: dict) -> dict:

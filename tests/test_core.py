@@ -4110,43 +4110,22 @@ def test_samples_are_not_counted_as_issues(home):
     assert (stats["w"]["issues"], stats["w"]["units"], stats["t"]["issues"], stats["t"]["units"]) == (0, 0, 1, 5)
 
 
-def test_a_page_that_cannot_be_archived_is_not_written_a_second_time(home, monkeypatch):
-    # S06: replacing the page of an issue run again: when archiving the old page fails, no second page is made
+def test_a_new_run_is_synced_without_archiving_even_after_append_failure(home, monkeypatch):
+    # S06: page replacement is gone; an interrupted new run resumes on the original page.
     from assetizer import db, delivery
-    from assetizer.notion import mapping as M
-    from assetizer.notion.client import NotionError
-    _run_fixture(home)
-    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
-    db.exec("UPDATE sources SET current_run_id='r', notion_page_id='old', notion_synced_run='r0', notion_database_id='lib', delivery='STALE'")
-    calls = []
-
-    class Fake:
-        status = 502
-
-        def _req(self, method, path, **kw):
-            calls.append((method, path))
-            if path == "/pages":
-                raise NotionError(418, "stop: a page would be made here")
-            return {"results": []} if path.endswith("/query") or path.startswith("/comments") else LIB
-
-        def page(self, pid):
-            return {"archived": False, "icon": None}
-
-        def me(self):
-            return {"id": "bot"}
-
-        def children(self, pid):  # the old page as Assetizer left it (a07)
-            return []
-
-        def archive_page(self, pid):
-            raise NotionError(self.status, "<!DOCTYPE html>")
-    fake = Fake()
-    monkeypatch.setattr(delivery, "client", lambda: fake)
-    assert delivery.deliver("v")["status"] == "FAILED"
-    assert ("POST", "/pages") not in calls and db.one("SELECT notion_page_id FROM sources")["notion_page_id"] == "old"
-    fake.status = 404  # the old page is gone already (deleted in Notion): a new one is right
-    delivery.deliver("v")
-    assert ("POST", "/pages") in calls
+    from assetizer.util import now
+    from test_channel_notion import _channel_fixture, aligned, delivered, mapped, stable, text
+    n, plan = _channel_fixture(home, monkeypatch)
+    pid = delivered(n)
+    plan[2] = text("change", "新运行的新字")
+    db.exec("INSERT INTO runs(id, source_id, production, summary, created_at) VALUES ('r2','s','COMPLETE','{}',?)", now())
+    db.exec("UPDATE sources SET current_run_id='r2', delivery='STALE'")
+    n.fail_append = n.appends + 1
+    assert delivery.deliver("s")["status"] == "FAILED"
+    n.fail_append = None
+    delivered(n)
+    aligned(n, plan)
+    stable(n, pid, 2)
 
 
 def test_a_page_made_but_whose_answer_was_lost_is_taken_up_not_registered(home, monkeypatch):
@@ -4575,71 +4554,22 @@ def test_a_crash_around_a_run_does_not_leave_it_marked_running(home, monkeypatch
 
 
 def test_resuming_a_delivery_keeps_what_you_added_or_changed_on_the_page(home, monkeypatch):
-    # S24: the page looked done (only the last write, the properties, failed); you added a note and changed a property
-    from assetizer import db, delivery
-    from assetizer.notion import mapping as M
-    from assetizer.notion.client import NotionError
-    _run_fixture(home)
-    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
-    db.exec("UPDATE sources SET current_run_id='r'")
-    blocks, props, calls, fail = [], {}, [], [True]
-
-    schema = M.schema_of(LIB)
-
-    def canon(key, v):  # a property as Notion answers it, by name, with its id along with the value
-        pid = key if key in schema else next(k for k, x in schema.items() if x["name"] == key)
-        return schema[pid]["name"], {"id": pid, **v}
-
-    class Fake:
-        def _req(self, method, path, **kw):
-            calls.append((method, path))
-            if path == "/databases/lib":
-                return LIB
-            if path.endswith("/query"):
-                return {"results": []}
-            if method == "POST" and path == "/pages":
-                props.update(canon(k, v) for k, v in kw["json"]["properties"].items())
-                return {"id": "pg", "url": "https://notion/pg", "properties": dict(props)}
-            if method == "PATCH" and path == "/pages/pg":
-                if fail[0]:
-                    raise NotionError(502, "Bad Gateway")
-                props.update(canon(k, v) for k, v in kw["json"]["properties"].items())
-                return {"id": "pg", "properties": dict(props)}
-            if method == "DELETE":
-                blocks[:] = [b for b in blocks if b["id"] != path.rsplit("/", 1)[1]]
-                return {}
-            raise AssertionError(f"unexpected {method} {path}")
-
-        def page(self, pid):
-            return {"id": pid, "archived": False, "icon": None, "properties": dict(props)}
-
-        def me(self):
-            return {"id": "bot"}
-
-        def upload(self, path, content_type):
-            return {"id": "up"}
-
-        def append(self, pid, children):
-            out = []
-            for c in children:
-                b = {**c, "id": f"b{len(blocks)}", "created_by": {"id": "bot"}}
-                if c["type"] in ("image", "video"):
-                    b[c["type"]] = {"type": "file"}
-                blocks.append(b)
-                out.append(b)
-            return {"results": out}
-
-        def children(self, pid):
-            return list(blocks)
-    monkeypatch.setattr(delivery, "client", lambda: Fake())
-    assert delivery.deliver("v")["status"] == "FAILED"
-    blocks.append({"id": "note", "type": "paragraph", "created_by": {"id": "you"},
-                   "paragraph": {"rich_text": [{"type": "text", "text": {"content": "我的笔记"}, "plain_text": "我的笔记"}]}})
-    props.update([canon("AI 摘要", {"type": "rich_text", "rich_text": [{"plain_text": "我改的摘要"}]})])
-    fail[0] = False
-    assert delivery.deliver("v")["status"] == "DELIVERED"
-    assert any(b["id"] == "note" for b in blocks) and ("DELETE", "/blocks/note") not in calls
-    assert props["AI 摘要"]["rich_text"] == [{"plain_text": "我改的摘要"}]
+    # S24: only the last property write failed; a subsequent note and property edit are preserved on retry.
+    from assetizer import delivery
+    from test_channel_notion import _channel_fixture, aligned, delivered, page, stable
+    from test_topic_notion import YOU
+    n, plan = _channel_fixture(home, monkeypatch)
+    n.fail_props = True
+    assert delivery.deliver("s")["status"] == "FAILED"
+    pid = page(n)
+    note = n._block(B.block("paragraph", "我的笔记"), YOU)
+    n.kids[pid].append(note)
+    n.pages[pid]["properties"]["名称"]["title"] = [{"plain_text": "我改的标题"}]
+    n.fail_props = False
+    delivered(n)
+    assert n.pages[pid]["properties"]["名称"]["title"] == [{"plain_text": "我改的标题"}]
+    aligned(n, plan, [note["id"]])
+    stable(n, pid, 2)
 
 
 def test_a_video_whose_length_is_not_known_yet_waits_instead_of_being_too_short(home, monkeypatch):
@@ -5225,37 +5155,21 @@ def test_pasting_an_issue_already_in_notion_finds_its_page_rather_than_printing_
     assert r["run_id"] == "AAAAAAAAAAA-r2" and not r["existing"] and "kept" not in r
 
 
-def test_a_page_someone_wrote_on_is_not_replaced_without_asking(home, monkeypatch):
-    # S24 (a07): before an old page goes (重印, 换成新版本), what someone else did on it — a paragraph added, one of ours
-    # edited, a property, a comment — stops it: the page stays and the 刊 asks; nothing of theirs, and it goes as before
-    from fastapi.testclient import TestClient
-    from assetizer import db, delivery
-    from assetizer.notion import mapping as M
-    from assetizer.web import app as web
-    _run_fixture(home)
-    M.save("trader-tom", M.preset("trader-tom", "lib", M.schema_of(LIB), None))
-    stale = "UPDATE sources SET current_run_id='r', notion_page_id='old', notion_synced_run='r0', notion_database_id='lib', delivery='STALE'"
-    db.exec(stale)
-    mine = {"id": "b1", "type": "paragraph", "created_by": {"id": "bot"}, "last_edited_by": {"id": "bot"}}
-    lib = _Lib(blocks=[mine], comments=None)  # comments not readable: taken as none
-    monkeypatch.setattr(delivery, "client", lambda: lib)
-    assert delivery.deliver("v")["status"] == "FAILED" and ("PATCH", "/pages/old") in lib.calls  # on to the new page
-    db.exec(stale)
-    lib = _Lib(blocks=[{**mine, "last_edited_by": {"id": "me"}}, {"id": "b2", "type": "paragraph", "created_by": {"id": "me"},
-                                                                    "last_edited_by": {"id": "me"}}],
-               comments=[{"id": "c1", "created_by": {"id": "me"}}])
-    monkeypatch.setattr(delivery, "client", lambda: lib)
-    assert delivery.deliver("v")["status"] == "HELD"
-    assert ("PATCH", "/pages/old") not in lib.calls and not any(p == "/pages" for _, p in lib.calls)
-    c, h = TestClient(web.app), {"host": "127.0.0.1"}
-    it = next(i for i in c.get("/api/overview", headers=h).json()["issues"] if i["id"] == "v")
-    assert it["delivery_reason"] == "YOURS_ON_PAGE" and it["yours"] == ["加了段落", "改了段落", "加了评论"]
-    assert c.post("/api/sources/v/replace", headers=h, json={"replace": False}).status_code == 200
-    assert db.one("SELECT delivery, notion_page_id FROM sources") == {"delivery": "DELIVERED", "notion_page_id": "old"}
-    db.exec("UPDATE sources SET delivery='STALE'")  # asked for again later: it asks again
-    assert delivery.deliver("v")["status"] == "HELD"
-    assert c.post("/api/sources/v/replace", headers=h, json={"replace": True}).status_code == 200
-    assert delivery.deliver("v")["status"] == "FAILED" and ("PATCH", "/pages/old") in lib.calls
+def test_a_page_someone_wrote_on_is_synced_around_their_blocks(home, monkeypatch):
+    # S24: a new plan is written alongside edited/commented blocks, without asking or replacing the page.
+    from assetizer import delivery
+    from test_channel_notion import _channel_fixture, aligned, delivered, mapped, stable, text
+    from test_topic_notion import YOU
+    n, plan = _channel_fixture(home, monkeypatch)
+    pid = delivered(n)
+    old = mapped()["change"]["block_id"]
+    n.say(old, "这句要留着")
+    own = n._block(B.block("paragraph", "我写的"), YOU)
+    n.kids[pid].insert(3, own)
+    plan[2] = text("change", "改正后的字")
+    delivered(n)
+    aligned(n, plan, [old, own["id"]])
+    stable(n, pid, 2)
 
 
 def test_clearing_the_trial_queue_stops_the_trials_under_way_too(home, monkeypatch):

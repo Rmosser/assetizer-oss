@@ -115,6 +115,11 @@ def cmd_doctor(a) -> None:
         out[tool] = shutil.which(tool) or "MISSING"
     out["disk_free_gb"] = round(shutil.disk_usage(s.home).free / 1e9, 1)
     out["notion_token"] = bool(s.secret("notion-token"))
+    from .notion import hook
+    stats = hook.events()
+    out["notion_hook"] = {"token": hook.file_present("notion-hook-verification"),
+                          "tunnel_token": hook.file_present(hook.TUNNEL_TOKEN_FILE),
+                          "last_at": stats["last_at"], "rejected": stats["rejected"]}
     out["telegram"] = bool(s.secret("telegram-bot-token")) and bool(s.secret("telegram-chat-id"))
     out["browser_profile"] = str(s.browser_profile) if s.browser_profile and s.browser_profile.exists() else "MISSING"
     if a.agy:

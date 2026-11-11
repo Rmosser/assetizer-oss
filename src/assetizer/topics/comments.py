@@ -14,7 +14,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import re
+import threading
 import time
+from functools import wraps
+from weakref import WeakValueDictionary
 
 from .. import db
 from ..notion.client import Notion, NotionError
@@ -26,9 +29,30 @@ SKIP = ("child_database", "child_page")   # the 来源 table is read row by row;
 QUOTE = 300          # characters of a block a comment is on the answer is told
 HEADS = ("heading_1", "heading_2", "heading_3")
 QUIET = 600          # seconds: the newest word to 课代表 this old, the answer is put together again (no more coming)
+_BOT_UNSET = object()  # An explicitly unknown identity must not trigger a second /users/me in a webhook batch.
 ASK = re.compile(r"^\s*[@＠]?\s*课代表[\s:：,，、。]*")   # how the user calls 课代表
 MINE = "〔课代表〕"   # how 课代表's replies begin, to be told apart at a glance
 RESULTS = ("已改", "没改", "已答", "记进待修")
+_locks = WeakValueDictionary()
+_locks_guard = threading.Lock()
+
+
+def read_lock(tid: int):
+    """Only reads of the same topic reconcile together; unused topic locks can be collected."""
+    with _locks_guard:
+        lock = _locks.get(tid)
+        if lock is None:
+            lock = threading.RLock()
+            _locks[tid] = lock
+        return lock
+
+
+def _serial(fn):
+    @wraps(fn)
+    def locked(tid, *args, **kwargs):
+        with read_lock(tid):
+            return fn(tid, *args, **kwargs)
+    return locked
 
 
 class NoRead(Exception):
@@ -102,6 +126,7 @@ def _set(tid: int, **cols) -> None:
     db.exec(f"UPDATE topics SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?", *cols.values(), tid)
 
 
+@_serial
 def scan(tid: int) -> int:
     """Read the comments on the topic's Notion page and its rows; returns how many of the user's words to 课代表 are new
     (or edited) since. What is no longer there (resolved, deleted) is no longer open. An integration that may not read
@@ -168,6 +193,71 @@ def scan(tid: int) -> int:
                        (w["id"], at, tid, w["discussion"], _bare(w["text"], False)))
         cx.execute("""UPDATE topics SET comments_at=?, comments_err=CASE WHEN comments_err='NO_READ' THEN NULL ELSE comments_err END
                       WHERE id=?""", (at, tid))
+    return len(new & {w["id"] for w in words})
+
+
+@_serial
+def scan_one(tid: int, page: str, block: str | None, *, n: Notion | None = None, bot: str | None | object = _BOT_UNSET) -> int:
+    """Reconcile just this block (or the page's own discussion). Other blocks, comments_at and existing under stay.
+    The writes mirror scan; a later full read supplies the section a new comment is under."""
+    from . import notion as TN
+    t = db.one("SELECT notion_page_id, notion_rows FROM topics WHERE id=? AND archived_at IS NULL", tid)
+    if not t or not t["notion_page_id"]:
+        return 0
+    n = n or TN.client()
+    if not n:
+        raise RuntimeError("NO_CLIENT")
+    if bot is _BOT_UNSET:
+        bot = TN._bot(n)
+    video = next((vid for vid, row in (db.unj(t["notion_rows"], {}) or {}).items()
+                  if TN._norm(row.get("page")) == TN._norm(page)), None)
+    quote, kind = None, None
+    try:
+        found = _list(n, block or page)
+        if block:
+            try:
+                b = n._req("GET", f"/blocks/{block}", idempotent=True)
+                quote, kind = _words(b)[:QUOTE], b["type"]
+            except NotionError as e:
+                if e.status == 403:
+                    raise NoRead from e
+                if e.status not in (400, 404):
+                    raise
+                found = []
+    except NoRead:
+        _set(tid, comments_err="NO_READ")
+        return 0
+    new: set[str] = set()
+    at = now()
+    with db.tx() as cx:
+        have = {r["id"]: r for r in cx.execute("SELECT id, hash, ours FROM topic_comments WHERE topic_id=?", (tid,))}
+        cx.execute("UPDATE topic_comments SET open=0 WHERE topic_id=? AND page=? AND block IS ?", (tid, page, block))
+        for c in found:
+            text = _plain(c.get("rich_text"))
+            h = hashlib.sha1(text.encode()).hexdigest()
+            ours = int(text.startswith(MINE) or (bool(bot) and (c.get("created_by") or {}).get("id") == bot))
+            asked = int(not ours and bool(ASK.match(text)))
+            old = have.get(c["id"])
+            if old is None:
+                cx.execute("""INSERT INTO topic_comments(topic_id, id, discussion, page, block, video_id, quote, kind, text, hash,
+                              ours, asked, created, open) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+                           (tid, c["id"], c.get("discussion_id") or c["id"], page, block, video, quote, kind, text, h,
+                            ours, asked, c.get("created_time")))
+                if not ours:
+                    new.add(c["id"])
+            else:
+                cx.execute("""UPDATE topic_comments SET open=1, text=?, hash=?, asked=?, quote=COALESCE(?, quote),
+                              seen=CASE WHEN hash=? THEN seen END WHERE topic_id=? AND id=?""",
+                           (text, h, asked, quote, h, tid, c["id"]))
+                if old["hash"] != h and not old["ours"]:
+                    new.add(c["id"])
+        words = list(cx.execute(f"""SELECT id, discussion, text FROM topic_comments c WHERE topic_id=? AND open=1 AND ours=0
+                                    AND {_OPEN_ASKED}""", (tid,)))
+        for w in words:
+            cx.execute("""INSERT INTO asks(id, at, topic_id, discussion, text) VALUES (?,?,?,?,?)
+                          ON CONFLICT(id) DO UPDATE SET text=excluded.text""",
+                       (w["id"], at, tid, w["discussion"], _bare(w["text"], False)))
+        cx.execute("UPDATE topics SET comments_err=CASE WHEN comments_err='NO_READ' THEN NULL ELSE comments_err END WHERE id=?", (tid,))
     return len(new & {w["id"] for w in words})
 
 
@@ -241,11 +331,18 @@ def _head(r: dict) -> str:
     return f"{MINE}{result} #{r['ask']}" if result == "记进待修" and r.get("ask") else f"{MINE}{result} · 第 {r['n']} 版"
 
 
-def _post(n: Notion, discussion: str, head: str, body: str = "") -> dict:
+def _post(n: Notion, discussion: str, head: str, body: str = "", *, rich_body: list | None = None) -> dict:
     rich = [{"type": "text", "text": {"content": head}, "annotations": {"bold": True}}]
-    if body:
+    if rich_body is not None:
+        rich += [{"type": "text", "text": {"content": "\n"}}, *rich_body]
+    elif body:
         rich.append({"type": "text", "text": {"content": "\n" + body[:1800]}})
     return n._req("POST", "/comments", json={"discussion_id": discussion, "rich_text": rich})
+
+
+def reply_error(e: NotionError) -> str:
+    """Shared reply policy: retain forbidden/temporary replies; discard a gone discussion."""
+    return "NO_INSERT" if e.status == 403 else "GONE" if e.status in (400, 404) else "RETRY"
 
 
 def reply(n: Notion, tid: int) -> int:
@@ -262,11 +359,11 @@ def reply(n: Notion, tid: int) -> int:
         try:
             got = _post(n, r["discussion"], _head(r), r["text"])
         except NotionError as e:
-            if e.status == 403:
+            if reply_error(e) == "NO_INSERT":
                 err = "NO_INSERT"
                 left += waiting[i:]
                 break
-            if e.status not in (400, 404):
+            if reply_error(e) != "GONE":
                 left.append(r)
             continue
         sent += 1
@@ -318,7 +415,7 @@ def _tell_fixed() -> None:
         try:
             _post(n, a["discussion"], f"{MINE}已修 #{a['n']} · {a['fixed']}")
         except NotionError as e:
-            if e.status not in (400, 404):
+            if reply_error(e) != "GONE":
                 return  # may not insert, Notion away: next time
         db.exec("UPDATE asks SET fixed_told=? WHERE n=?", now(), a["n"])
 
@@ -327,8 +424,14 @@ def used(days: int) -> dict:
     """The words to 课代表 in the last `days`, by how each was handled, and the 待修 not mended: is this worth keeping."""
     since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
     by = {r["result"] or "没处理": r["n"] for r in db.q("SELECT result, COUNT(*) n FROM asks WHERE at>=? GROUP BY result", since)}
-    todo = db.q("SELECT n, at, topic_id, text, reply FROM asks WHERE result='记进待修' AND fixed IS NULL ORDER BY n")
-    return {"days": days, "asks": sum(by.values()), "by": by, "todo": todo}
+    todo = db.q("""SELECT a.n, a.at, a.topic_id, a.source_id, s.title source_title, a.text, a.reply FROM asks a
+                   LEFT JOIN sources s ON s.id=a.source_id WHERE a.result='记进待修' AND a.fixed IS NULL ORDER BY a.n""")
+    out = {"days": days, "asks": sum(by.values()), "by": by, "todo": todo}
+    sources = db.q("""SELECT a.source_id,s.title,COUNT(*) asks FROM asks a LEFT JOIN sources s ON s.id=a.source_id
+                      WHERE a.at>=? AND a.source_id IS NOT NULL GROUP BY a.source_id ORDER BY a.source_id""", since)
+    if sources:
+        out["sources"] = sources
+    return out
 
 
 def due() -> None:

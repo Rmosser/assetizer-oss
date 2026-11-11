@@ -71,13 +71,22 @@ async def guard(request: Request, call_next):
     """Loopback app: local Host via SSH tunnel, the LazyCat gateway with a logged-in user, or the public Host only
     with a valid Access JWT. Also blocks DNS rebinding and cross-site form posts."""
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
-    if host in LOCAL_HOSTS:
+    path = request.scope["path"]
+    if host == "notion-hook":
+        if (request.method != "POST" or path != "/api/notion/webhook"
+                or request.scope.get("raw_path", b"").split(b"?", 1)[0] != b"/api/notion/webhook"):
+            return JSONResponse({}, status_code=404)
+    elif path == "/api/notion/webhook" and host not in LOCAL_HOSTS:
+        return JSONResponse({}, status_code=404)
+    elif host in LOCAL_HOSTS:
         pass
     elif TRUST_LAZYCAT and host == LAZYCAT_SERVICE:
         forwarded = (request.headers.get("x-forwarded-host") or "").rsplit(":", 1)[0].lower()
         if not forwarded.endswith(".heiyu.space") or not request.headers.get("x-hc-user-id"):
             return JSONResponse({"error": "lazycat login required"}, status_code=403)
     elif PUBLIC_HOST and host == PUBLIC_HOST:
+        if path.startswith("/api/notion/hook"):
+            return JSONResponse({}, status_code=404)
         if not _access_ok(request.headers.get("cf-access-jwt-assertion")):
             return JSONResponse({"error": "access required"}, status_code=403)
     else:
@@ -156,9 +165,8 @@ def _issues(where: str = "1=1", *args) -> list[dict]:
             "production": last["production"] if last else None, "stage": last["stage"] if last else None,
             "error_class": last["error_class"] if last else None, "origin": last["origin"] if last else None,
             "retry": db.unj(last.get("retry"), None) if last else None,
-            # 库里可能已有 (a05), 旧页上有你的改动 (a07): what the 刊 asks about
+            # 库里可能已有 (a05): what the 刊 asks about
             "maybe": db.setting(f"maybe_have:{s['id']}") if s.get("delivery_reason") == "MAYBE_HAVE" else None,
-            "yours": db.setting(f"yours_on_page:{s['id']}") if s.get("delivery_reason") == "YOURS_ON_PAGE" else None,
             "latest_run": last["id"] if last else None, "updated_at": s["updated_at"],
             "ready_at": run["finished_at"] if run else None})
     return out
@@ -956,27 +964,6 @@ def maybe_have(sid: str, body: MaybeAnswer):
                 f"库里已有：{page.get('title') or ''}"[:500], page.get("url"), now(), sid)
     db.set_setting(f"maybe_have:{sid}", None)
     db.event("delivery", "照写，另写一页" if body.write else f"算已有：「{page.get('title') or ''}」", None)
-    return {"ok": True}
-
-
-class ReplaceAnswer(BaseModel):
-    replace: bool  # 换新页: the old page goes with what is on it (Notion's trash keeps it 30 days); else it stays
-
-
-@app.post("/api/sources/{sid}/replace")
-def replace_page(sid: str, body: ReplaceAnswer):
-    """旧页上有你的改动 (a07): replace the page all the same, or leave it as it is."""
-    s = db.one("SELECT delivery, delivery_reason FROM sources WHERE id=?", sid)
-    if not s:
-        raise HTTPException(404)
-    if s["delivery"] != "HELD" or s["delivery_reason"] != "YOURS_ON_PAGE":
-        raise HTTPException(409, "这一期没有在等你决定换不换页")
-    if body.replace:
-        db.set_setting(f"replace_anyway:{sid}", True)
-        db.exec("UPDATE sources SET delivery='STALE', delivery_reason=NULL, updated_at=? WHERE id=?", now(), sid)
-    else:  # the page stays as it is: in Notion, the version it was written from
-        db.exec("UPDATE sources SET delivery='DELIVERED', delivery_reason='旧页上有你的改动，保留旧页', updated_at=? WHERE id=?", now(), sid)
-    db.set_setting(f"yours_on_page:{sid}", None)
     return {"ok": True}
 
 
@@ -2377,6 +2364,10 @@ def notion_default(body: NotionDefault):
 
 
 # ------------------------------------------------------------------ 专题
+from .notion_hook import router as notion_hook_router  # noqa: E402
+
+app.include_router(notion_hook_router)
+
 from .topics import router as topics_router  # noqa: E402
 
 app.include_router(topics_router)

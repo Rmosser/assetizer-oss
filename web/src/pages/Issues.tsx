@@ -226,14 +226,13 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
   const held = (why: string) => issues.filter((i) => !i.tuning && i.delivery === "HELD" && i.delivery_reason === why);
   const partial = held("PARTIAL");  // a08: missing what a stage did not finish; written once a retry completes it
   const maybe = held("MAYBE_HAVE").filter((i) => i.maybe);  // a05: a page written by hand it may be
-  const yours = held("YOURS_ON_PAGE");  // a07: someone did something on the page it would replace
   const [busy, setBusy] = useState<string | null>(null);
   const act = async (id: string, path: string, body?: unknown) => {
     setBusy(id);
     try { await post(path, body); } finally { setBusy(null); reload(); }
   };
   const retry = (sid: string) => act(sid, `/api/sources/${encodeURIComponent(sid)}/deliver`);
-  if (!data.alerts.length && !broke.length && !gone.length && !failed.length && !partial.length && !maybe.length && !yours.length
+  if (!data.alerts.length && !broke.length && !gone.length && !failed.length && !partial.length && !maybe.length
     && !mapping.length && !data.decisions.length) return null;
   return (
     <section className="attn" aria-label="需要你">
@@ -301,28 +300,6 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
                       onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/maybe`, { write: false })}>算已有</button>
                     <button className="btn sm" disabled={busy === i.id}
                       onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/maybe`, { write: true })}>照写</button>
-                  </span></li>
-              ))}
-            </ul>
-          </div>
-        </div>
-      )}
-      {yours.length > 0 && (
-        <div className="attn-row">
-          <span className="mark" aria-hidden />
-          <div className="attn-t">
-            <h4>{yours.length} 期旧页上有你的改动</h4>
-            <ul className="attn-list">
-              {yours.map((i) => (
-                <li key={i.id}><a {...linkProps(`/issue/${encodeURIComponent(i.id)}`)}><IssueTitle title={headOf(i)} /></a>
-                  {i.notion_url
-                    ? <a className="muted" href={i.notion_url} target="_blank" rel="noreferrer">{(i.yours || []).join("、")} ↗</a>
-                    : <span className="muted">{(i.yours || []).join("、")}</span>}
-                  <span className="attn-acts">
-                    <button className="btn sm" disabled={busy === i.id}
-                      onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/replace`, { replace: false })}>留着旧页</button>
-                    <button className="btn sm" disabled={busy === i.id}
-                      onClick={() => act(i.id, `/api/sources/${encodeURIComponent(i.id)}/replace`, { replace: true })}>换新页</button>
                   </span></li>
               ))}
             </ul>

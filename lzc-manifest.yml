@@ -1,5 +1,4 @@
-# Assetizer on LazyCat (docs/lazycat-lpk-plan.md). One embedded runtime image, two services:
-# web (UI + API behind the LazyCat login) and worker (serial production). Both run the package content.
+# Assetizer on LazyCat. One embedded runtime image: web, worker and the optional Notion hook-tunnel.
 application:
   subdomain: assetizer
   # The worker produces with nobody looking: start with the box and after an install, and never idle-sleep.
@@ -8,6 +7,15 @@ application:
     - /=http://web:8770
 
 services:
+  hook-tunnel:
+    image: embed:runtime
+    binds:
+      - /lzcapp/var/assetizer/hook-tunnel:/ingress
+    # No proxy environment: the connector goes directly to Cloudflare. It idles without its token file.
+    command: sh /lzcapp/pkg/content/scripts/lzc/hook-tunnel.sh
+    mem_limit: 128m
+    # No network healthcheck: an optional tunnel failure must never hold the whole app behind the gateway.
+
   web:
     image: embed:runtime
     binds:

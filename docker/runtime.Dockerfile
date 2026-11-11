@@ -9,12 +9,21 @@ ARG DENO_SHA256=394f07f4da2bebe6ce6f1e7ce0fa16429b29b08c35e3fac3fe25972676dff4b2
 # 不用 RCLONE_ 开头：rclone 把 RCLONE_* 环境变量当参数读（RCLONE_VERSION 会被当成 --version 的值）。
 ARG PINNED_RCLONE_VERSION=1.75.2
 ARG PINNED_RCLONE_SHA256=349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702
+ARG CLOUDFLARED_VERSION=2026.10.4
+ARG CLOUDFLARED_SHA256=ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42
 
 # Runtime startup must not reach package repositories: everything it needs is installed here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg tini ca-certificates curl tzdata procps unzip \
     && rm -rf /var/lib/apt/lists/* \
     && ffmpeg -hide_banner -filters | grep -q " subtitles "
+
+# Optional Notion webhook connector: fixed release, verified while building, never downloaded at startup.
+RUN curl -fsSL --retry 3 -o /tmp/cloudflared \
+        "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
+    && echo "${CLOUDFLARED_SHA256}  /tmp/cloudflared" | sha256sum -c - \
+    && install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared \
+    && rm /tmp/cloudflared
 
 # yt-dlp solves YouTube's JS challenges with deno.
 RUN curl -fsSL -o /tmp/deno.zip \

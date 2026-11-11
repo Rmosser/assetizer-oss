@@ -1686,6 +1686,7 @@ a.chip:hover { text-decoration: underline; }
 .st-block .diskbar { margin-top: 0; }
 .st-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--s2); padding: var(--s3) 0; }
 .st-hint { margin-right: auto; font: 13px/1.5 var(--sans); color: var(--ink-2); }
+.st-until { font: 13px/1.5 var(--sans); color: var(--ink-2); }   /* 批注推送: a 重新接收 window open, in place of its button */
 .st-fail { margin: 0; padding: var(--s3) 0; border-bottom: 1px solid var(--rule); font: 13.5px/1.65 var(--sans); color: var(--zhu-ink); overflow-wrap: anywhere; }
 .st-fail.mild { color: var(--ink-2); }
 .st-alt { margin: 0; }
@@ -1778,6 +1779,7 @@ a.chip:hover { text-decoration: underline; }
   .gd-grp label { min-height: 48px; }
   .gd-grp input { width: 20px; height: 20px; }
 }
+.st-v .cmd { margin-top: 0; }
 
 /* 自动重试: what it has come to beside the name, the way back to the default against the stepper */
 .st-retry { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s3); }

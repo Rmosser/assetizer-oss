@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config, db, knobs
-from ..llm import LLM
+from ..llm import LLM, call_recorder
 from ..providers import stage_key
 from ..util import now, read_json, write_json
 
@@ -61,16 +61,7 @@ class RunContext:
         self.source = db.one("SELECT * FROM sources WHERE id=?", self.source["id"])
 
     def llm(self) -> LLM:
-        def record(r: dict) -> None:
-            u = r.get("usage") or {}
-            db.exec("""INSERT INTO model_calls(run_id, stage, attempt, conversation_id, model, agy_version, status, error_class,
-                       wall_seconds, input_tokens, output_tokens, thinking_tokens, peak_rss_kib, view_files, created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    self.id, r.get("stage"), r.get("attempt"), r.get("conversation_id"), r.get("actual_model"),
-                    r.get("agy_version"), r.get("status"), r.get("error_class"), r.get("wall_seconds"),
-                    u.get("input_tokens"), u.get("output_tokens"), u.get("thinking_tokens"), r.get("peak_rss_kib"),
-                    r.get("view_file_count"), now())
-        return LLM(recorder=record, session=self.id, watch=self)
+        return LLM(recorder=call_recorder(self.id), session=self.id, watch=self)
 
     # the retries of its model calls (llm.LLM, design §R6-10) ------------------
     def retrying(self, state: dict) -> bool:

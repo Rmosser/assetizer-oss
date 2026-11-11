@@ -62,6 +62,7 @@ class FakeNotion:
         self.can = {"read", "insert"}                # the integration's comment capabilities
         self.calls: list[tuple] = []
         self.down = None  # a status every call answers with
+        self.bot = BOT
         self._t = itertools.count(1)
 
     def say(self, on, text, by=YOU, thread=None):
@@ -84,7 +85,41 @@ class FakeNotion:
         from assetizer.notion.client import NotionError
         raise NotionError(status, body)
 
-    def _block(self, b, by=BOT):
+    @staticmethod
+    def _rich(pieces):
+        """Notion fills defaults and coalesces adjacent runs with the same kind, link and annotations."""
+        out = []
+        for piece in pieces:
+            x = json.loads(json.dumps(piece))
+            x.setdefault("type", "text")
+            x["plain_text"] = x.get("plain_text", (x.get("text") or {}).get("content", (x.get("equation") or {}).get("expression", "")))
+            x["href"] = x.get("href") or ((x.get("text") or {}).get("link") or {}).get("url")
+            x["annotations"] = {"bold": False, "italic": False, "strikethrough": False, "underline": False,
+                                "code": False, "color": "default", **x.get("annotations", {})}
+            if out and all(out[-1][k] == x[k] for k in ("type", "href", "annotations")):
+                out[-1]["plain_text"] += x["plain_text"]
+                if x["type"] == "text":
+                    out[-1]["text"]["content"] = out[-1]["plain_text"]
+            else:
+                out.append(x)
+        return out
+
+    def _page_of(self, bid):
+        seen = set()
+        while bid not in self.pages and bid not in seen:
+            seen.add(bid)
+            bid = next((parent for parent, bs in self.kids.items() if any(b["id"] == bid for b in bs)), None)
+        return self.pages.get(bid, {})
+
+    def _live(self, bid, reading=False):
+        pg = self._page_of(bid)
+        if not pg and bid not in self.dbs:
+            self._err(404, '{"message": "Could not find block"}')
+        if pg.get("archived") or pg.get("in_trash"):
+            self._err(404 if reading else 400, '{"message": "Can\'t edit block that is archived or has an archived ancestor."}')
+
+    def _block(self, b, by=None):
+        by = by or self.bot
         bid = next(self.ids)
         kids = (b.get(b["type"]) or {}).pop("children", None)
         nb = {**b, "id": bid, "created_by": {"id": by}, "last_edited_by": {"id": by}, "has_children": bool(kids)}
@@ -92,8 +127,21 @@ class FakeNotion:
             self.kids[bid] = [self._block(k, by) for k in kids]
         return nb
 
-    def me(self):
-        return {"id": BOT}
+    def _read_block(self, b):
+        # The fixture keeps request bodies for direct test inspection; API responses are canonical Notion values.
+        b = json.loads(json.dumps(b))
+        body = b.get(b["type"]) or {}
+        for field in ("rich_text", "caption"):
+            if field in body:
+                body[field] = self._rich(body[field])
+        if "cells" in body:
+            body["cells"] = [self._rich(cell) for cell in body["cells"]]
+        b["has_children"] = bool(self.kids.get(b["id"]))
+        return b
+
+    def me(self, **kw):
+        self.calls.append(("GET", "/users/me"))
+        return {"id": self.bot}
 
     def search(self, query="", kind="database", page_size=20):
         if self.down:
@@ -107,16 +155,19 @@ class FakeNotion:
             self._err(self.down)
         if pid not in self.pages:
             self._err(404, '{"message": "Could not find page"}')
-        return json.loads(json.dumps(self.pages[pid]))
+        got = json.loads(json.dumps(self.pages[pid]))
+        got.setdefault("in_trash", bool(got.get("archived")))
+        return got
 
     def create_page(self, parent, title, icon=None, children=None):
         self.calls.append(("POST", "/pages", parent))
         if self.down:
             self._err(self.down)
+        self._live(parent)
         if self.pages.get(parent, {}).get("archived"):
             self._err(400, '{"message": "Can\'t edit block that is archived."}')
         pid = next(self.ids)
-        self.pages[pid] = {"id": pid, "parent": {"type": "page_id", "page_id": parent}, "created_by": {"id": BOT},
+        self.pages[pid] = {"id": pid, "parent": {"type": "page_id", "page_id": parent}, "created_by": {"id": self.bot},
                            "properties": {"title": {"id": "title", "type": "title", "title": [{"plain_text": title}]}}}
         assert _rules(children or []) <= 1000
         self.kids[pid] = [self._block(b) for b in json.loads(json.dumps(children or []))]
@@ -124,25 +175,30 @@ class FakeNotion:
 
     def children(self, bid):
         self.calls.append(("GET", f"/blocks/{bid}/children"))
-        return [{**b, "has_children": bool(self.kids.get(b["id"]))} for b in self.kids.get(bid, [])]
+        self._live(bid, reading=True)
+        return [self._read_block(b) for b in self.kids.get(bid, [])]
 
-    def append(self, bid, children, after=None):
+    def append(self, bid, children, after=None, *, position=None):
         self.calls.append(("PATCH", f"/blocks/{bid}/children", len(children), after))
         if self.down:
             self._err(self.down)
+        self._live(bid)
         assert _rules(children) <= 1000
         made = [self._block(b) for b in json.loads(json.dumps(children))]
         kids = self.kids.setdefault(bid, [])
-        if after:
-            at = next(i for i, b in enumerate(kids) if b["id"] == after)
-            kids[at + 1:at + 1] = made
+        if after or position:
+            at = next(i + 1 for i, b in enumerate(kids) if b["id"] == after) if after else 0
+            assert after or position == {"type": "start"}
+            kids[at:at] = made
+            return {"results": [self._read_block(b) for b in kids[at:]]}
         else:
             kids.extend(made)
-        return {"results": made}
+        return {"results": [self._read_block(b) for b in made]}
 
     def database(self, page_id, title, properties):
         """An inline database: its block goes at the end of the page."""
         self.calls.append(("POST", "/databases", page_id))
+        self._live(page_id)
         did = next(self.ids)
         self.dbs[did] = {"id": did, "title": [{"plain_text": title}], "created_by": {"id": BOT},
                          "parent": {"type": "page_id", "page_id": page_id},
@@ -169,22 +225,29 @@ class FakeNotion:
         if method == "GET" and path.startswith("/databases/"):
             d = self.dbs.get(path.split("/")[2])
             return json.loads(json.dumps(d)) if d else self._err(404)
+        if method == "GET" and path.startswith("/blocks/"):
+            bid = path.split("/")[2]
+            self._live(bid, reading=True)
+            return self._read_block(next(b for kids in self.kids.values() for b in kids if b["id"] == bid))
         if method == "POST" and path == "/pages":
+            self._live(body["parent"]["database_id"])
             pid = next(self.ids)
             schema = self.dbs[body["parent"]["database_id"]]["properties"]
             props = {k: {"id": schema[k]["id"], "type": schema[k]["type"], **v} for k, v in body["properties"].items()}
-            self.pages[pid] = {"id": pid, "parent": {"type": "database_id", **body["parent"]}, "created_by": {"id": BOT},
+            self.pages[pid] = {"id": pid, "parent": {"type": "database_id", **body["parent"]}, "created_by": {"id": self.bot},
                                "properties": props}
             assert _rules(body.get("children") or []) <= 1000
             self.kids[pid] = [self._block(b) for b in json.loads(json.dumps(body.get("children") or []))]
             return json.loads(json.dumps(self.pages[pid]))
         if method == "PATCH" and path.startswith("/pages/"):
+            self._live(path.split("/")[2])
             pg = self.pages[path.split("/")[2]]
             for k, v in body.get("properties", {}).items():
                 pg["properties"][k] = {**pg["properties"].get(k, {"id": k}), **v}
             return json.loads(json.dumps(pg))
         if method == "DELETE" and path.startswith("/blocks/"):
             bid = path.split("/")[2]
+            self._live(bid)
             for k in self.kids.values():
                 k[:] = [b for b in k if b["id"] != bid]
             return {}
@@ -591,34 +654,6 @@ def test_the_whole_batch_is_written_then_told_and_new_topics_take_the_default(fa
     db.exec("UPDATE topics SET synth_of=NULL, synth_state='QUEUED', notion_state=NULL WHERE id=1")
     run.put_together(1)
     assert db.one("SELECT notion_state FROM topics WHERE id=1")["notion_state"] is None and len(told) == 1
-
-
-def test_the_page_edit_check_looks_inside_folds(home):
-    from assetizer import delivery
-    n = FakeNotion()
-    pid = n.create_page(RESEARCH, "x", children=[{"type": "toggle", "toggle": {"rich_text": [], "children": [
-        {"type": "paragraph", "paragraph": {"rich_text": []}}]}}])["id"]
-    assert delivery._yours(n, "s", pid) == []
-    inner = n.kids[n.kids[pid][0]["id"]][0]
-    inner["last_edited_by"] = {"id": YOU}
-    assert delivery._yours(n, "s", pid) == ["改了段落"]
-
-
-def test_the_page_edit_check_sees_comments_on_blocks(home):
-    # Notion lists a page's comments without those on its blocks (checked 2026-11-10): a comment on a paragraph, or on
-    # one inside a fold, is asked for block by block; one of 课代表's own is not yours; none readable is taken as none
-    from assetizer import delivery
-    n = FakeNotion()
-    pid = n.create_page(RESEARCH, "x", children=[{"type": "paragraph", "paragraph": {"rich_text": []}},
-                                                 {"type": "toggle", "toggle": {"rich_text": [], "children": [
-                                                     {"type": "paragraph", "paragraph": {"rich_text": []}}]}}])["id"]
-    inner = n.kids[n.kids[pid][1]["id"]][0]["id"]
-    n.say(n.kids[pid][0]["id"], "课代表回的", BOT)
-    assert delivery._yours(n, "s", pid) == []
-    n.say(inner, "这句不对")
-    assert delivery._yours(n, "s", pid) == ["加了评论"]
-    n.can.discard("read")
-    assert delivery._yours(n, "s", pid) == []
 
 
 def test_a_time_next_to_a_video_s_citation_is_that_video_s(fake):

@@ -100,7 +100,7 @@ def safety_fallback(stage: str) -> tuple[str, object] | None:
 def routes() -> list[str]:
     """The default route and every one a stage is sent to, resolved, each once."""
     from .. import db
-    names = [db.setting("llm_provider") or "agy"] + list((db.setting("stage_providers") or {}).values())
+    names = [db.setting("llm_provider") or "agy"] + [v for k, v in (db.setting("stage_providers") or {}).items() if k != "comments"]
     return list(dict.fromkeys(resolve(n) for n in names))
 
 

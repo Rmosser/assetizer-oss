@@ -187,8 +187,8 @@ export const DELIVERY: Record<string, string> = {
   STALE: "待更新", FAILED: "交付失败", REGISTERED: "库里已有", HELD: "等跑完",
 };
 /** why a delivery is held, when it is not for a run to end: a partial version (a08), a page in the library it may be
- *  (a05), what is yours on the page it would replace (a07) */
-export const HELD: Record<string, string> = { PARTIAL: "待补齐", MAYBE_HAVE: "待确认", YOURS_ON_PAGE: "待确认" };
+ *  (a05) */
+export const HELD: Record<string, string> = { PARTIAL: "待补齐", MAYBE_HAVE: "待确认" };
 /** a delivery state in words */
 export const deliveryLabel = (d: string, reason?: string | null) => (d === "HELD" && reason && HELD[reason]) || DELIVERY[d] || d;
 

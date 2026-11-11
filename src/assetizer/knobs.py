@@ -19,8 +19,8 @@ from .providers import LEVELS, resolve
 PROVIDERS = ("agy", "magpie", "tuzi")  # tuzi stays accepted for boxes still on it; the page offers agy's and magpie's models
 MODEL_ID = re.compile(r"[\w.\-]+/[\w.\-@:+ /]{1,120}")  # a model of the gateway: codex/gpt-6.1-terra, grok/grok-4.7@500k, group/<id>
 AGY_ID = re.compile(r"agy/gemini-[\w.\-]{1,100}")  # one of agy's: goes on its command line
-STAGES = ("understanding", "merge", "knowledge", "article", "selection", "boundary", "review")  # providers.stage_key
-STAGE_NAMES = dict(zip(STAGES, ("理解", "合并", "知识", "文章", "选片", "边界", "预审")))
+STAGES = ("understanding", "merge", "knowledge", "article", "selection", "boundary", "review", "comments")  # providers.stage_key
+STAGE_NAMES = dict(zip(STAGES, ("理解", "合并", "知识", "文章", "选片", "边界", "预审", "批注")))
 VIDEO_STAGES = ("understanding", "boundary")
 # 专题 (topics/): its own four steps, routed apart from production (setting `topic_providers`), so their quotas, logins and
 # models never pause the channels' queue or hold back 补录 (providers.routes leaves them out)
@@ -62,6 +62,7 @@ KNOBS: dict[str, Knob] = {
     "retry_counts": Knob("自动重试", "retries", 0, RETRY_MAX, RETRY_DEFAULTS),  # stored: only what differs from the defaults
     "safety_fallback": Knob("还被拦就换", "fallback", default=None),  # None: where 知识 goes; "off": stay; else a route
     "asr_url": Knob("GPU 转写地址", "url", default=None),
+    "notion_hook_url": Knob("Notion 批注推送地址", "url", default=None),
     "retention_days": Knob("原片保留（天）", "int", 1, 60, None),  # None: ASSETIZER_RETENTION_DAYS, else 7
     "delivered_retention_days": Knob("交付后原片保留（天）", "int", 0, 30, 2),
     "playback_keep_days": Knob("低清版保留（天）", "int", 1, 60, 14),  # playback.KEEP_DAYS
@@ -292,6 +293,18 @@ def _check(key: str, v: Any) -> Any:
         if v != NO_FALLBACK and not route_ok(v):
             raise KnobError(key, f"{k.label}的模型不认识")
         return v
+    if key == "notion_hook_url":
+        from urllib.parse import urlsplit
+        if v == "":
+            return None
+        try:
+            u = urlsplit(v.strip()) if isinstance(v, str) else None
+            if not u or u.scheme != "https" or not u.hostname or u.username or u.password or u.query or u.fragment or u.path != "/api/notion/webhook":
+                raise ValueError
+            u.port  # validate a malformed port too
+        except ValueError:
+            raise KnobError(key, f"{k.label}要像 https://notion-hook-dev.example.com/api/notion/webhook 这样") from None
+        return v.strip()
     if not isinstance(v, str) or not _URL.fullmatch(v.strip()):
         raise KnobError(key, f"{k.label}要像 http://192.168.1.50:8790 这样")
     return v.strip().rstrip("/") or None

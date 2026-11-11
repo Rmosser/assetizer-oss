@@ -147,10 +147,8 @@ FRAME_IN_UNIT = re.compile(r":(qh|q\d+|div)$")  # 原话参考 and the rule the 
 def body(source: dict, run_id: str, cfg: dict) -> list[dict]:
     """The page body delivery would write, each block tagged with where it comes from:
     origin unit / intro / outro (the article), frame (the page template) or tail (run info, 校注)."""
-    from . import delivery, templates
-    tpl = cfg.get("template") or "default"
-    plan = templates.PLANS[tpl](source, run_id, cfg) if tpl != "default" else delivery._default_plan(source, run_id)
-    plan += delivery._tail(source, run_id)
+    from . import delivery
+    plan = delivery.page_plan(source, run_id, cfg)
     secs = {r["id"]: (r["kind"], db.unj(r["unit_ids"], []) or [])
             for r in db.q("SELECT id, kind, unit_ids FROM sections WHERE run_id=?", run_id)}
     out = []

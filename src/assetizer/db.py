@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS sources (
   notion_page_id TEXT,
   notion_url TEXT,
   notion_synced_run TEXT,
+  notion_synced_template TEXT,
   notion_database_id TEXT,                             -- where notion_page_id lives (channel targets can move)
   notion_icon TEXT,                                    -- the channel avatar that page carries (channel_icons)
   package_path TEXT,
@@ -290,6 +291,8 @@ CREATE TABLE IF NOT EXISTS notion_blocks (
   block_key TEXT NOT NULL,
   block_id TEXT NOT NULL,
   hash TEXT NOT NULL,
+  run_id TEXT,
+  template TEXT,
   PRIMARY KEY (source_id, block_key)
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -345,6 +348,23 @@ CREATE TABLE IF NOT EXISTS topics (                  -- 专题：一个问题和
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS notion_events (           -- webhook metadata only: never a body, signature or token
+  id TEXT PRIMARY KEY,
+  at TEXT NOT NULL,
+  ts TEXT,
+  type TEXT NOT NULL,
+  page TEXT,
+  parent TEXT,
+  parent_type TEXT,
+  entity TEXT,
+  bots TEXT NOT NULL,                                 -- JSON: original authors [{id, type}]
+  done TEXT,
+  outcome TEXT,                                      -- topic | row | channel | ours | unknown | error
+  topic_id INTEGER,
+  tries INTEGER NOT NULL DEFAULT 0,
+  retry_at TEXT
+);
+CREATE INDEX IF NOT EXISTS notion_events_pending ON notion_events(at) WHERE done IS NULL;
 CREATE TABLE IF NOT EXISTS topic_comments (          -- Notion 页上的批注：用户的意见交给下一次综合，在原讨论串里回复（design §R8-13）
   topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
   id TEXT NOT NULL,                                    -- Notion 的评论 id
@@ -369,6 +389,7 @@ CREATE TABLE IF NOT EXISTS asks (                    -- 点名课代表的批注
   id TEXT NOT NULL UNIQUE,                             -- Notion 的评论 id
   at TEXT NOT NULL,                                    -- 课代表读到它的时候
   topic_id INTEGER,                                    -- 哪个专题（专题删了也留着：这是用量）
+  source_id TEXT,                                      -- 哪一期频道页（与专题共用编号）
   discussion TEXT NOT NULL,
   text TEXT NOT NULL,
   result TEXT,                                         -- 已改 | 没改 | 已答 | 记进待修（NULL：还没处理）
@@ -377,6 +398,90 @@ CREATE TABLE IF NOT EXISTS asks (                    -- 点名课代表的批注
   fixed TEXT,                                          -- 记进待修的：在哪一版修好（开发用 asks --fixed 记）
   fixed_told TEXT                                      -- 「已修」回复发进 Notion 的时候
 );
+CREATE TABLE IF NOT EXISTS issue_comments (          -- 频道页的定点读；不做整页扫描（design §R3-12）
+  source_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  discussion TEXT NOT NULL,
+  page TEXT NOT NULL,
+  block TEXT,
+  plan_key TEXT,
+  quote TEXT,
+  kind TEXT,
+  owned INTEGER NOT NULL DEFAULT 0,                   -- 被批注块的作者是认过的课代表身份
+  depth INTEGER NOT NULL DEFAULT 0,                   -- 到计划块的父层数（0、1、2）
+  text TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  ours INTEGER NOT NULL DEFAULT 0,
+  asked INTEGER NOT NULL DEFAULT 0,
+  created TEXT,
+  touched TEXT NOT NULL,                              -- 新话或编辑的时间，QUIET 用它
+  noticed TEXT NOT NULL,                              -- 读到新话的时间：失败后新到的事件可重新处理
+  open INTEGER NOT NULL DEFAULT 1,
+  seen INTEGER,                                      -- issue_batches.id
+  PRIMARY KEY (source_id, id)
+);
+CREATE INDEX IF NOT EXISTS issue_comments_page ON issue_comments(source_id, page, open);
+CREATE INDEX IF NOT EXISTS issue_comments_asked ON issue_comments(source_id, page, discussion, asked, open);
+CREATE TABLE IF NOT EXISTS issue_positions (         -- one durable identity per discussion; never replace its original with a corrected quote
+  source_id TEXT NOT NULL,
+  discussion TEXT NOT NULL,
+  run_id TEXT,
+  template TEXT NOT NULL,
+  plan_key TEXT NOT NULL,
+  part TEXT,                                         -- NULL until the descendant is resolved
+  section_id TEXT NOT NULL,
+  original TEXT,
+  PRIMARY KEY (source_id, discussion)
+);
+CREATE TABLE IF NOT EXISTS issue_state (
+  source_id TEXT PRIMARY KEY,
+  failed_at TEXT,
+  error TEXT                                         -- NO_READ | NO_INSERT | FAILED（不存模型原文或异常）
+);
+CREATE TABLE IF NOT EXISTS issue_batches (           -- 冻结输入和模型结果；恢复时不拿新话改旧请求
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  page TEXT NOT NULL,
+  input TEXT NOT NULL,
+  output TEXT,
+  state TEXT NOT NULL DEFAULT 'MODEL',                -- MODEL | APPLY | DONE | FAILED
+  apply_error INTEGER NOT NULL DEFAULT 0,             -- accepted output: warn once, retry the transaction
+  created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS issue_fixes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  plan_key TEXT NOT NULL,
+  part TEXT NOT NULL,                                -- JSON child path; position is only a hint
+  original TEXT NOT NULL,                            -- plain text in the uncorrected template
+  original_hash TEXT NOT NULL,
+  template TEXT NOT NULL,
+  text TEXT NOT NULL,                                -- inline markdown, never a whole block
+  section_id TEXT NOT NULL,
+  readback INTEGER NOT NULL DEFAULT 0,                -- actually included in the latest completed delivery
+  ask_id TEXT NOT NULL,
+  created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS issue_replies (
+  batch_id INTEGER NOT NULL,
+  discussion TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  page TEXT NOT NULL,
+  head TEXT NOT NULL,
+  body TEXT NOT NULL,
+  cids TEXT NOT NULL,                                -- 本次接纳的评论 id/hash
+  fix_id INTEGER,                                   -- 等这条改正的交付读回；NULL 可立即回复
+  version INTEGER NOT NULL DEFAULT 0,                -- CAS guards both claim and completion against concurrent invalidation
+  void_of INTEGER,                                  -- correction invalidation notice, unique per thread
+  ready INTEGER NOT NULL DEFAULT 0,
+  sending INTEGER NOT NULL DEFAULT 0,                -- POST 前记账；中断后先定点读回去重
+  tried_at TEXT,
+  done TEXT,
+  PRIMARY KEY (batch_id, discussion)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS issue_void_once ON issue_replies(void_of, discussion) WHERE void_of IS NOT NULL;
 CREATE TABLE IF NOT EXISTS topic_versions (          -- 每次综合留一版：回答底部的版本记录，下一次综合拿上一版对照
   topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
   n INTEGER NOT NULL,
@@ -521,7 +626,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_locked(conn: sqlite3.Connection) -> None:
+    block_cols = {r[1] for r in conn.execute("PRAGMA table_info(notion_blocks)")}
+    for name in ("run_id", "template"):
+        if name not in block_cols:
+            conn.execute(f"ALTER TABLE notion_blocks ADD COLUMN {name} TEXT")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(sources)")}
+    if "notion_synced_template" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN notion_synced_template TEXT")
     if "headline" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN headline TEXT")
     if "delivered_at" not in cols:
@@ -543,6 +654,9 @@ def _migrate_locked(conn: sqlite3.Connection) -> None:
         r = conn.execute("SELECT value FROM settings WHERE key='notion_database_id'").fetchone()
         if r and json.loads(r[0]):  # pages delivered so far live in the Assetizer database
             conn.execute("UPDATE sources SET notion_database_id=? WHERE notion_page_id IS NOT NULL", (json.loads(r[0]),))
+    # 2026-11-10: channel pages sync in place; old whole-page replacement decisions are obsolete.
+    conn.execute("UPDATE sources SET delivery='STALE', delivery_reason=NULL WHERE delivery='HELD' AND delivery_reason='YOURS_ON_PAGE'")
+    conn.execute("DELETE FROM settings WHERE key GLOB 'replace_anyway:*' OR key GLOB 'yours_on_page:*'")
     runs = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
     if "origin" not in runs:
         conn.execute("ALTER TABLE runs ADD COLUMN origin TEXT")
@@ -573,6 +687,12 @@ def _migrate_locked(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE topics ADD COLUMN {c} TEXT")
     if "asked" not in {r[1] for r in conn.execute("PRAGMA table_info(topic_comments)")}:
         conn.execute("ALTER TABLE topic_comments ADD COLUMN asked INTEGER NOT NULL DEFAULT 0")
+    if "source_id" not in {r[1] for r in conn.execute("PRAGMA table_info(asks)")}:
+        conn.execute("ALTER TABLE asks ADD COLUMN source_id TEXT")
+    ecols = {r[1] for r in conn.execute("PRAGMA table_info(notion_events)")}
+    for column, kind in {"tries": "INTEGER NOT NULL DEFAULT 0", "retry_at": "TEXT"}.items():
+        if column not in ecols:
+            conn.execute(f"ALTER TABLE notion_events ADD COLUMN {column} {kind}")
     # 0.4.41: a page someone changed is written around what they wrote, not held (留着 / 另写一页 are gone); a page held
     # is as it was, its 更新 on the topic's page
     conn.execute("UPDATE topics SET notion_state='DONE' WHERE notion_state='HELD'")

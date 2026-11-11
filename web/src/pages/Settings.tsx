@@ -1,13 +1,13 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { post } from "../api";
-import { boxLines, cookieState, gdriveLine, type Line, MAGPIE_DOWN, MAIN_STEPS, quotaLefts, STEP } from "../box";
+import { boxLines, cookieState, gdriveLine, type Line, MAGPIE_DOWN, MAIN_STEPS, quotaLefts, ROUTE_STEPS, STEP } from "../box";
 import { openAgyLogin } from "../components/AgyLogin";
 import { BackfillPanel } from "../components/BackfillPanel";
 import { Cmd } from "../components/Cmd";
 import { CookieCloudSheet } from "../components/CookieCloud";
 import { GDriveRows, TRASH_HASH } from "../components/GDrive";
 import { DefaultPlace } from "../components/topic/Notion";
-import { AsrForm, DiskRows, NotionRows, ParallelRows, Row, type Save, Stepper, TelegramForm, useKnobs } from "../components/Knobs";
+import { AsrForm, DiskRows, NotionHook, NotionRows, ParallelRows, Row, type Save, Stepper, TelegramForm, useKnobs } from "../components/Knobs";
 import { type Left, lostRoutes, NO_ROUTE, RouteCells, RoutePicker, TopicRouteCells } from "../components/Routes";
 import { Fault, Stale, Unroll } from "../components/States";
 import { useLeaving, useMedia, usePoll } from "../hooks";
@@ -299,7 +299,7 @@ export default function Settings() {
   const models: any[] = [...(data.agy_models || []), ...(data.magpie?.state?.models || [])];
   const routes = { default: data.providers?.default || "agy", stages: data.providers?.stages || {} };
   const missing: string[] = data.magpie?.missing || [];
-  const lost = lostRoutes(MAIN_STEPS, routes, models, missing);
+  const lost = lostRoutes(ROUTE_STEPS, routes, models, missing);
   const lines: Record<string, Line | undefined> = { ...boxLines(data), gdrive: gdriveLine(data.gdrive), models: lost ? { lamp: "bad", value: `${lost} 处要换` } : undefined };
   const bad = ALL.filter((s) => lines[s.k]?.lamp === "bad");
   const lefts = quotaLefts(data);
@@ -342,7 +342,7 @@ export default function Settings() {
         <div className="st-main">
           <Sec id="models" title="模型分工" line={lines.models}>
             <div className="st-routes">
-              <RouteCells kn={kn} steps={MAIN_STEPS} label={STEP} save={save} models={models} lefts={lefts} routes={routes} missing={missing} />
+              <RouteCells kn={kn} steps={ROUTE_STEPS} label={STEP} save={save} models={models} lefts={lefts} routes={routes} missing={missing} />
             </div>
           </Sec>
           <Sec id="retry" title="自动重试">
@@ -371,7 +371,7 @@ export default function Settings() {
           <Sec id="agy" title="Gemini" line={lines.agy}><Gemini data={data} /></Sec>
           <Sec id="magpie" title="Magpie" line={lines.magpie}><Magpie data={data} lamp={lines.magpie!.lamp} /></Sec>
           <Sec id="youtube" title="YouTube" line={lines.youtube}><Youtube data={data} lamp={lines.youtube!.lamp} onCc={() => setCc(true)} /></Sec>
-          <Sec id="notion" title="Notion" line={lines.notion}><NotionRows n={data.notion} reload={reload} say={say} /></Sec>
+          <Sec id="notion" title="Notion" line={lines.notion}><NotionRows n={data.notion} reload={reload} say={say} /><NotionHook save={save} say={say} /></Sec>
           <Sec id="asr" title="GPU 转写" line={lines.asr}><AsrForm a={data.asr} reload={reload} say={say} /></Sec>
           <Sec id="notify" title="通知" line={lines.notify}><TelegramForm tg={data.telegram} save={save} reload={reload} say={say} /></Sec>
         </div>

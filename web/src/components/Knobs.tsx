@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { post } from "../api";
+import { get, HttpError, post } from "../api";
 import { asrCode } from "../box";
-import { ago } from "../util";
+import { usePoll } from "../hooks";
+import { ago, at8 } from "../util";
+import { Cmd } from "./Cmd";
 
 /** The box's settings (knobs.py). A control saves on its own, a moment after the last click; true: it was saved. A form with
  *  text in it saves when asked to, so half an address is never stored. Either way the page says how it went. */
@@ -230,5 +232,121 @@ export function NotionRows({ n, reload, say }: { n: any; reload: () => void; say
       )}
       {n.asks && <Row name="批注">近 30 天点名课代表 {n.asks.n} 次{n.asks.todo ? `，待修 ${n.asks.todo} 条` : ""}</Row>}
     </>
+  );
+}
+
+type Hook = {
+  url: string | null; token: "none" | "set"; token_at: string | null; rearm_until: string | null; tunnel: "off" | "up" | "down";
+  events: { total: number; rejected: number; rejected_at: string | null; last_at: string | null; last_type: string | null; signed_at: string | null };
+};
+const HOOK = "/api/notion/hook";
+
+/** where the hook stands, the first thing in the way first */
+function hookLine(h: Hook): { lamp: string; text: string } {
+  if (h.tunnel === "off") return { lamp: "idle", text: "隧道没开" };
+  if (h.tunnel === "down") return { lamp: "bad", text: "隧道连不上" };
+  if (h.token === "none") return { lamp: "idle", text: "等 Notion 发验证令牌" };
+  if (!h.events.signed_at) return { lamp: "warn", text: "令牌已到 · 验证后写一条批注试试" };  // Verify sends nothing: the first comment does
+  return { lamp: "ok", text: h.events.last_at ? `已通 · ${ago(h.events.last_at)}` : "已通" };
+}
+
+/** Notion 批注推送: Notion posts new comments to the box through the tunnel. Its address goes into the integration's
+ *  Webhooks; the verification token Notion then sends goes back into its Verify, copied from here and never shown.
+ *  Read every 10 s while something is on its way (a token, the first signed event, a 重新接收 window open), else once. */
+export function NotionHook({ save, say }: { save: Save; say: (s: Said) => void }) {
+  const [every, setEvery] = useState(0);
+  const { data: h, error, reload, setData } = usePoll<Hook>(HOOK, every);
+  const [url, setUrl] = useState<string | null>(null);  // the address being typed; null: not being changed
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const open = h?.rearm_until != null;  // the box says null once the window is over
+  const waiting = !!h && (open || (h.tunnel !== "off" && (h.token === "none" || !h.events.signed_at)));
+  useEffect(() => setEvery(waiting ? 10000 : 0), [waiting]);
+  useEffect(() => {
+    addEventListener("az:refresh", reload);
+    return () => removeEventListener("az:refresh", reload);
+  }, [reload]);
+  const fail = (text: string) => say({ text, bad: true });
+  const said = (e: unknown, other: string) => e instanceof HttpError || (e as Error)?.name === "AuthExpired" ? (e as Error).message : other;
+
+  if (!h) {
+    return (
+      <>
+        <h3 className="st-group">批注推送</h3>
+        <Row name="状态">{error ? <span className="zhu" title={error.message}>读不到</span> : "…"}</Row>
+      </>
+    );
+  }
+
+  const copyToken = async () => {
+    // asked for only now and handed straight to the clipboard: not kept, not shown, not logged
+    const token = get<{ token: string }>(`${HOOK}/token`).then((r) => r.token);
+    try {
+      try {
+        // Safari lets a page write the clipboard only within the click: give it the answer still on its way
+        const blob = token.then((t) => new Blob([t], { type: "text/plain" }));
+        blob.catch(() => {});
+        await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+      } catch {
+        await navigator.clipboard.writeText(await token);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      fail(e instanceof HttpError && e.status === 404 ? "还没收到令牌" : said(e, "复制失败"));
+    }
+  };
+  const rearm = async () => {
+    setBusy(true);
+    try {
+      const r = await post<{ rearm_until: string }>(`${HOOK}/rearm`, {});
+      setData((d) => (d ? { ...d, rearm_until: r.rearm_until } : d));
+      reload();
+    } catch (e) { fail(said(e, "没开成")); }
+    setBusy(false);
+  };
+  const editing = url !== null || !h.url;
+  const typed = (url ?? "").trim().replace(/\/+$/, "");
+  const dirty = !!typed && typed !== h.url;
+  const saveUrl = async () => {
+    if (!dirty || busy) return;
+    setBusy(true);
+    if (await save({ notion_hook_url: typed })) {
+      setData((d) => (d ? { ...d, url: typed } : d));
+      setUrl(null);
+      reload();
+    }
+    setBusy(false);
+  };
+
+  const line = hookLine(h);
+  const ra = h.events.rejected_at;
+  const rejected = h.events.rejected > 0 && !!ra && Date.now() - Date.parse(ra) < 24 * 3600e3;  // a day on, an old story
+  const note = [rejected && `拒收 ${h.events.rejected} 次 · ${ago(ra)}`, error && "刷新失败"].filter(Boolean).join(" · ");
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); void saveUrl(); }}>
+      <h3 className="st-group">批注推送</h3>
+      <Row name="状态" note={note || undefined}>
+        <span className={`st-state ${line.lamp}`}><i className={`lamp ${line.lamp}`} aria-hidden />{line.text}</span>
+      </Row>
+      <Row name="地址">
+        {editing
+          ? <input className="st-input mono" value={url ?? ""} onChange={(e) => setUrl(e.target.value)} inputMode="url" autoComplete="off" spellCheck={false}
+              placeholder="https://…/api/notion/webhook" aria-label="地址" disabled={busy} autoFocus={!!h.url}
+              onKeyDown={(e) => { if (e.key === "Escape" && h.url) setUrl(null); }} />
+          : <Cmd text={h.url!} />}
+      </Row>
+      {(h.url || dirty || open || h.token === "set") && <div className="st-acts">
+        {editing && h.url && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => setUrl(null)}>取消</button>}
+        {editing && (dirty || h.url) && <button type="submit" className={`btn sm${dirty ? " solid" : ""}`} disabled={busy || !dirty}>保存</button>}
+        {!editing && <button type="button" className="btn ghost sm" onClick={() => setUrl(h.url)}>改地址</button>}
+        {open
+          ? <span className="st-until num">到 {at8(h.rearm_until!)} 前接收新令牌</span>
+          : h.token === "set" && <button type="button" className="btn sm" disabled={busy} onClick={rearm}>重新接收</button>}
+        {h.token === "set" && (
+          <button type="button" className={`btn sm${h.events.signed_at ? "" : " solid"}`} onClick={copyToken}>{copied ? "已复制" : "复制验证令牌"}</button>
+        )}
+      </div>}
+    </form>
   );
 }

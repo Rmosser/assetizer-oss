@@ -40,7 +40,7 @@
    ```
 
 6. 验收：
-   - `lzc-cli docker -- ps -a | grep assetizer`：app / web / worker 三个容器都是 healthy；
+   - `lzc-cli docker -- ps -a | grep assetizer`：app / web / worker 三个容器都是 healthy，hook-tunnel 在运行（它不设网络 healthcheck）；
    - 版本：`lzc-cli docker -- exec cloudlazycatappassetizer-web-1 grep ^version /lzcapp/pkg/package.yml`；
    - worker 日志：`lzc-cli docker -- logs --tail 200 cloudlazycatappassetizer-worker-1`；
    - 打开入口，看刊、频道、专题、机房、设置五页。
@@ -165,3 +165,60 @@ whisper 转写可以交给局域网里的 Windows 显卡机（RTX 4070 Ti，`192
 ## OVH（迁移前的部署）
 
 `deploy/deploy.sh` 与 `deploy/*.service` 是迁移到懒猫之前在 OVH 上的部署方式（systemd --user，经 SSH 隧道访问 127.0.0.1:8770，另有经 Cloudflare Access 的公网入口 `kan.example.com`，即 `ASSETIZER_PUBLIC_HOST`）。OVH 退役时一并下线那条 tunnel 和 Access 应用，并删掉 `app.py` 里公网入口的分支与远程浏览器接口。迁移方案见 [history/lazycat-lpk-plan.md](history/lazycat-lpk-plan.md)；OVH 退役后删除这些文件。
+
+## Notion 批注推送
+
+专题批注由 Notion integration webhook 通知：worker 下一次 tick 启动独立的 `topic-hook` 线程，循环处理到队列为空，定点读被批注的块或页本身的讨论，不调模型；停笔 10 分钟后沿用原来的重新综合和回复。每 6 小时整页逐块读一次、综合前整页读一次的兜底保留，覆盖漏事件和已解决、已删除的讨论。事件和兜底是两条线程，按专题互斥；某个专题正在整页读时，先处理其他专题。频道页只处理已定稿频道中课代表写的每期页（不是已登记），不定期整页扫描；只靠推送定点读，用户在原串再写一句可重新读到。停笔 10 分钟，整页未处理请求合成一次「批注」模型调用，只给文字和本节原话。已答、没改有本节原话时按模型选行附原话与时刻链接立即回，没有节时只回模型的话，程序毛病记进共用待修清单；已改只改受支持的文字块，等重新交付读回才在原串回。改正只在记下时的同一运行、同一模板有效，同版重印保留；换模板和换运行一样不带过去，成功交付读回时作废并在原串说明。代价是原文没变的段落，换模板后改正也带不过去。讨论串运行不变、模板变化时，先按记下的旧模板构建未套改正的计划并核对旧位置，只在旧版、新版本节里该原文各唯一一处时重新定位；同一批两串及以上汇合到一块，只要有换模板迁移来的串，全部不能已改。同运行、同模板的串仍只核对原位置；找不到时 plan_text 留空、不记原稿、不更新位置。模型冻结与应用时的运行或模板不同，已改转成固定作废说明，不写改正、不更新位置。交付完成事务仍同时记录 notion_synced_run 和 notion_synced_template；每批 checkpoint 的块映射另将实际交付运行和模板随计划键一起提交，保留配对块同样更新，并在同一事务删掉该块的旧键行，一个块只留一行映射；升级前遗留的同一块多行按没有计划键处理。扫描用提供计划键的同一映射行的版本，父块定位用父块那行；仅旧映射两列都为空时退回 sources 的版本，模板仍为空再退回当前设置。交付读回后未能带过去的改正作废、删除，在原串说明；已回「已改」的同样补一次作废通知。发送结果未知时先等 10 分钟，再按评论列表对账，依赖 Notion 届时能列出已成功的评论。模型失败或合同修一次仍失败就等新点名，不自动重调。偏好和重做不做，详见 [design §R3-12](design.md)。每批只有遇到未归档专题、行页或上述范围的频道页事件才查询一次 `/users/me`（单次尝试、5 秒超时），身份不跨批缓存；包括传输异常在内的查询失败仍定点读。自己的 bot 事件不读评论、块或页面；全是范围外频道页、未知页或归档专题时不查询身份。
+
+| 盒子 | 推送域名 | 订阅地址 |
+|---|---|---|
+| devbox | `notion-hook-dev.example.com` | `https://notion-hook-dev.example.com/api/notion/webhook` |
+| prodbox | 待定，独立隧道和域名 | 域名确定后再配置；不复用开发机的订阅 |
+
+每台盒子的 integration、验证令牌和隧道 token 相互独立。先在设置 → Notion填写对应的完整推送地址（设置项 `notion_hook_url`，默认空），也可以在选好的盒子里运行：
+
+```bash
+lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli set notion_hook_url https://notion-hook-dev.example.com/api/notion/webhook
+```
+
+隧道由编排者在 Cloudflare 建为远程管理的 Tunnel，DNS 指向该 tunnel。拓扑与 ingress 规则：
+
+```text
+Notion → https://notion-hook-dev.example.com/api/notion/webhook
+       → Cloudflare Tunnel → hook-tunnel → http://web:8770
+```
+
+```yaml
+ingress:
+  - hostname: notion-hook-dev.example.com
+    path: ^/api/notion/webhook$
+    service: http://web:8770
+    originRequest:
+      httpHostHeader: notion-hook
+  - service: http_status:404
+```
+
+入口不加 Access 登录或 challenge。Host 改为 `notion-hook` 后，应用 guard 只放行这一个精确路径的 POST，其余全部 404。隧道的路由、DNS 和令牌不在包里配置。
+
+**隧道 token 由本人放置**，和 Notion token 的放法相同：在自己的终端里执行下面这条，粘贴 token，回车后按 Ctrl-D。文件在持久卷里，不用重装；监督脚本最多等 30 秒就会看见它。
+
+```bash
+lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; mkdir -p /lzcapp/var/assetizer/hook-tunnel; cat > /lzcapp/var/assetizer/hook-tunnel/tunnel-token'
+```
+
+隧道 token 单独放在 `/lzcapp/var/assetizer/hook-tunnel/tunnel-token`，`hook-tunnel` 只绑定该目录到 `/ingress`，读 `/ingress/tunnel-token`，看不到应用数据库或其他凭据。web 和 doctor 只 stat 原路径，不读内容。旧的 secrets 路径不再使用，尚未放过 token，无须迁移。
+
+`hook-tunnel` 没有 HTTP(S)_PROXY；文件不存在或为空时不连接 Cloudflare。有 token 才用 `--token-file` 启动 cloudflared，退出后隔 30 秒再拉起。运行时镜像内置 x86_64 的 cloudflared **2026.10.4**，打包时下载并校验 SHA256 `ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42`，运行时不下载。不以 `/ready` 做服务 healthcheck，隧道出问题不会拦住整个应用；设置 → Notion状态才去查 `http://hook-tunnel:20241/ready`（1 秒超时），没文件是 off，200 是 up，其余是 down。
+
+在 Notion integration 里：
+
+1. 开启「读取评论」能力，将 integration 加进测试专题所在页的 Connections（生产库不用于试验）。要发送回复仍须「插入评论」。
+2. 在 **Webhooks** 页签创建订阅，填该盒子的完整订阅地址，勾选 `comment.created`、`comment.updated`、`comment.deleted`。
+3. Notion 发来一次验证请求。盒子没有验证令牌时自动接收第一个；设置 → Notion点「复制验证令牌」，把它粘回 Notion 的 **Verify** 框，完成验证。Notion 点 Verify 后不会主动再发通知；在已连接 integration 的测试页写一条批注，收到首个签名有效的事件后状态才会变成「已通」。只有点击复制时调用的 `/api/notion/hook/token` 返回令牌，其余状态、doctor、日志不显示值。
+4. 有令牌以后换订阅或需要 Notion 重新发令牌时，先在设置 → Notion点「重新接收」，再回 Notion 点 **Resend token**。窗口 15 分钟内只收一次，收下即关闭；相同令牌直接确认、不记 warn、不关闭窗口；不同令牌过期或未打开时不换，warn 事件会说明操作。普通重试、隧道重启不需要重新接收。
+
+验证令牌保存在 `secrets/notion-hook-verification`，0600、临时文件原子替换，不进 settings 和日志；收到时间另存 settings。换令牌后清空「首次有效签名」时间、rejected 拒收计数和 rejected_at 最近拒收时间，之后第一次有效签名说明 Notion 已开始投递。接收锁最多等 5 秒，独立数据库连接获取写锁也最多等 5 秒，超时回 503 由 Notion 重投，持久化成功才回 200；其他生产数据库连接仍等 120 秒。签名按收到的原始字节校验，请求全进程限 120 次/分钟，最大 64 KB。状态的 total 统计验签成功的事件请求（包括重复和非评论类型），rejected 统计签名拒绝，rejected_at 为最近一次拒收的 ISO 时间（没有时为 null），界面只显示 24 小时内的拒收；相同事件 id 只处理一次。元数据队列 `notion_events` 随日志 retention 清理 30 天前的行，专题处理错误记终态和不含原始内容的 warn，靠整页兜底。频道页读的 429、5xx、网络或超时错误不记 done，tries/retry_at 保存在事件队列，依次退避 1 分钟、5 分钟、30 分钟、2 小时、6 小时，第五次重试还失败才记终态和 warn，同次处理同一来源只记一条，带期次标题和事件数；尚未到期的事件不占处理线程。其他频道页错误照旧，终态后可在原串再写一句重新读到。
+
+`assetizer asks --days 30` 列专题与频道共用的用量和待修，频道用量按 source 分组；频道待修带 `source_id` 和期次标题。`assetizer logs` 导出同样的数据，周一日报和设置里的批注数也按两者合计。修好用 `assetizer asks --fixed N --version V`，既有 `_tell_fixed` 会在原串回「〔课代表〕已修 #N · V」。频道调用的完整用量回执记在 `issue-<source_id>` 下，不计入采用运行；「批注」分工的额度和登录不挡生产、补录。模型输出和断点在数据目录 `issue-asks/<批次>/`，DONE 后删除、FAILED 保留；APPLY 的临时数据库错误下个 tick 只重做入库，不重新调模型；讨论串位置及原稿保存在 issue_positions，回复认领和完成均核 issue_replies.version，交付期间作废不会吞掉新说明；预览和失败交付不记改正错位 warn，成功读回作废时才按期次合记；`issue_state.failed_at` 只拦自动模型重调，不影响新推送读取。
+
+`assetizer doctor` 的 `notion_hook` 一项列出验证令牌和隧道 token 文件是否存在、最近事件时间、签名拒绝次数，不输出凭据值。

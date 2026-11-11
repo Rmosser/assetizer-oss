@@ -21,6 +21,7 @@ from ..delivery import _bot, _create, _prop_hashes, client
 from ..notion import blocks as B
 from ..notion import mapping as M
 from ..notion.client import Notion, NotionError
+from ..notion.sync import Problem, Sync
 from ..util import parse_tc
 from . import comments, work_dir
 from . import write as W
@@ -44,14 +45,6 @@ COLUMNS = {   # the 来源 table; 备注 is the user's, never written
 TIME = r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\.\d+)?"
 PART = re.compile(rf"\s*(?:V(\d{{1,3}})\s*)?(?:({TIME})(?:\s*[-–—~至到]\s*{TIME})?\s*(说|帧|画面)?|([LR]\d{{1,3}}))?\s*(?:[,，;；、/]\s*)?")
 BRACKET = re.compile(r"\s*\[([^\[\]\n]{1,120})\](?!\()")
-
-
-class Problem(RuntimeError):
-    """Why a write did not happen, by what the user can do: TOKEN 去设置, NO_ACCESS 重试, GONE 换地方, OTHER 重试."""
-
-    def __init__(self, kind: str, message: str):
-        super().__init__(message)
-        self.kind = kind
 
 
 def page_url(pid: str) -> str:
@@ -510,187 +503,6 @@ def _day(iso: str | None) -> str:
     except (TypeError, ValueError):
         d = dt.datetime.now(TZ)
     return f"{d.month}月{d.day}日"
-
-
-# ------------------------------------------------------------------ writing among what others wrote (design §R8-12)
-def _said(pieces: list[dict]) -> list:
-    text, links = [], []
-    for x in pieces:
-        text.append(x["plain_text"] if "plain_text" in x else (x.get("text") or {}).get("content", ""))
-        url = x.get("href") or ((x.get("text") or {}).get("link") or {}).get("url")
-        if url and (not links or links[-1] != url):
-            links.append(url)
-    return ["".join(text), links]
-
-
-def _sig(b: dict, kids: list[str]) -> str:
-    """What a block says — its kind, words, links and what is in it — the same for a block about to be written as for
-    one Notion gives back: the same, it stays."""
-    t = b["type"]
-    body = b.get(t) or {}
-    said = [_said(c) for c in body.get("cells") or []] if t == "table_row" else _said(body.get("rich_text") or [])
-    more = [body.get(k) for k in ("checked", "language", "table_width", "has_column_header")]
-    return hashlib.sha1(json.dumps([t, said, more, kids], ensure_ascii=False).encode()).hexdigest()
-
-
-def _shape(b: dict, kids: list[str]) -> str:
-    return f"{b['type']}({','.join(kids)})" if kids else b["type"]
-
-
-def _kids(b: dict) -> list[dict]:
-    return (b.get(b["type"]) or {}).get("children") or []
-
-
-def _new(b: dict, how=_sig) -> str:
-    return how(b, [_new(k, how) for k in _kids(b)])
-
-
-def _count(shapes: list[str]) -> int:
-    return sum(len(re.findall(r"[a-z][a-z_0-9]*", x)) for x in shapes)
-
-
-def _batches(blocks: list[dict]):
-    """Blocks in requests Notion takes: 100 at the top, 1000 in all, well under its 500 KB."""
-    part: list[dict] = []
-    n = size = 0
-    for b in blocks:
-        bn, bs = _count([_new(b, _shape)]), len(json.dumps(b, ensure_ascii=False).encode())
-        if part and (len(part) == B.MAX_PIECES or n + bn > 1000 or size + bs > 400_000):
-            yield part
-            part, n, size = [], 0, 0
-        part.append(b)
-        n += bn
-        size += bs
-    if part:
-        yield part
-
-
-def _lcs(old: list[str | None], new: list[str]) -> list[tuple[int, int]]:
-    """The longest run, in order, of Assetizer's blocks (old, None: not its own) the new ones say the same as."""
-    a, b = len(old), len(new)
-    best = [[0] * (b + 1) for _ in range(a + 1)]
-    for i in range(a - 1, -1, -1):
-        for j in range(b - 1, -1, -1):
-            best[i][j] = best[i + 1][j + 1] + 1 if old[i] is not None and old[i] == new[j] else max(best[i + 1][j], best[i][j + 1])
-    out, i, j = [], 0, 0
-    while i < a and j < b:
-        if old[i] is not None and old[i] == new[j]:
-            out.append((i, j))
-            i, j = i + 1, j + 1
-        elif best[i + 1][j] >= best[i][j + 1]:
-            i += 1
-        else:
-            j += 1
-    return out
-
-
-def _place(old: list[dict], sig: list[str | None], new: list[dict], pairs: list[tuple[int, int]],
-           start: str | None) -> tuple[list[tuple[str | None, list[dict]]], list[str]]:
-    """Where the new blocks go, and which old ones go. Between two blocks kept, the new ones take the places of
-    Assetizer's old ones, a run of them at a time, so what someone put between two runs stays between them; with none
-    of its old ones there, they follow the block kept before them (`start`, else the page's start: after what someone
-    put there, or at the end of an empty page)."""
-    puts: list[tuple[str | None, list[dict]]] = []
-    gone: list[str] = []
-    po, pn = -1, -1
-    for oi, ni in [*pairs, (len(old), len(new))]:
-        runs: list[list[dict]] = []
-        run: list[dict] = []
-        for i in range(po + 1, oi):
-            if sig[i] is not None:
-                gone.append(old[i]["id"])
-                run.append(old[i])
-            elif run:
-                runs.append(run)
-                run = []
-        if run:
-            runs.append(run)
-        fresh = new[pn + 1:ni]
-        if fresh and runs:
-            k = 0
-            for j, r in enumerate(runs):
-                take = len(fresh) - k if j == len(runs) - 1 else min(len(r), len(fresh) - k)
-                if take > 0:
-                    puts.append((r[-1]["id"], fresh[k:k + take]))
-                    k += take
-        elif fresh:
-            puts.append((old[po]["id"] if po >= 0 else start or (old[oi - 1]["id"] if oi > 0 else None), fresh))
-        po, pn = oi, ni
-    return puts, gone
-
-
-class Sync:
-    """Writes Assetizer's blocks under a page among everyone else's: its blocks that say the same stay (and the
-    comments on them), those that changed or went are taken out — unless someone edited them, wrote in them or
-    commented on them: those stay as theirs — and the new ones go where the old ones were. Nothing of anyone else's is
-    moved or taken out."""
-
-    def __init__(self, n: Notion, bot: str):
-        self.n, self.bot = n, bot
-        self.comments = True          # Notion lets the integration read comments (else none can be seen)
-        self.kept: set[str] = set()   # Assetizer's blocks kept for someone's comment on them
-
-    def old(self, b: dict, how=_sig) -> str | None:
-        """What a block of Assetizer's says, with all in it; None when it is not as Assetizer left it."""
-        if ((b.get("created_by") or {}).get("id") != self.bot or (b.get("last_edited_by") or {}).get("id") not in (None, self.bot)
-                or b["id"] in self.kept or b["type"] in ("child_page", "child_database")):
-            return None
-        kids = []
-        if b.get("has_children"):
-            for k in self.n.children(b["id"]):
-                x = self.old(k, how)
-                if x is None:
-                    return None
-                kids.append(x)
-        return how(b, kids)
-
-    def said(self, bid: str) -> bool:
-        if not self.comments:
-            return False
-        try:
-            return bool(self.n._req("GET", f"/comments?block_id={bid}&page_size=1", idempotent=True).get("results"))
-        except NotionError as e:
-            if e.status == 403:
-                self.comments = False
-            elif e.status != 404:
-                raise
-            return False
-
-    def put(self, parent: str, blocks: list[dict], after: str | None) -> None:
-        """After `after` the later requests go in first, each right after it, so they end up in order."""
-        parts = list(_batches(blocks))
-        for p in reversed(parts) if after else parts:
-            self.n.append(parent, p, after=after)
-
-    def write(self, parent: str, new: list[dict], old: list[dict], start: str | None = None) -> None:
-        """`old`, the blocks under `parent` now in order, made `new` where they are Assetizer's; `start`: the block just
-        before them (the 来源 table, for those under it)."""
-        sig = [self.old(b) for b in old]
-        pairs = _lcs(sig, [_new(b) for b in new])
-        if start is None and pairs and pairs[0][0] == 0 and pairs[0][1] > 0:
-            pairs = pairs[1:]  # nothing goes in before a page's first block: it goes, and the new ones in after it
-        kept = {i for i, _ in pairs}
-        for i, b in enumerate(old):
-            if sig[i] is not None and i not in kept and self.said(b["id"]):
-                sig[i] = None
-                self.kept.add(b["id"])
-        puts, gone = _place(old, sig, new, pairs, start)
-        for after, bs in puts:
-            self.put(parent, bs, after)
-        for bid in gone:
-            self.n._req("DELETE", f"/blocks/{bid}")
-
-    def check(self, parent: str, want: list[dict], table: str | None = None) -> None:
-        """Read back: Assetizer's blocks under `parent` are those written, in order, all of them, folds and lists too."""
-        got = []
-        for b in self.n.children(parent):
-            if table and _norm(b["id"]) == _norm(table):
-                got.append(TABLE["type"])
-            elif (x := self.old(b, _shape)) is not None:
-                got.append(x)
-        exp = [_new(b, _shape) for b in want]
-        if got != exp:
-            raise Problem("OTHER", f"Notion 读回 {_count(got)} 块，应为 {_count(exp)} 块")
 
 
 # ------------------------------------------------------------------ writing

@@ -63,16 +63,9 @@ def changed(sql: str, *args) -> int:
 
 
 def recorder(tid: int):
-    """The topic's model calls, as model_calls rows under run_id "topic-<tid>" (the 机房's totals count them)."""
-    def record(r: dict) -> None:
-        u = r.get("usage") or {}
-        db.exec("""INSERT INTO model_calls(run_id, stage, attempt, conversation_id, model, agy_version, status, error_class,
-                   wall_seconds, input_tokens, output_tokens, thinking_tokens, peak_rss_kib, view_files, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                f"topic-{tid}", r.get("stage"), r.get("attempt"), r.get("conversation_id"), r.get("actual_model"),
-                r.get("agy_version"), r.get("status"), r.get("error_class"), r.get("wall_seconds"), u.get("input_tokens"),
-                u.get("output_tokens"), u.get("thinking_tokens"), r.get("peak_rss_kib"), r.get("view_file_count"), now())
-    return record
+    """The topic's calls keep their own statistics, outside production runs."""
+    from ..llm import call_recorder
+    return call_recorder(f"topic-{tid}")
 
 
 # ------------------------------------------------------------------ the quota topics leave to the channels
@@ -614,6 +607,14 @@ def housekeeping(t: float) -> None:
         from . import watch
         _watching["t"] = threading.Thread(target=watch.due, name="topic-watch", daemon=True)
         _watching["t"].start()
+    from ..notion import hook
+    if hook.pending() and not (_watching.get("h") and _watching["h"].is_alive()):
+        _watching["h"] = threading.Thread(target=hook.process, name="topic-hook", daemon=True)
+        _watching["h"].start()
+    from .. import issue_asks
+    if not (_watching.get("i") and _watching["i"].is_alive()) and issue_asks.pending():
+        _watching["i"] = threading.Thread(target=issue_asks.due, name="issue-asks", daemon=True)
+        _watching["i"].start()
     if t - _last["comments"] > WATCH_LOOK_EVERY and not (_watching.get("c") and _watching["c"].is_alive()):
         _last["comments"] = t  # the comments on topics' Notion pages (comments.EVERY): many requests, not in the worker's loop
         _watching["c"] = threading.Thread(target=comments.due, name="topic-comments", daemon=True)

@@ -166,7 +166,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
                       : r.library ? (<><span className="n">库里已有</span>
                         <Seg<string> small label={`${r.title}：库里已有`} value={reruns(r) ? "rerun" : baseOf(r)}
                           onChange={(x) => { setRerunOf(r, x === "rerun"); if (x !== "rerun") setBase({ ...base, [r.source_id]: x as Base }); }}
-                          options={[{ value: "keep", label: "保留库里的页" }, { value: "replace", label: `换成 v${r.adopted?.version ?? "?"}`, title: "旧页移到 Notion 归档，不删除" },
+                          options={[{ value: "keep", label: "保留库里的页" }, { value: "replace", label: `换成 v${r.adopted?.version ?? "?"}`, title: "原页逐块更新，你写的、改过的、评论过的留着" },
                             ...(canRerun(r) ? [{ value: "rerun", label: `换成 v${v} 重跑`, title: `v${v} 失败就换成 v${r.adopted!.version}` }] : [])]} />{pinnedOff(r)}</>)
                       : r.adopted && canRerun(r) ? (<><span className="n">将写入</span>
                         <Seg small label={`${r.title}：将写入`} value={reruns(r) ? "rerun" : "now"} onChange={(x) => setRerunOf(r, x === "rerun")}

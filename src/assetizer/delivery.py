@@ -7,8 +7,8 @@
   back and aligned with the plan so a crash between PATCH and checkpoint never
   duplicates blocks.
 * Files are uploaded just-in-time (unattached uploads expire after ~1 h).
-* A new current run replaces the page (old one archived) instead of producing a
-  second article.
+* Content changes and new current runs sync blocks on the same page, preserving
+  its link and what people wrote, edited or commented on.
 * A video that is already in the channel's database (matched on the property mapped to
   the video link) is 已登记 (REGISTERED) and skipped; the user's page is never overwritten.
 * A channel with a Notion target (notion/mapping.py) is written to *its* database
@@ -22,13 +22,13 @@ import hashlib
 import json
 import re
 import traceback
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import channel_icons, config, db
 from .notion import blocks as B
 from .notion import mapping as M
 from .notion.client import Notion, NotionError
+from .notion.sync import Sync, plan_hash
 from .util import fmt_tc, now
 
 DB_PROPS = {
@@ -84,19 +84,22 @@ def ensure_props(n: Notion, database: str) -> None:
 
 
 # ---------------------------------------------------------------- plan
-def _h(obj) -> str:
-    return hashlib.sha256(json.dumps(obj, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
-
-
 def build_plan(source: dict, run_id: str, target: dict | None = None) -> list[dict]:
     """Ordered plan items: {key, block | media:{path, kind, caption}}."""
+    plan = page_plan(source, run_id, target)
+    for it in plan:
+        it["hash"] = plan_hash(it)
+    return plan
+
+
+def page_plan(source: dict, run_id: str, target: dict | None = None, *, corrected: bool = True) -> list[dict]:
+    """The shared, unhashed page plan (preview needs no access to media files)."""
     from . import templates
+    from .issue_asks import apply_fixes
     tpl = (target or {}).get("template") or "default"
     plan = templates.PLANS[tpl](source, run_id, target or {}) if tpl != "default" else _default_plan(source, run_id)
     plan += _tail(source, run_id)
-    for it in plan:
-        it["hash"] = _h(it.get("block") or {"media": {**it["media"], "sha": Path(it["media"]["path"]).stat().st_size}})
-    return plan
+    return apply_fixes(source, run_id, plan, template=(target or {}).get("template") or "default") if corrected else plan
 
 
 def _default_plan(source: dict, run_id: str) -> list[dict]:
@@ -378,71 +381,6 @@ def _came_by_backfill(source_id: str) -> bool:
 
 
 # ---------------------------------------------------------------- what someone did on a page of ours (a07)
-def _yours(n: Notion, source_id: str, page_id: str) -> list[str]:
-    """What someone other than Assetizer did on its page, in words — [] when it is as Assetizer left it. Comments count
-    only where the integration may read them."""
-    bot = _bot(n)
-    if not bot:
-        raise RuntimeError("读不到课代表在 Notion 里的身份，换页前看不出页上有没有你的改动；稍后再试")
-    blocks = _blocks_of(n, page_id, bot)
-    out = []
-    if any((b.get("created_by") or {}).get("id") != bot for b in blocks):
-        out.append("加了段落")
-    if any((b.get("created_by") or {}).get("id") == bot and (b.get("last_edited_by") or {}).get("id") not in (None, bot)
-           for b in blocks):
-        out.append("改了段落")
-    last = db.setting(f"notion_props:{source_id}") or {}
-    if last and any(pid in last and last[pid] != h for pid, h in _prop_hashes(n.page(page_id).get("properties")).items()):
-        out.append("改了属性")
-    if _commented(n, [page_id] + [b["id"] for b in blocks if (b.get("created_by") or {}).get("id") == bot], bot):
-        out.append("加了评论")
-    return out
-
-
-def _commented(n: Notion, ids: list[str], bot: str) -> bool:
-    """Someone else commented on the page or on one of these blocks. Notion lists a page's comments without those on
-    its blocks, so each is asked for (only when a page is about to be replaced); no right to read comments: none."""
-    for bid in ids:
-        try:
-            said = n._req("GET", f"/comments?block_id={bid}&page_size=100", idempotent=True).get("results", [])
-        except NotionError as e:
-            if e.status == 403:
-                return False
-            if e.status in (400, 404):
-                continue
-            raise
-        if any((c.get("created_by") or {}).get("id") != bot for c in said):
-            return True
-    return False
-
-
-def _blocks_of(n: Notion, block_id: str, bot: str) -> list[dict]:
-    """The page's blocks, and inside each block Assetizer made that has blocks of its own (a fold, a callout, a table)
-    those too: an edit inside a fold is an edit. A block someone else made counts as theirs whole; a sub-page is a page."""
-    out = []
-    for b in n.children(block_id):
-        out.append(b)
-        if (b.get("has_children") and (b.get("created_by") or {}).get("id") == bot
-                and b.get("type") not in ("child_page", "child_database")):
-            out += _blocks_of(n, b["id"], bot)
-    return out
-
-
-def _keep_old_page(n: Notion, source: dict, page_id: str, run_id: str) -> bool:
-    """Replacing ``page_id`` (an issue printed again, a new version, content rebuilt): held instead when someone did
-    something on it, unless they said to replace it (a07). True: held."""
-    sid = source["id"]
-    if db.setting(f"replace_anyway:{sid}"):
-        return False
-    found = _yours(n, sid, page_id)
-    if not found:
-        return False
-    db.set_setting(f"yours_on_page:{sid}", found)
-    db.exec("UPDATE sources SET delivery='HELD', delivery_reason='YOURS_ON_PAGE', updated_at=? WHERE id=?", now(), sid)
-    db.event("delivery", f"旧页上有你的改动（{'、'.join(found)}）：等你决定换不换页", run_id)
-    return True
-
-
 def _bot(n: Notion) -> str | None:
     """The user id of Assetizer's integration: what it created on a page is its own (None: Notion would not say)."""
     try:
@@ -458,15 +396,59 @@ def _prop_hashes(props: dict | None) -> dict:
             for v in (props or {}).values() if isinstance(v, dict) and v.get("id")}
 
 
+def _prop_value(prop: dict) -> list | None:
+    """Comparable request/response value for the property types we write; None means unsupported."""
+    kinds = ("title", "rich_text", "select", "date", "url", "number")
+    kind = prop.get("type") or next((k for k in kinds if k in prop), None)
+    if kind not in kinds or kind not in prop:
+        return None
+    value = prop[kind]
+    if kind in ("title", "rich_text"):
+        value = "".join(t.get("plain_text", (t.get("text") or {}).get("content", "")) for t in (value or []))
+    elif kind == "select":
+        value = value.get("name") if value else None
+    elif kind == "date":
+        try:
+            value = [_instant(value.get("start")), _instant(value.get("end"))] if value else None
+        except ValueError:
+            return None
+    return [kind, value]
+
+
+def _instant(s: str | None) -> str | None:
+    """One spelling for one moment: Notion may give back `10:30+00:00` as `10:30:00.000+00:00`, or in another
+    offset. A date without a time stays a date."""
+    if not s:
+        return None
+    if "T" not in s:
+        return dt.date.fromisoformat(s).isoformat()
+    t = dt.datetime.fromisoformat(s)
+    if t.tzinfo:
+        return t.astimezone(dt.timezone.utc).isoformat(timespec="milliseconds")
+    return "local:" + t.isoformat(timespec="milliseconds")
+
+
 def _keep_yours(n: Notion, page_id: str, source_id: str, props: dict) -> dict:
-    """The properties to write, less those someone changed in Notion since Assetizer last wrote them."""
+    """Protect human edits and checkpoint the next PATCH, including recovery of a lost response."""
     last = db.setting(f"notion_props:{source_id}") or {}
-    if not last:
-        return props
+    pending = db.setting(f"notion_props_pending:{source_id}") or {}
     cur = n.page(page_id).get("properties") or {}
-    edited = {pid for pid, h in _prop_hashes(cur).items() if pid in last and last[pid] != h}
-    pid_of = {name: v.get("id") for name, v in cur.items() if isinstance(v, dict)}
-    return {k: v for k, v in props.items() if pid_of.get(k, k) not in edited}
+    by_id = {v["id"]: v for v in cur.values() if isinstance(v, dict) and v.get("id")}
+    edited, recovered = set(), {}
+    for pid, h in _prop_hashes(cur).items():
+        if pid in last and last[pid] != h:
+            value = _prop_value(by_id[pid])
+            if value is not None and pid in pending and value == pending[pid]:
+                recovered[pid] = h
+            else:
+                edited.add(pid)
+    if recovered:
+        db.set_setting(f"notion_props:{source_id}", {**last, **recovered})
+    pid_of = {name: v.get("id", name) for name, v in cur.items() if isinstance(v, dict)}
+    put = {k: v for k, v in props.items() if pid_of.get(k, k) not in edited}
+    db.set_setting(f"notion_props_pending:{source_id}",
+                   {pid_of.get(k, k): value for k, v in put.items() if (value := _prop_value(v)) is not None})
+    return put
 
 
 def _ours_unclaimed(n: Notion, page: dict, source_id: str) -> bool:
@@ -568,22 +550,29 @@ def deliver(source_id: str) -> dict:
             # the channel now writes elsewhere: start a page there, leave the old one where it is
             db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
             page_id = None
-        if page_id and source.get("notion_synced_run") and source["notion_synced_run"] != run_id:
-            if _keep_old_page(n, source, page_id, run_id):
-                return {"status": "HELD"}
+        missing_page = False
+        if page_id:
             try:
-                n.archive_page(page_id)
-            except NotionError as e:  # gone already is fine; anything else: try again later rather than make a second page
-                if e.status != 404 and "archived" not in e.body.lower():
+                pg = n.page(page_id)
+                missing_page = bool(pg.get("archived") or pg.get("in_trash"))
+            except NotionError as e:
+                if e.status != 404:
                     raise
-            db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
-            page_id = None
+                missing_page = True
+            if missing_page:
+                db.exec("UPDATE sources SET notion_page_id=NULL, notion_url=NULL, notion_synced_run=NULL, notion_synced_template=NULL WHERE id=?", source_id)
+                db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
+                page_id = None
+        if not page_id:
+            # Identity and unconfirmed property writes belong to a page, never to its replacement.
+            db.set_setting(f"notion_authors:{source_id}", None)
+            db.set_setting(f"notion_props_pending:{source_id}", None)
         if not page_id and target:
             have = registered(n, target, schema, source_id, exclude=(source.get("notion_page_id"),))
             if have and _ours_unclaimed(n, have, source_id):  # made by an earlier try whose answer was lost: write it
                 page_id = have["id"]
-                db.exec("UPDATE sources SET notion_page_id=?, notion_url=?, notion_synced_run=?, notion_database_id=? WHERE id=?",
-                        page_id, have.get("url"), run_id, database, source_id)
+                db.exec("UPDATE sources SET notion_page_id=?, notion_url=?, notion_synced_run=NULL, notion_synced_template=NULL, notion_database_id=? WHERE id=?",
+                        page_id, have.get("url"), database, source_id)
                 db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
                 have = None
             if have:
@@ -605,83 +594,70 @@ def deliver(source_id: str) -> dict:
             pg = _create(n, database, make_props(), icon)
             channel_icons.note(source_id, pg)
             page_id = pg["id"]
-            db.exec("UPDATE sources SET notion_page_id=?, notion_url=?, notion_synced_run=?, notion_database_id=? WHERE id=?",
-                    page_id, pg["url"], run_id, database, source_id)
-            db.set_setting(f"notion_props:{source_id}", _prop_hashes(pg.get("properties")))
-            db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
-        plan = build_plan(source, run_id, target)
-        done = {r["block_key"]: r for r in db.q("SELECT * FROM notion_blocks WHERE source_id=?", source_id)}
-        changed = [it["key"] for it in plan if it["key"] in done and done[it["key"]]["hash"] != it["hash"]]
-        orphaned = set(done) - {it["key"] for it in plan}
-        if changed or orphaned:  # content edited in place (nudge, overlay, template) → rebuild the page cleanly
-            if _keep_old_page(n, source, page_id, run_id):
-                return {"status": "HELD"}
-            try:
-                n.archive_page(page_id)
-            except NotionError:
-                pass
-            db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
-            pg = _create(n, database, make_props(), icon)
-            channel_icons.note(source_id, pg)
-            page_id = pg["id"]
-            db.exec("UPDATE sources SET notion_page_id=?, notion_url=?, notion_database_id=? WHERE id=?",
+            db.exec("UPDATE sources SET notion_page_id=?, notion_url=?, notion_synced_run=NULL, notion_synced_template=NULL, notion_database_id=? WHERE id=?",
                     page_id, pg["url"], database, source_id)
             db.set_setting(f"notion_props:{source_id}", _prop_hashes(pg.get("properties")))
-            done = {}
-        # reconcile: read back, adopt untracked tail blocks that match the plan, delete strays — of Assetizer's own
-        # blocks only: what someone added on the page (a note, a heading) stays where they put it
+            db.exec("DELETE FROM notion_blocks WHERE source_id=?", source_id)
+            if missing_page:
+                db.event("delivery", "原来那页在 Notion 里已删除，另建了一页", run_id)
+        plan = build_plan(source, run_id, target)
         bot = _bot(n)
-        ours = lambda b: not bot or (b.get("created_by") or {}).get("id") in (None, bot)  # noqa: E731
-        actual = [b for b in n.children(page_id) if ours(b)]
-        known_ids = {r["block_id"] for r in done.values()}
-        nxt = [it for it in plan if it["key"] not in done]
-        extras = [b for b in actual if b["id"] not in known_ids]
-        for b in extras:
-            it = nxt[0] if nxt else None
-            if it and b["type"] == (it.get("block") or {}).get("type", it.get("media", {}).get("kind")) and \
-                    (it.get("media") or B.plain(b) == B.plain(it["block"])):
-                db.exec("INSERT OR REPLACE INTO notion_blocks VALUES (?,?,?,?)", source_id, it["key"], b["id"], it["hash"])
-                nxt.pop(0)
-            else:
-                n._req("DELETE", f"/blocks/{b['id']}")
-        uploads = 0
-        i = 0
-        while i < len(nxt):
-            batch, keys = [], []
-            while i < len(nxt) and len(batch) < 40:
-                it = nxt[i]
-                if it.get("media"):
-                    m = it["media"]
-                    p = Path(m["path"])
-                    up = n.upload(p, "video/mp4" if m["kind"] == "video" else "image/jpeg")
-                    uploads += 1
-                    batch.append(B.media(m["kind"], up["id"], m["caption"]))
-                else:
-                    batch.append(it["block"])
-                keys.append(it)
-                i += 1
-                if it.get("media") and m["kind"] == "video":
-                    break  # attach videos promptly
-            res = n.append(page_id, batch)["results"]
-            for it, b in zip(keys, res):
-                db.exec("INSERT OR REPLACE INTO notion_blocks VALUES (?,?,?,?)", source_id, it["key"], b["id"], it["hash"])
-        # verify
-        actual = [b for b in n.children(page_id) if ours(b)]
-        if len(actual) != len(plan):
-            raise RuntimeError(f"READBACK_MISMATCH {len(actual)} != {len(plan)}")
-        bad_media = [b["id"] for b in actual if b["type"] in ("image", "video") and b[b["type"]].get("type") != "file"]
-        if bad_media:
-            raise RuntimeError(f"READBACK_MEDIA {len(bad_media)}")
-        res = n._req("PATCH", f"/pages/{page_id}", json={"properties": _keep_yours(n, page_id, source_id, make_props())})
-        db.set_setting(f"notion_props:{source_id}", _prop_hashes((res or {}).get("properties")))
-        db.exec("UPDATE sources SET delivery='DELIVERED', notion_synced_run=?, delivery_reason=NULL, delivered_at=?, updated_at=? WHERE id=?",
-                run_id, now(), now(), source_id)
-        for k in ("write_anyway", "replace_anyway"):  # said for this page: the next one is asked about again
-            if db.setting(f"{k}:{source_id}"):
-                db.set_setting(f"{k}:{source_id}", None)
-        db.event("delivery", f"Notion 交付完成：{len(plan)} 块，{uploads} 个文件", run_id)
+        if not bot:
+            raise RuntimeError("读不到课代表在 Notion 里的身份，分不出页上哪些是你写的；稍后再试")
+
+        def checkpoint(items: list[dict], blocks: list[dict]) -> None:
+            if len(items) != len(blocks):
+                raise RuntimeError("READBACK_MISMATCH append 回答的块数不符")
+            with db.tx() as conn:
+                for it, b in zip(items, blocks):
+                    # One mapping row per block: a retained block that changed key drops its old key here, never a
+                    # same-key row another block has taken over.
+                    conn.execute("DELETE FROM notion_blocks WHERE source_id=? AND block_id=? AND block_key!=?",
+                                 (source_id, b["id"], it["key"]))
+                    conn.execute("""INSERT OR REPLACE INTO notion_blocks
+                                    (source_id,block_key,block_id,hash,run_id,template) VALUES (?,?,?,?,?,?)""",
+                                 (source_id, it["key"], b["id"], it["hash"], run_id,
+                                  (target or {}).get("template") or "default"))
+
+        def forget(bid: str) -> None:
+            db.exec("DELETE FROM notion_blocks WHERE source_id=? AND block_id=?", source_id, bid)
+
+        rows = db.q("SELECT * FROM notion_blocks WHERE source_id=?", source_id)
+        hashes = {r["block_id"]: r["hash"] for r in rows}
+        old = n.children(page_id)
+        authors = {(b.get("created_by") or {}).get("id") for b in old if b["id"] in hashes}
+        authors.discard(None)
+        authors.update(db.setting(f"notion_authors:{source_id}") or [])
+        authors.add(bot)
+        # A same-key correction overwrites its old mapping; remember that author before any append/delete.
+        db.set_setting(f"notion_authors:{source_id}", sorted(authors))
+        sync = Sync(n, bot, hashes=hashes, checkpoint=checkpoint, forget=forget, authors=authors,
+                    keys={r["block_id"]: r["block_key"] for r in rows})
+        want = sync.write_plan(page_id, plan, old)
+        sync.check(page_id, want)
+        keys = {it["key"] for it in plan}
+        for row in db.q("SELECT block_key FROM notion_blocks WHERE source_id=?", source_id):
+            if row["block_key"] not in keys:
+                db.exec("DELETE FROM notion_blocks WHERE source_id=? AND block_key=?", source_id, row["block_key"])
+        put = _keep_yours(n, page_id, source_id, make_props())
+        res = n._req("PATCH", f"/pages/{page_id}", json={"properties": put})
+        got = (res or {}).get("properties") or {}
+        ids = {name: v.get("id", name) for name, v in got.items() if isinstance(v, dict)}
+        done = {ids.get(k, k) for k in put}
+        last = db.setting(f"notion_props:{source_id}") or {}
+        db.set_setting(f"notion_props:{source_id}", {**last, **{p: h for p, h in _prop_hashes(got).items() if p in done}})
+        db.set_setting(f"notion_props_pending:{source_id}", None)
+        from . import issue_asks
+        with db.tx() as cx:
+            dirty = issue_asks.delivered(cx, source_id, run_id, page_id, plan)
+            cx.execute("""UPDATE sources SET delivery=CASE WHEN ? THEN 'STALE' ELSE 'DELIVERED' END,
+                          notion_synced_run=?,notion_synced_template=?,delivery_reason=NULL,delivered_at=?,updated_at=? WHERE id=?""",
+                       (dirty, run_id, (target or {}).get("template") or "default", now(), now(), source_id))
+        if db.setting(f"write_anyway:{source_id}"):
+            db.set_setting(f"write_anyway:{source_id}", None)
+        db.event("delivery", f"Notion 交付完成：写入 {sync.written} 块，保留 {sync.retained} 块，删除 {sync.deleted} 块，上传 {sync.uploads} 个文件", run_id)
         db.resolve_alert("notion-auth")
-        return {"status": "DELIVERED", "blocks": len(plan), "uploads": uploads}
+        return {"status": "DELIVERED", "blocks": len(plan), "uploads": sync.uploads}
     except Exception as e:  # noqa: BLE001
         reason = str(e)
         if token_invalid(e):  # every delivery fails until the token is replaced: say so once, loudly
