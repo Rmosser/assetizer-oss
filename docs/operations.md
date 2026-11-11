@@ -39,6 +39,8 @@
    lzc-cli lpk install .pkgout/cloud.lazycat.app.assetizer-v<版本>.lpk --apk n
    ```
 
+   盒子先卸载旧版再装新版，装完后容器要等第一次带登录的访问才启动：`docker ps` 里一时没有 assetizer 容器是正常的，先在浏览器登录打开入口，再验收。没打开之前 worker 不跑，收录和生产都停着。
+
 6. 验收：
    - `lzc-cli docker -- ps -a | grep assetizer`：app / web / worker 三个容器都是 healthy，hook-tunnel 在运行（它不设网络 healthcheck）；
    - 版本：`lzc-cli docker -- exec cloudlazycatappassetizer-web-1 grep ^version /lzcapp/pkg/package.yml`；
