@@ -1,5 +1,6 @@
 /* 专题's words and small pieces, shared by its three pages (pages/Topics, Topic, TopicVideo). */
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ItemBackup } from "../../api";
 import { groupName, resets, type Group } from "../../box";
 import { useLeaving } from "../../hooks";
 import { failText, retryText, VENDOR_NAME, WAIT, type Retry } from "../../util";
@@ -19,11 +20,13 @@ export const TOPIC_WAIT: Record<string, string> = { ...WAIT, TOPIC_QUOTA: "等�
 
 export type Item = {
   no: number; id: string; url: string; title: string | null; channel: string | null; duration: number | null; published: string | null;
-  thumb: string; drafted: boolean; media: string; availability: string | null;
+  thumb: string; drafted: boolean; media: string; availability: string | null; gone: string | null;
   state: "QUEUED" | "RUNNING" | "WAITING" | "DONE" | "FAILED"; step: string | null;
   progress: { done?: number; of?: number; retry?: Retry } | null; wait: string | null; error_class: string | null; error: string | null;
-  fit: Fit | null; gist: string | null; excluded: boolean; force: boolean; stale: boolean; done_rev: number | null;
+  fit: Fit | null; gist: string | null; excluded: boolean; excluded_why: string | null; force: boolean; stale: boolean; done_rev: number | null;
   finished_at: string | null; added_at: string;
+  /** 网盘备份: how its original and draft stand on the drive; `restored`, the original fetched back from there */
+  backup?: ItemBackup;
 };
 /** A subscription the topics' steps draw on that is down to the share they leave (run.held) */
 export type Held = { window: string; reset_at: string | null; remaining?: number; vendor?: string | null; group?: string | null } | null;
@@ -61,8 +64,9 @@ export function heldText(h: Held): string {
 
 /** Where a video's read stands, in a few words, and how it is said: `bad` 朱 (it needs the user), `quiet` ink-3.
  *  `stop`: why what has not started does not — its topic paused, or the quota kept for the channels (run.held). */
-export function itemState(it: Item, stop?: "paused" | "held"): { text: string; tone?: "bad" | "quiet" | "live" } {
-  if (it.excluded) return { text: "不算这期", tone: "quiet" };
+export function itemState(it: Item, stop?: "paused" | "held" | "archived"): { text: string; tone?: "bad" | "quiet" | "live" } {
+  if (it.excluded) return { text: it.excluded_why ? `不算 · ${it.excluded_why}` : "不算这期", tone: "quiet" };
+  if (stop === "archived" && it.state !== "DONE" && it.state !== "FAILED") return { text: "已归档，不读了", tone: "quiet" };
   if (stop === "paused" && (it.state === "QUEUED" || it.state === "WAITING")) return { text: "已暂停", tone: "quiet" };
   if (stop === "held" && it.state === "QUEUED") return { text: TOPIC_WAIT.TOPIC_QUOTA, tone: "quiet" };
   const p = it.progress;
@@ -137,7 +141,8 @@ export function Armed({ label, sure, onGo }: { label: string; sure: string; onGo
   );
 }
 
-export type Said = { text: string; bad?: boolean };
+/** `undo`: what 撤销 does, for a while longer */
+export type Said = { text: string; bad?: boolean; undo?: () => void };
 
 /** How an action went, for a moment at the foot of the page */
 export function useToast() {
@@ -147,15 +152,47 @@ export function useToast() {
   const say = useCallback((s: Said) => {
     setSaid(s);
     clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setSaid(null), s.bad ? 6000 : 2200);
+    timer.current = window.setTimeout(() => setSaid(null), s.undo ? 8000 : s.bad ? 6000 : 2200);
   }, []);
   useEffect(() => () => clearTimeout(timer.current), []);
+  const shown = told.shown;
   const toast = (
-    <div role={told.shown?.bad ? "alert" : "status"}>
-      {told.shown && <div className={`ch-toast${told.shown.bad ? " bad" : ""}${told.leaving ? " leaving" : ""}`}>{told.shown.text}</div>}
+    <div role={shown?.bad ? "alert" : "status"}>
+      {shown && (
+        <div className={`ch-toast${shown.bad ? " bad" : ""}${told.leaving ? " leaving" : ""}`}>
+          {shown.text}
+          {shown.undo && !told.leaving && <button type="button" className="tp-undo" onClick={() => { setSaid(null); shown.undo?.(); }}>撤销</button>}
+        </div>
+      )}
     </div>
   );
   return { say, toast };
+}
+
+/** What one page leaves the next to say: the video taken out on its page, to be undone on the topic's */
+export const handoff: { out?: { tid: number; vid: string; no: number } } = {};
+
+export const WHY = ["离题", "质量差", "转述别人"] as const;
+
+/** 不算这期, and why: the reasons stand in its place until one is picked, or the click goes elsewhere */
+export function LeaveOut({ onGo }: { onGo: (why: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    box.current?.querySelector("button")?.focus();
+    const away = (e: PointerEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); setOpen(false); } };
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", esc, true);
+    return () => { document.removeEventListener("pointerdown", away); document.removeEventListener("keydown", esc, true); };
+  }, [open]);
+  if (!open) return <button type="button" className="btn ghost sm" onClick={() => setOpen(true)}>不算这期</button>;
+  return (
+    <span ref={box} className="tp-why" role="group" aria-label="为什么不算">
+      {WHY.map((w) => <button key={w} type="button" className="btn sm" onClick={() => { setOpen(false); onGo(w); }}>{w}</button>)}
+    </span>
+  );
 }
 
 /** 0.8% · 12%: a share of a quota, a tenth of a point below ten */

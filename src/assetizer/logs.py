@@ -94,6 +94,10 @@ def digest_lines() -> list[str]:
         lines.append("新出现：" + "、".join(w["new"]))
     if w["many"]:
         lines.append(f"日志多了，可以让开发用的 agent 扫一遍（日志留 {config.get().log_retention_days} 天）")
+    from .topics.comments import used  # how much the words to 课代表 in Notion are used: kept only if they are
+    week, month = used(WEEK), used(30)
+    lines.append(f"📝 Notion 里点名课代表：这周 {week['asks']} 次，近 30 天 {month['asks']} 次"
+                 + (f"；待修 {len(month['todo'])} 条" if month["todo"] else ""))
     return lines
 
 
@@ -145,6 +149,7 @@ def export(days: int | None = None) -> dict:
     events = [{**e, "message": redact(e["message"]), "data": redact(e["data"])} for e in db.q(
         "SELECT ts, run_id, level, kind, message, data FROM events WHERE level IN ('warn','error') AND ts>=? ORDER BY id DESC LIMIT 500",
         since)]
-    return {"days": days, "week": summary(), "runs": runs, "calls": calls, "yt_dlp": ytdlp, "events": events,
+    from .topics.comments import used
+    return {"days": days, "week": summary(), "runs": runs, "calls": calls, "yt_dlp": ytdlp, "events": events, "asks": used(days),
             "versions": {"agy": [r["v"] for r in db.q("SELECT DISTINCT agy_version v FROM model_calls WHERE created_at>=? "
                                                       "AND agy_version IS NOT NULL ORDER BY v", since)]}}

@@ -734,6 +734,10 @@ button.ch-curc:focus-visible { outline-offset: -2px; }
 .ch-sheet .sfoot, .ch-target .sfoot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 /* 定稿 stays in reach however long the list of samples is */
 .ch-sheet .sfoot { position: sticky; bottom: 0; z-index: 1; margin-inline: calc(-1 * var(--s5)); padding: 12px var(--s5) calc(12px + var(--safe-b)); border-top: 1px solid var(--rule); background: var(--chp-card); margin-bottom: calc(-1 * (var(--s5) + var(--safe-b))); }
+/* why 定稿 waits (网盘备份 not chosen), at the foot's left: takes you to the line */
+.ch-sheet .sfoot:has(.why) { flex-wrap: wrap; }
+.ch-sheet .sfoot .why { margin-right: auto; min-height: 32px; padding: 0; border: 0; background: none; font: 13px var(--sans); color: var(--warn); cursor: pointer;
+  text-decoration: underline dashed 1px; text-underline-offset: 3px; }
 .ch-target > input { width: 100%; height: 36px; border: 1px solid var(--rule-2); border-radius: 9px; padding: 0 12px; font: 14px var(--sans); color: var(--ink); background: var(--nt-bg); }
 .ch-target .list { display: flex; flex-direction: column; gap: 2px; margin: 10px 0; max-height: 320px; overflow: auto; }
 .ch-target .it { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px; text-align: left; font-size: 13.5px; }
@@ -890,6 +894,14 @@ button.ch-cardh { width: 100%; text-align: left; margin: 0; }
 .ch-blink input { flex: 1; min-width: 0; height: 30px; border: 1px solid var(--rule-2); border-radius: 8px; padding: 0 10px;
   font: 13px var(--sans); color: var(--ink); background: var(--nt-bg); }
 .ch-bst p.z a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+/* 网盘备份 of the author (the 定稿单's line, kept on the 看板): its name on a line, 会员 · 公开 under it */
+.ch-passes { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; }   /* goes under its name as a whole where the line is short */
+.ch-pass { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ch-pass > .ch-seg:not(:has(.on)) { outline: 1px dashed color-mix(in srgb, var(--warn) 70%, transparent); outline-offset: -1px; }  /* not chosen yet */
+.ch-bbk { column-gap: 14px; row-gap: 6px; }
+.ch-bbk .t { flex-basis: 100%; font-size: 13.5px; color: var(--ink); }
+.ch-bbn { margin: 8px 0 0; font-size: 12.5px; color: var(--ink-2); }
+.ch-bbn a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 /* 试一期: the newest video not here yet */
 .ch-bt { display: grid; justify-items: start; gap: 4px; }
 .ch-bt > h3 { margin-bottom: 6px; }
@@ -1003,7 +1015,8 @@ button.ch-cardh { width: 100%; text-align: left; margin: 0; }
   .ch-curn .ch-icb { width: 36px; height: 40px; }
   .ch-curu { height: 36px; }
   :is(.ch-sheet, .ch-target) .ch-btn:not(.sm):not(.xs), .ch-dock .ch-btn { height: 44px; }
-  :is(.ch-sheet, .ch-target) .ch-seg button { height: 40px; padding: 0 12px; }
+  .ch-sheet .sfoot .why { min-height: 44px; }
+  :is(.ch-sheet, .ch-target) .ch-seg button, .chp .ch-bbk .ch-seg button { height: 40px; padding: 0 12px; }
   .ch-dock input { height: 40px; }
   .ch-head > .ch-seg button { height: 40px; padding: 0 14px; }
   .ch-pkc { gap: 5px; }

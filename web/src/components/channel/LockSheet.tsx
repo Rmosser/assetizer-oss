@@ -1,10 +1,32 @@
-import { useEffect, useRef, useState } from "react";
-import { get, post } from "../../api";
+import { useEffect, useId, useRef, useState } from "react";
+import { type ChannelBackup, gdrive, get, type Pass, post } from "../../api";
+import { smooth } from "../../util";
 import { Sheet, type SheetHandle } from "../Sheet";
 import { day, Icon, Seg, short, Stepper, Switch } from "./bits";
 import type { LockPreview, LockRow, NotionView } from "./types";
 
 type Base = "write" | "keep" | "replace";
+
+const PASS = [{ value: "on", label: "传" }, { value: "off", label: "不传" }];
+const passOf = (v: Pass | undefined) => (v == null ? "" : v ? "on" : "off");
+
+/** 网盘备份 of the channel's author, members-only and public videos apart: 传 or 不传, neither lit until it is chosen */
+export function BackupSegs({ member, pub, onChange, name }: {
+  member: Pass; pub: Pass; onChange: (f: "member" | "public", v: boolean) => void; name: string;
+}) {
+  return (
+    <span className="ch-passes">
+      <span className="ch-pass">
+        <span className="n">会员</span>
+        <Seg small label={`${name}：会员`} value={passOf(member)} options={PASS} onChange={(x) => onChange("member", x === "on")} />
+      </span>
+      <span className="ch-pass">
+        <span className="n">公开</span>
+        <Seg small label={`${name}：公开`} value={passOf(pub)} options={PASS} onChange={(x) => onChange("public", x === "on")} />
+      </span>
+    </span>
+  );
+}
 
 /** 定稿单: lock on one version and decide, per sample, what goes to Notion — then the 「定」 stamp. */
 export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRetarget, onTrial }: {
@@ -21,8 +43,30 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
   const [skip, setSkip] = useState<Set<string>>(new Set());  // posted while tuned, unticked: not taken in
   const [busy, setBusy] = useState(false);
   const [stamped, setStamped] = useState(false);
+  // 网盘备份: undefined while it is asked, null when there is no drive (or no YouTube ID); what the author has, else unchosen
+  const [bk, setBk] = useState<ChannelBackup | null | undefined>(undefined);
+  const [pass, setPass] = useState<{ member: Pass; public: Pass }>({ member: null, public: null });
   const sheet = useRef<SheetHandle>(null);
   const close = (then?: () => void) => (sheet.current ? sheet.current.close(then) : (then || onClose)());
+  useEffect(() => {
+    let alive = true;
+    gdrive.channel(cid).then((b) => {
+      if (!alive) return;
+      setBk(b.ready ? b : null);
+      if (b.ready) setPass({ member: b.member ?? null, public: b.public ?? null });
+    }, () => { if (alive) setBk(null); });  // not to be asked: 定稿 goes as it did
+    return () => { alive = false; };
+  }, [cid]);
+  const backup = bk ? (pass.member != null && pass.public != null ? { member: pass.member, public: pass.public } : null) : undefined;
+  // the line is far down a long sheet: beside 定稿, why it waits, and a way there
+  const bkRow = useRef<HTMLDivElement>(null);
+  const why = useId();
+  const toBackup = () => {
+    const row = bkRow.current;
+    if (!row) return;
+    row.scrollIntoView({ block: "center", behavior: smooth() });
+    row.querySelectorAll(".ch-seg")[pass.member == null ? 0 : 1]?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+  };
   useEffect(() => {
     let alive = true;
     setLp(null); setErr(null); setRerun(new Set()); setWait({});  // chosen for that version
@@ -47,6 +91,7 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
         playbook_id: pbId, samples: lp.samples.filter((s) => s.adopted || s.running).map((s) => ({ source_id: s.source_id, action: action(s) })),
         ingest: lp.ingest.available && ing ? { enabled: ing.enabled, min_minutes: ing.min } : null,
         backfill: (lp.missed || []).filter((m) => !skip.has(m.id)).map((m) => ({ id: m.id, title: m.title || "", duration: m.duration ?? null })),
+        ...(backup ? { backup } : {}),
       });
       setStamped(true);
       window.setTimeout(() => close(() => onLocked(r)), 700);
@@ -154,23 +199,33 @@ export function LockSheet({ cid, defaultPb, onClose, onLocked, onConflict, onRet
                 {lp.missed_error && <div className="srow quiet"><span className="t">{short(lp.missed_error, 40)}</span></div>}
               </div>
             ) : null}
-            {lp.ingest.available && ing && (
+            {((lp.ingest.available && ing) || bk) && (
               <div className="sgrp">
                 <div className="gh">之后</div>
-                <div className="srow">
-                  <Switch on={ing.enabled} onChange={(x) => setIng({ ...ing, enabled: x })} label="自动收录新视频" />
-                  <span className="t">自动收录新视频</span>
-                  <span className="n">{ing.min ? "短于" : "时长"}</span><Stepper label="最短时长" zero="不限" value={ing.min} onChange={(x) => setIng({ ...ing, min: x })} />
-                  <span className="n">{ing.min ? "分钟的不收 · " : "· "}只收定稿之后发布的</span>
-                </div>
+                {lp.ingest.available && ing && (
+                  <div className="srow">
+                    <Switch on={ing.enabled} onChange={(x) => setIng({ ...ing, enabled: x })} label="自动收录新视频" />
+                    <span className="t">自动收录新视频</span>
+                    <span className="n">{ing.min ? "短于" : "时长"}</span><Stepper label="最短时长" zero="不限" value={ing.min} onChange={(x) => setIng({ ...ing, min: x })} />
+                    <span className="n">{ing.min ? "分钟的不收 · " : "· "}只收定稿之后发布的</span>
+                  </div>
+                )}
+                {bk && (
+                  <div className="srow" ref={bkRow}>
+                    <span className="t">网盘备份</span>
+                    <BackupSegs name="网盘备份" member={pass.member} pub={pass.public} onChange={(f, v) => setPass({ ...pass, [f]: v })} />
+                  </div>
+                )}
               </div>
             )}
           </>
         )}
         {err && <p className="ch-err" role="alert">{err}</p>}
         <div className="sfoot">
+          {lp && backup === null && <button type="button" id={why} className="why" onClick={toBackup}>先选网盘备份</button>}
           <button className="ch-btn" onClick={() => close()}>取消</button>
-          <button className="ch-btn solid" disabled={!lp || !lp.tested || busy} onClick={lock}>{stamped ? "已定稿" : `定稿 v${v ?? ""}${nRerun ? ` · 重跑 ${nRerun} 期` : ""}`}</button>
+          <button className="ch-btn solid" disabled={!lp || !lp.tested || busy || backup === null || bk === undefined} onClick={lock}
+            aria-describedby={lp && backup === null ? why : undefined}>{stamped ? "已定稿" : `定稿 v${v ?? ""}${nRerun ? ` · 重跑 ${nRerun} 期` : ""}`}</button>
         </div>
       </div>
     </Sheet>

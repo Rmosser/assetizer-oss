@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { media, post, srcSet } from "../api";
-import { ALERT_FIX } from "../box";
+import { alertFix } from "../box";
 import { IssueTitle, issueHeadline, originalTitle, typeset, Words } from "../cjk";
 import { agyAlert, openAgyLogin } from "../components/AgyLogin";
 import { about, big, HBars, Heat, hrs, Kpi, ymd } from "../components/Figures";
@@ -239,7 +239,7 @@ function Attention({ data, issues, reload }: { data: any; issues: any[]; reload:
     <section className="attn" aria-label="需要你">
       {mergeAlerts(data.alerts).map((a: any) => {
         const act: [string, () => void] | null = agyAlert(a) ? ["登录 agy", openAgyLogin] : null;
-        const fix = ALERT_FIX[a.key];
+        const fix = alertFix(a);
         return (
           <div className={`attn-row${a.severity === "info" ? "" : " bad"}`} key={a.key} role={a.severity === "info" ? "status" : "alert"}>
             <span className="mark" aria-hidden />

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>选片篮</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <button id="list" class="list" type="button" hidden></button>
+  <ol id="items" class="items" aria-label="选片篮"></ol>
+  <p id="empty" class="empty" hidden>在缩略图左上角勾选，或按 x</p>
+  <p id="undo" class="undo" hidden><span>已清空</span><button type="button" class="link">撤销</button></p>
+  <button id="clear" class="link clear" type="button" hidden>清空</button>
+  <footer id="foot" class="foot" hidden>
+    <p id="sum" class="sum" aria-live="polite"></p>
+    <button id="hand" class="solid" type="button">交给课代表</button>
+  </footer>
+  <script src="src/boxes.js"></script>
+  <script src="src/basket.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

@@ -1,4 +1,5 @@
 /* The box's state in words: what the 机房 shows at a glance and the 设置 page shows beside each setting (`_box` in web/app.py). */
+import type { GDriveView } from "./api";
 import type { Left } from "./components/Routes";
 import { ago, at8, BACKFILL_BAD, BACKFILL_STOP, bytes, VENDOR_NAME } from "./util";
 
@@ -137,6 +138,30 @@ function telegramLine(tg: any): Line {
   return tg.ok === false ? { lamp: "bad", value: "发不出去" } : { lamp: "ok", value: "已接通" };
 }
 
+/** authors and topics whose 传 / 不传 is not decided yet: "3 位待定", "1 个专题待定", "3 位 · 1 个专题待定" */
+export function pendingRules(g?: GDriveView | null): string | null {
+  const a = g?.rules?.authors.pending || 0, t = g?.rules?.topics.pending || 0;
+  return a || t ? `${[a && `${a} 位`, t && `${t} 个专题`].filter(Boolean).join(" · ")}待定` : null;
+}
+
+/** 网盘备份, on the 设置 page only (it does not hold production up): what is backed up, or what stands in the way */
+export function gdriveLine(g?: GDriveView | null): Line | undefined {
+  if (!g) return undefined;
+  const line = ((): Line => {
+    switch (g.state) {
+      case "ok": return { lamp: "ok", value: g.usage?.videos ? `${g.usage.videos} 期 · ${bytes(g.usage.bytes)}` : "已就绪" };
+      case "auth": return { lamp: "bad", value: "登录失效" };
+      case "failing": return { lamp: "bad", value: "上传失败" };
+      case "login": return { lamp: "idle", value: "未登录" };
+      case "folder": return { lamp: "idle", value: g.folder ? "待测试" : "待建文件夹" };
+      default: return { lamp: "idle", value: "未配置" };
+    }
+  })();
+  // what is not decided is said in amber once everything else works: a step still to do, or one gone wrong, comes first
+  const pending = g.state === "ok" ? pendingRules(g) : null;
+  return pending ? { lamp: "warn", value: pending } : line;
+}
+
 /** How each part of the box is doing: a lamp and a few words, the same on both pages. */
 export function boxLines(data: any): Record<"agy" | "magpie" | "youtube" | "notion" | "disk" | "slots" | "backfill" | "asr" | "notify", Line> {
   const n = data.notion, d = data.disk, kn = data.knobs;
@@ -161,3 +186,11 @@ export const ALERT_FIX: Record<string, { href: string; label: string }> = {
   PROVIDER_MODEL: { href: "/settings#models", label: "换模型" },
   DISK_LOW: { href: "/settings#disk", label: "看磁盘" },
 };
+
+/** Where an alert is fixed: what the box raised it with (`action` {label, href}, a page of this app), else ALERT_FIX */
+export function alertFix(a: { key: string; action?: unknown }): { href: string; label: string } | undefined {
+  let x: any = a.action;
+  if (typeof x === "string") { try { x = JSON.parse(x); } catch { x = null; } }
+  if (x && typeof x.href === "string" && /^\/(?![\/\\])/.test(x.href) && typeof x.label === "string" && x.label) return { href: x.href, label: x.label };
+  return ALERT_FIX[a.key];
+}

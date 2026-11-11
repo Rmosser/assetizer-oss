@@ -166,10 +166,14 @@ def answer(kind: str) -> str:
     if kind == "topic-revise":
         return "## 支撑\n\n密度 80% [L01]，右手 [R01]。" + "细节。" * 80 + '\n\n```json\n{"fit": "high", "gist": "支撑密度 80%，右手"}\n```'
     if kind == "topic-synth":
-        return json.dumps({"answer": "密度设 80% [V1 L01]。", "first": [{"v": 1, "why": "参数全"}],
-                           "sections": [{"title": "参数", "body": "80% [V1 L01]"}], "videos": [{"v": 1, "adds": "密度"}]},
-                          ensure_ascii=False)
+        return json.dumps({"answer": "密度设 80% [V1 L01]。", "certainty": {"level": "中", "why": "只有一期"},
+                           "claims": [{"id": "C1", "type": "事实", "text": "密度 80% [V1 L01]", "v": [1]}],
+                           "first": [{"v": 1, "why": "参数全"}], "sections": [{"title": "参数", "claims": ["C1"]}],
+                           "videos": [{"v": 1, "adds": "密度"}]}, ensure_ascii=False)
     raise AssertionError(kind)
+
+
+ASKED: dict[str, str] = {}  # the last prompt of each kind the stand-in was given
 
 
 @pytest.fixture
@@ -180,12 +184,14 @@ def stand_in(home, monkeypatch):
     from assetizer.providers.agy import CallResult
     from assetizer.topics import media_dir
     calls: list[str] = []
+    ASKED.clear()
 
     class Stand:
         name, media_size_limit = "agy", None
 
         def call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None):
             calls.append(kind)
+            ASKED[kind] = prompt
             call_dir.mkdir(parents=True, exist_ok=True)
             return CallResult(answer(kind), {"status": "SUCCESS", "actual_model": "stand-in", "usage": {"input_tokens": 1}})
 
@@ -415,6 +421,18 @@ def test_numbers_are_not_given_twice_and_a_question_is_words(home):
     assert page["topic"]["question"] == "光固化" and [(i["id"], i["no"]) for i in page["items"]] == [("aaaaaaaaaaa", 1), ("ccccccccccc", 3)]
 
 
+def test_a_basket_sent_twice_makes_one_topic(home):
+    from fastapi.testclient import TestClient
+    from assetizer.web.app import app
+    c = TestClient(app, base_url="http://localhost")
+    body = {"question": "怎么加支撑", "videos": [{"id": "aaaaaaaaaaa"}], "batch": "b4sket-0001"}
+    first = c.post("/api/topics", json=body).json()
+    again = c.post("/api/topics", json=body).json()
+    assert again == {"id": first["id"], "again": True}
+    assert len(c.get("/api/topics").json()["topics"]) == 1
+    assert c.post("/api/topics", json={**body, "batch": "no good!"}).status_code == 422
+
+
 def test_samples_keep_their_low_copies_before_topics(home):
     from assetizer import playback
     assert playback._rank({}, 1.0) > playback._rank({"topic": True}, 9.0)
@@ -430,3 +448,491 @@ def test_topic_media_is_released_and_folders_of_deleted_topics_go(stand_in, home
     assert run.retention() == {"purged": 1, "dropped": 0}
     assert not media_dir("abcdefghijk").exists() and not (root() / "9").exists()
     assert db.one("SELECT media_state FROM videos")["media_state"] == "PURGED"
+
+
+# ---------------------------------------------------------------- the answer is made of claims (design §R8-10)
+def test_notes_know_the_day_and_what_the_speaker_gains(stand_in, home, monkeypatch):
+    """A time word is read against the day the video came out; ads, courses, positions and what is relayed are kept,
+    through the 补看 too; a video handed over without its day gets it from YouTube before its notes."""
+    from assetizer import db, youtube
+    from assetizer.topics import run
+    import sys
+    me = sys.modules[__name__]
+    real = me.answer
+    tail = {"fit": "high", "gist": "明年上半年见顶", "interests": ["持仓：重仓 XX [00:12 说]"], "relays": ["高盛 10 月的报告"],
+            "looks": [{"id": "R01", "start": "00:30", "end": "00:32", "mode": "frame", "question": "再看一眼"}]}
+    monkeypatch.setattr(me, "answer", lambda kind: ("## 判断\n\n明年上半年（2026 年上半年）见顶 [00:05 说]。" + "细节。" * 80 +
+                                                    "\n\n```json\n" + json.dumps(tail, ensure_ascii=False) + "\n```")
+                        if kind == "topic-write" else real(kind))
+    monkeypatch.setattr(youtube, "metadata", lambda url: {"title": "加支撑", "channel": "Lab", "upload_date": "20251203"})
+    db.set_setting("worker_slots", 2)
+    w = Worker()
+    run.dispatch(w)
+    w.settle()
+    item = db.one("SELECT * FROM topic_videos")
+    assert item["state"] == "DONE", item["error"]
+    assert db.one("SELECT published_at FROM videos")["published_at"] == "20251203"
+    assert "2025-12-03" in ASKED["topic-write"] and "2025-12-03" in ASKED["topic-revise"]
+    assert json.loads(item["card"]) == {"interests": ["持仓：重仓 XX [00:12 说]"], "relays": ["高盛 10 月的报告"]}
+
+
+CLAIMS = {
+    "answer": "会提价 [V2 00:20 帧]。", "certainty": {"level": "medium", "why": "一期事实推翻了旧预测"},
+    "sections": [{"title": "价格", "claims": ["C1", "C2", "C3", "C9"]}, {"title": "渠道", "claims": [], "note": "这批视频都没讲"}],
+    "claims": [
+        {"id": "C1", "type": "预测", "text": "会降价 [V1 00:10 说]", "v": [1], "independent": 1, "certainty": "高", "status": "现行",
+         "due": "2025-12-31", "condition": "年底前官网标价低于 3 月"},
+        {"id": "C2", "type": "fact", "text": "已经提价 [V2 00:20 帧]", "v": [2, 9], "independent": 3, "certainty": "高"},
+        {"id": "C3", "type": "解读", "text": "没有出处的话", "v": []},
+        {"id": "C2", "type": "解读", "text": "同号的第二条", "v": [2]},
+    ],
+    "disputes": [{"id": "D1", "about": "会不会降价", "claims": ["C1", "C3"]},
+                 {"id": "D2", "about": "价格往哪走", "claims": ["C1", "C2"], "decide": "年底的标价", "lean": "提价，V2 是标价截图"}],
+    "sources": [{"v": 1, "stance": "看降", "interests": "赞助：某券商"}, {"v": 9, "stance": "?"}],
+    "balance": "", "first": [{"v": 2, "why": "有标价"}, {"v": 9, "why": "?"}], "videos": [{"v": 1, "adds": "旧预测"}],
+    "changes": ["C1 落空：V2 显示已经提价"], "answer_changed": True,
+}
+
+
+def test_the_answer_is_made_of_claims_each_with_its_kind_videos_and_certainty(home):
+    """A claim without a source, a video not in the batch and a side with no other side drop out; a claim one source
+    holds up is never 高; the ids stay; what the user marked stays as they marked it."""
+    from assetizer.topics import write as W
+    got: dict = {}
+
+    class Fake:
+        def structured(self, root, stage, ask, schema, normalize=None, check=None):
+            got["ask"], got["schema"] = ask, schema
+            o = normalize(json.loads(json.dumps(CLAIMS)))
+            if check:
+                check(o)
+            return o
+    videos = [{"no": 1, "title": "三月", "channel": "甲", "published": "20250301", "fit": "high", "gist": "会降价",
+               "asset": "会降价 [00:10 说]", "card": {"interests": ["赞助：某券商 [01:00 说]"], "relays": []}},
+              {"no": 2, "title": "十月", "channel": "乙", "published": "20251001", "fit": "high", "gist": "已提价",
+               "asset": "已经提价 [00:20 帧]", "card": {}}]
+    prev = {"answer": "会降价 [V1 00:10 说]。", "certainty": {"level": "低", "why": "只有一期"},
+            "claims": [{"id": "C1", "type": "预测", "text": "会降价 [V1 00:10 说]", "v": [1], "status": "现行"}]}
+    marks = {"C1": {"status": "落空", "why": "已经提价", "at": "2026-11-01T00:00:00+00:00"}}
+    o = W.synth(Fake(), home, "topic-synth", "会降价吗", None, videos, prev=prev, marks=marks, today="2026-11-09")
+    ask = got["ask"]
+    assert "发布：2025-03-01" in ask and "利益相关：赞助：某券商 [01:00 说]" in ask and "今天是 2026-11-09" in ask
+    assert '"C1"' in ask and "落空" in ask and "已经提价" in ask  # the version before and the user's mark
+    assert "claims" in got["schema"]["required"] and "certainty" in got["schema"]["required"]
+    by = {c["id"]: c for c in o["claims"]}
+    assert list(by) == ["C1", "C2"]  # C3 has no source; the second C2 is a double
+    assert by["C1"]["status"] == "落空" and by["C1"]["certainty"] == "中"  # the user's mark; one source is never 高
+    assert by["C2"]["type"] == "事实" and by["C2"]["v"] == [2] and by["C2"]["independent"] == 1 and by["C2"]["certainty"] == "中"
+    assert o["certainty"]["level"] == "中" and o["sections"][0]["claims"] == ["C1", "C2"] and o["sections"][1]["note"] == "这批视频都没讲"
+    assert [d["id"] for d in o["disputes"]] == ["D2"] and [s["v"] for s in o["sources"]] == [1]
+    assert [f["v"] for f in o["first"]] == [2] and o["answer_changed"] is True
+
+
+def test_each_answer_is_kept_as_a_version_and_the_next_one_is_told_the_last(stand_in, home, monkeypatch):
+    from assetizer import db, notify
+    from assetizer.topics import run
+    import sys
+    me = sys.modules[__name__]
+    real = me.answer
+    monkeypatch.setattr(notify, "send", lambda text, keep=True: True)
+    monkeypatch.setattr(me, "answer", lambda kind: json.dumps({**CLAIMS, "answer": "会提价 [V1 00:10 说]。"}, ensure_ascii=False)
+                        if kind == "topic-synth" else real(kind))
+    db.set_setting("worker_slots", 2)
+    w = Worker()
+    run.dispatch(w)
+    w.settle()
+    run.dispatch(w)
+    w.settle()
+    assert [r["n"] for r in db.q("SELECT n FROM topic_versions WHERE topic_id=1")] == [1]
+    from fastapi.testclient import TestClient
+    from assetizer.web.app import app
+    c = TestClient(app, base_url="http://localhost")
+    page = c.post("/api/topics/1/marks", json={"claim": "C1", "status": "落空", "why": "后来提价了"}).json()
+    c1 = next(x for x in page["synth"]["claims"] if x["id"] == "C1")
+    assert c1["status"] == "落空" and page["since"]["marks"] == 1  # marked: shown at once, the answer still to be redone
+    assert c.post("/api/topics/1/marks", json={"claim": "C7", "status": "落空"}).status_code == 404
+    assert db.one("SELECT synth_state FROM topics")["synth_state"] == "DONE"  # a mark never asks a model by itself
+    assert c.post("/api/topics/1/synth", json={}).status_code == 200
+    run.dispatch(w)
+    w.settle()
+    assert db.one("SELECT synth_state, synth_error FROM topics") == {"synth_state": "DONE", "synth_error": None}
+    assert [r["n"] for r in db.q("SELECT n FROM topic_versions WHERE topic_id=1")] == [1, 2]
+    assert "后来提价了" in ASKED["topic-synth"] and "会提价 [V1 00:10 说]" in ASKED["topic-synth"]  # the last version, the mark
+    page = c.get("/api/topics/1").json()
+    assert page["since"]["marks"] == 0 and [x["n"] for x in page["versions"]] == [2, 1]
+    assert next(x for x in page["synth"]["claims"] if x["id"] == "C1")["status"] == "落空"
+
+
+def test_a_channel_s_predictions_are_counted_over_every_topic_once(home):
+    """The sources show how a channel's predictions went: over every topic's answer, the user's marks applied; one
+    prediction from one video in two topics counts once, settled over open; replaced or 不算 does not count."""
+    from assetizer import db
+    from assetizer.util import now
+    from assetizer.web import topics as T
+    for vid, ch in (("aaaaaaaaaaa", "甲"), ("bbbbbbbbbbb", "乙")):
+        db.exec("INSERT INTO videos(id, url, title, channel, created_at) VALUES (?, ?, ?, ?, ?)", vid, f"https://youtu.be/{vid}", vid, ch, now())
+
+    def topic(n: int, claims: list[dict], marks: dict | None = None):
+        db.exec("INSERT INTO topics(question, created_at, updated_at, synth, marks) VALUES (?, ?, ?, ?, ?)", f"问题{n}", now(), now(),
+                json.dumps({"answer": "", "claims": claims, "sections": [], "first": [], "videos": []}, ensure_ascii=False),
+                json.dumps(marks, ensure_ascii=False) if marks else None)
+        for no, vid in ((1, "aaaaaaaaaaa"), (2, "bbbbbbbbbbb")):
+            db.exec("INSERT INTO topic_videos(topic_id, video_id, no, state, rev, added_at) VALUES (?, ?, ?, 'DONE', 1, ?)", n, vid, no, now())
+    p = {"type": "预测", "v": [1], "due": "2026-06-30", "status": "现行"}
+    topic(1, [{**p, "id": "C1", "text": "会降价"}, {**p, "id": "C2", "text": "会裁员", "due": "2026-03-31", "status": "落空"},
+              {**p, "id": "C3", "text": "会扩产", "v": [1, 2], "due": "2027-01-01"}, {**p, "id": "C4", "text": "旧说法", "status": "被取代"},
+              {"id": "C5", "type": "事实", "text": "提价了", "v": [2], "status": "现行"}])
+    topic(2, [{**p, "id": "C1", "text": "年中前降价"}, {**p, "id": "C2", "text": "会上市", "due": "2026-09-30"}],
+          marks={"C1": {"status": "应验", "at": now()}, "C2": {"status": "不算", "at": now()}})
+    from assetizer.topics import write as W
+    assert W.record({r["channel"] for r in T._items(1)}) == {"甲": {"hit": 1, "miss": 1, "open": 1}, "乙": {"hit": 0, "miss": 0, "open": 1}}
+
+
+def _second_read(home):
+    """A second video of the stand-in topic, read already (its notes on disk)."""
+    from assetizer import db
+    from assetizer.topics import work_dir
+    from assetizer.util import now
+    db.exec("INSERT INTO videos(id, url, title, channel, created_at) VALUES ('bbbbbbbbbbb', 'https://youtu.be/bbbbbbbbbbb', '十月', '乙', ?)", now())
+    db.exec("""INSERT INTO topic_videos(topic_id, video_id, no, state, rev, done_rev, fit, gist, finished_at, added_at)
+               VALUES (1, 'bbbbbbbbbbb', 2, 'DONE', 1, 1, 'high', '已经提价', ?, ?)""", now(), now())
+    d = work_dir(1, 1, "bbbbbbbbbbb")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "notes.md").write_text("已经提价 [00:20 帧]")
+
+
+def test_an_answer_done_again_is_told_only_when_it_changed_and_leaving_a_video_out_waits(stand_in, home, monkeypatch):
+    """Put together again, the phone hears of it only when the conclusion or how sure it is changed, and is told
+    what changed. A video left out does not put the answer together again by itself; the page says the answer still
+    cites it, and the next answer is asked for there."""
+    from fastapi.testclient import TestClient
+    from assetizer import db, notify
+    from assetizer.topics import run
+    from assetizer.web.app import app
+    import sys
+    me = sys.modules[__name__]
+    real = me.answer
+    told: list[str] = []
+    monkeypatch.setattr(notify, "send", lambda text, keep=True: told.append(text) or True)
+    replies = iter([CLAIMS, {**CLAIMS, "answer_changed": False, "changes": ["措辞"]},
+                    {**CLAIMS, "answer_changed": True, "changes": ["结论：从会降价改为会提价"]}])
+    monkeypatch.setattr(me, "answer", lambda kind: json.dumps(next(replies), ensure_ascii=False) if kind == "topic-synth" else real(kind))
+    _second_read(home)
+    db.set_setting("worker_slots", 2)
+    w = Worker()
+    c = TestClient(app, base_url="http://localhost")
+
+    def synth():
+        run.dispatch(w)
+        w.settle()
+    synth()  # V1 read
+    synth()  # the first answer
+    assert len(told) == 1 and told[0].startswith("🔎 专题读完了（2 期）")
+    db.exec("UPDATE topic_videos SET finished_at='2030-01-01T00:00:00+00:00' WHERE video_id='abcdefghijk'")  # read again
+    run.settle(1)
+    assert db.one("SELECT synth_state FROM topics")["synth_state"] == "QUEUED"  # a read the answer does not have
+    synth()
+    assert len(told) == 1  # the same conclusion, as sure: nothing on the phone
+    page = c.post("/api/topics/1/videos/bbbbbbbbbbb", json={"action": "exclude"}).json()
+    assert page["synth_state"] == "DONE" and page["since"]["out"] == 1  # left out: said on the page, not done again by itself
+    page = c.post("/api/topics/1/videos/bbbbbbbbbbb", json={"action": "include"}).json()
+    assert page["synth_state"] == "DONE" and page["since"]["out"] == 0
+    from assetizer.topics import work_dir
+    (work_dir(1, 1, "abcdefghijk") / "notes.md").write_text("已经提价了 [00:12 说]")  # read again, and it says something new
+    db.exec("UPDATE topic_videos SET finished_at='2031-01-01T00:00:00+00:00' WHERE video_id='abcdefghijk'")
+    run.settle(1)
+    synth()
+    assert len(told) == 2 and told[1].startswith("🔎 专题更新了") and "结论：从会降价改为会提价" in told[1]
+
+
+def test_an_archived_topic_keeps_its_answer_and_stops(stand_in, home, monkeypatch):
+    """A question answered is archived with how it came out: its answer stays, nothing more is read, put together,
+    watched or told; taken back, it goes on."""
+    from fastapi.testclient import TestClient
+    from assetizer import db, notify
+    from assetizer.topics import run
+    from assetizer.web.app import app
+    monkeypatch.setattr(notify, "send", lambda text, keep=True: True)
+    db.set_setting("worker_slots", 2)
+    w = Worker()
+    run.dispatch(w)
+    w.settle()
+    run.dispatch(w)
+    w.settle()
+    c = TestClient(app, base_url="http://localhost")
+    page = c.post("/api/topics/1/archive", json={"how": "应验", "why": "12 月真降了"}).json()
+    assert page["topic"]["archived"]["how"] == "应验" and page["topic"]["archived"]["why"] == "12 月真降了" and page["synth"]
+    assert c.post("/api/topics/1/archive", json={"how": "大概"}).status_code == 422
+    assert c.post("/api/topics/1/synth", json={}).status_code == 409
+    assert c.post("/api/topics/1/videos", json={"videos": [{"id": "ccccccccccc"}]}).status_code == 409
+    assert c.post("/api/topics/1/watch", json={"channels": [], "words": ["降息"]}).status_code == 409
+    db.exec("UPDATE topic_videos SET state='QUEUED'")
+    db.exec("UPDATE topics SET synth_state='QUEUED'")
+    assert not run.dispatch(w)  # nothing read, nothing put together
+    assert c.get("/api/topics").json()["topics"][0]["archived"]["how"] == "应验"
+    page = c.post("/api/topics/1/archive", json={"how": None}).json()
+    assert page["topic"]["archived"] is None
+    assert run.dispatch(w)
+    w.settle()
+
+
+def test_a_prediction_due_is_told_once_to_be_settled(home, monkeypatch):
+    """A prediction past its day, not settled, is told once (one word for a topic's); settled, marked, still to
+    come or archived it is not."""
+    from assetizer import db, notify
+    from assetizer.topics import run
+    from assetizer.util import now
+    told: list[str] = []
+    monkeypatch.setattr(notify, "send", lambda text, keep=True: told.append(text) or True)
+    p = {"type": "预测", "v": [1], "status": "现行"}
+    claims = [{**p, "id": "C1", "text": "年底前降两次 [V1 00:10 说]", "due": "2026-01-31"},
+              {**p, "id": "C2", "text": "明年回到 3% [V1 00:20 说]", "due": "2099-12-31"},
+              {**p, "id": "C3", "text": "11 月就降 [V1 00:30 说]", "due": "2025-11-30"},
+              {**p, "id": "C4", "text": "已经结算的 [V1]", "due": "2025-10-31", "status": "落空"},
+              {"id": "C5", "type": "事实", "text": "降了 [V1]", "v": [1], "status": "现行"}]
+    for q, arch in (("降息几次", None), ("美元", now())):
+        db.exec("""INSERT INTO topics(question, created_at, updated_at, synth, synth_state, marks, archived_at)
+                   VALUES (?, ?, ?, ?, 'DONE', ?, ?)""", q, now(), now(),
+                json.dumps({"answer": "", "claims": claims, "sections": [], "first": [], "videos": []}, ensure_ascii=False),
+                json.dumps({"C3": {"status": "应验", "at": now()}}), arch)
+    run.remind(today="2026-11-09")
+    assert len(told) == 1 and "降息几次" in told[0] and "年底前降两次" in told[0] and "[V1" not in told[0]
+    assert "明年回到" not in told[0] and "11 月就降" not in told[0] and "已经结算" not in told[0]
+    run.remind(today="2026-11-10")
+    assert len(told) == 1
+
+
+def test_watched_channels_offer_new_videos_without_adding_them(home, monkeypatch):
+    """A topic watches channels and words; what is new and fits is offered (要加吗), never added or read by itself;
+    what was there when the watch began, or does not fit, is not offered; taken or dropped, it is not offered again."""
+    from fastapi.testclient import TestClient
+    from assetizer import db, notify
+    from assetizer.topics import run, watch
+    from assetizer.util import now
+    from assetizer.web.app import app
+    told: list[str] = []
+    monkeypatch.setattr(notify, "send", lambda text, keep=True: told.append(text) or True)
+    db.exec("INSERT INTO topics(question, created_at, updated_at) VALUES ('美联储会降息几次', ?, ?)", now(), now())
+    db.exec("""INSERT INTO videos(id, url, title, channel, info, created_at) VALUES ('aaaaaaaaaaa', 'https://youtu.be/aaaaaaaaaaa',
+               '九月', '利率观察', ?, ?)""", json.dumps({"channel_url": "https://www.youtube.com/channel/UCrates"}), now())
+    db.exec("INSERT INTO topic_videos(topic_id, video_id, no, state, rev, added_at) VALUES (1, 'aaaaaaaaaaa', 1, 'DONE', 1, ?)", now())
+    c = TestClient(app, base_url="http://localhost")
+    page = c.get("/api/topics/1").json()
+    assert page["watch"]["can"] == [{"name": "利率观察", "url": "https://www.youtube.com/channel/UCrates"}]
+    up = [{"id": "old00000000", "title": "降息的老视频", "channel": "利率观察"}]
+    monkeypatch.setattr(watch, "listing", lambda target, most=15: [dict(e) for e in up])
+    page = c.post("/api/topics/1/watch", json={"channels": ["https://www.youtube.com/channel/UCrates"], "words": ["降息"]}).json()
+    assert page["watch"]["channels"] == [{"name": "利率观察", "url": "https://www.youtube.com/channel/UCrates"}]
+    watch.check(1)  # the first look: what is there already is not new
+    assert not told and c.get("/api/topics/1").json()["candidates"] == []
+    up[:0] = [{"id": "new00000001", "title": "12 月降息前瞻", "channel": "利率观察", "duration": 600, "upload_date": "20261108"},
+              {"id": "new00000002", "title": "开箱一台相机", "channel": "利率观察"},
+              {"id": "aaaaaaaaaaa", "title": "九月", "channel": "利率观察"}]
+    watch.check(1)
+    assert len(told) == 1 and "12 月降息前瞻" in told[0] and "开箱" not in told[0]
+    page = c.get("/api/topics/1").json()
+    assert [x["id"] for x in page["candidates"]] == ["new00000001"] and page["counts"]["videos"] == 1  # offered, not added
+    page = c.post("/api/topics/1/candidates/new00000001", json={"take": True}).json()
+    assert page["candidates"] == [] and [it["id"] for it in page["items"]] == ["aaaaaaaaaaa", "new00000001"]
+    assert page["items"][1]["state"] == "QUEUED"
+    watch.check(1)
+    assert len(told) == 1  # nothing new
+    assert db.one("SELECT watched_at FROM topics")["watched_at"]
+    t = db.one("SELECT watched_at FROM topics")["watched_at"]
+    run.housekeeping(10**9)  # not due again within the day
+    assert db.one("SELECT watched_at FROM topics")["watched_at"] == t
+
+
+# ---------------------------------------------------------------- what goes wrong in use (第四批)
+def test_a_video_left_out_says_why(stand_in, home):
+    """不算这期 says why — 离题, 质量差 or 转述别人 — on the row; taken back in, the reason goes with it."""
+    from fastapi.testclient import TestClient
+    from assetizer.web.app import app
+    c = TestClient(app, base_url="http://localhost")
+    _second_read(home)
+    url = "/api/topics/1/videos/bbbbbbbbbbb"
+    assert c.post(url, json={"action": "exclude", "why": "不喜欢"}).status_code == 422
+    row = lambda page: next(i for i in page["items"] if i["id"] == "bbbbbbbbbbb")  # noqa: E731
+    page = c.post(url, json={"action": "exclude", "why": "转述别人"}).json()
+    assert row(page)["excluded"] and row(page)["excluded_why"] == "转述别人"
+    page = c.post(url, json={"action": "include"}).json()
+    assert not row(page)["excluded"] and row(page)["excluded_why"] is None
+
+
+def test_a_video_waiting_half_a_day_does_not_hold_the_answer_back(stand_in, home, monkeypatch):
+    """A video YouTube keeps refusing holds the answer back half a day at most: then the others are put together,
+    and the phone is told which one waits and why; once it is read, the answer is put together again with it."""
+    import time
+    from assetizer import db, notify
+    from assetizer.topics import run
+    told: list[str] = []
+    monkeypatch.setattr(notify, "send", lambda text, keep=True: told.append(text) or True)
+    _second_read(home)
+    wait = lambda: (db.exec("UPDATE topic_videos SET state='RUNNING' WHERE video_id='abcdefghijk'"),  # noqa: E731
+                    run.Job(1, "abcdefghijk").wait("YOUTUBE_AUTH", "要登录"))
+    wait()
+    first = db.one("SELECT state, wait_since FROM topic_videos WHERE video_id='abcdefghijk'")
+    assert first["state"] == "WAITING" and first["wait_since"]
+    assert db.one("SELECT synth_state FROM topics")["synth_state"] is None  # it may be read any minute: the answer waits
+    wait()  # tried again (every half hour): the first wait is what counts
+    assert db.one("SELECT wait_since FROM topic_videos WHERE video_id='abcdefghijk'")["wait_since"] == first["wait_since"]
+    db.exec("UPDATE topic_videos SET wait_since='2026-01-01T00:00:00+00:00' WHERE video_id='abcdefghijk'")
+    t = time.time()
+    monkeypatch.setattr(run, "_last", {"retry": 0.0, "retention": t, "remind": t, "watch": t, "comments": t})
+    run.housekeeping(t)  # half a day on: tried again, and the answer no longer waits for it
+    assert db.one("SELECT state FROM topic_videos WHERE video_id='abcdefghijk'")["state"] == "QUEUED"
+    assert db.one("SELECT synth_state FROM topics")["synth_state"] == "QUEUED"
+    run.put_together(1)
+    assert len(told) == 1 and told[0].startswith("🔎 专题读完了（1 期，1 期还在等）")
+    assert "V1 还在等：YouTube 需登录，读完再补上" in told[0]
+    w = Worker()
+    run.dispatch(w)  # read at last: put in
+    w.settle()
+    assert db.one("SELECT state, wait_since FROM topic_videos WHERE video_id='abcdefghijk'") == {"state": "DONE", "wait_since": None}
+    assert db.one("SELECT synth_state FROM topics")["synth_state"] == "QUEUED"
+
+
+def test_a_video_taken_out_comes_back_with_its_number_and_notes(stand_in, home):
+    """移出专题 hides a video for 7 days: 撤销, or adding it again, brings back its number and its notes with nothing
+    read again (read again only for a question changed meanwhile); after 7 days its reads go."""
+    from fastapi.testclient import TestClient
+    from assetizer import db
+    from assetizer.topics import run, work_dir
+    from assetizer.web.app import app
+    c = TestClient(app, base_url="http://localhost")
+    _second_read(home)
+    url = "/api/topics/1/videos/bbbbbbbbbbb"
+    rows = lambda page: [(i["id"], i["no"], i["state"]) for i in page["items"]]  # noqa: E731
+    assert c.post(url, json={"action": "restore"}).status_code == 404  # nothing taken out
+    page = c.post(url, json={"action": "remove"}).json()
+    assert rows(page) == [("abcdefghijk", 1, "QUEUED")] and (work_dir(1, 1, "bbbbbbbbbbb") / "notes.md").exists()
+    page = c.post(url, json={"action": "restore"}).json()
+    assert rows(page) == [("abcdefghijk", 1, "QUEUED"), ("bbbbbbbbbbb", 2, "DONE")] and page["items"][1]["fit"] == "high"
+    c.post(url, json={"action": "remove"})
+    page = c.post("/api/topics/1/videos", json={"videos": [{"id": "bbbbbbbbbbb"}, {"id": "ccccccccccc"}]}).json()
+    assert rows(page) == [("abcdefghijk", 1, "QUEUED"), ("bbbbbbbbbbb", 2, "DONE"), ("ccccccccccc", 3, "QUEUED")]
+    c.post(url, json={"action": "remove"})
+    c.post("/api/topics/1", json={"question": "支撑要多密"})
+    page = c.post(url, json={"action": "restore"}).json()
+    back = next(i for i in page["items"] if i["id"] == "bbbbbbbbbbb")
+    assert (back["no"], back["state"], back["stale"]) == (2, "QUEUED", True)  # read for the new question; the old notes till then
+    c.post(url, json={"action": "remove"})
+    db.exec("UPDATE topic_removed SET removed_at='2026-01-01T00:00:00+00:00'")
+    run.retention()
+    assert not work_dir(1, 1, "bbbbbbbbbbb").exists() and c.post(url, json={"action": "restore"}).status_code == 404
+    assert db.one("SELECT 1 FROM videos WHERE id='bbbbbbbbbbb'")  # its draft stays with the video a while, for the next topic
+
+
+def test_a_video_gone_from_youtube_keeps_its_frames_and_is_read_from_its_draft(stand_in, home, monkeypatch):
+    """The frames the notes cite are kept when the read ends; once the original is purged and the video is gone
+    from YouTube, they still show, and a read for a new question goes on from the draft (no looks) instead of failing."""
+    import sys
+    from fastapi.testclient import TestClient
+    from assetizer import db, youtube
+    from assetizer.topics import draft_dir, run
+    from assetizer.web.app import app
+    me = sys.modules[__name__]
+    real = me.answer
+    monkeypatch.setattr(me, "answer", lambda kind: ("## 支撑\n\n密度 80% [00:10.0 帧]，右手 [R01]。" + "细节。" * 80 +
+                                                    '\n\n```json\n{"fit": "high", "gist": "支撑密度 80%"}\n```')
+                        if kind == "topic-revise" else real(kind))
+    db.set_setting("worker_slots", 4)
+    w = Worker()
+    run.dispatch(w)
+    w.settle()
+    assert (draft_dir("abcdefghijk") / "shots" / "10.0.jpg").exists()
+    db.exec("UPDATE videos SET used_at='2026-01-01T00:00:00+00:00'")
+    assert run.retention()["purged"] == 1
+    c = TestClient(app, base_url="http://localhost")
+    v = c.get("/api/topics/1/videos/abcdefghijk").json()
+    assert not v["frames"] and v["shots"] == ["10.0"]
+    assert c.get("/api/topics/1/videos/abcdefghijk/frame?t=10").status_code == 200
+    assert c.get("/api/topics/1/videos/abcdefghijk/frame?t=11").status_code == 404
+
+    def gone(*_a, **_k):
+        raise youtube.AcquireError("VIDEO_REMOVED", "This video has been removed by the uploader")
+    monkeypatch.setattr(youtube, "download", gone)
+    monkeypatch.setattr(youtube, "metadata", gone)
+    c.post("/api/topics/1", json={"question": "光固化支撑要多密"})
+    n = len(stand_in)
+    run.dispatch(w)
+    w.settle()
+    item = db.one("SELECT state, done_rev, error FROM topic_videos")
+    assert (item["state"], item["done_rev"]) == ("DONE", 2), item["error"]
+    again = stand_in[n:]
+    assert "topic-plan" in again and "topic-write" in again
+    assert not any(k.startswith(("draft-", "look-", "second-", "topic-revise")) for k in again)
+    assert "原片已下架" in ASKED["topic-write"]
+    assert db.one("SELECT gone FROM videos")["gone"] == "VIDEO_REMOVED"
+    assert c.get("/api/topics/1").json()["items"][0]["gone"] == "VIDEO_REMOVED"
+
+    def back(_url, where):  # back on YouTube: downloaded, looked at again, no longer gone
+        where.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=40",
+                        "-c:v", "libx264", str(where / "source.mkv")], check=True)
+    monkeypatch.setattr(youtube, "download", back)
+    c.post("/api/topics/1", json={"question": "光固化支撑要多密、多高"})
+    n = len(stand_in)
+    run.dispatch(w)
+    w.settle()
+    assert db.one("SELECT state, done_rev FROM topic_videos")["state"] == "DONE"
+    assert any(k.startswith("look-") for k in stand_in[n:])
+    assert db.one("SELECT gone FROM videos")["gone"] is None
+
+
+def test_a_frame_is_kept_at_the_moment_the_notes_cite():
+    """To a tenth of a second, inside the video; with its length not known yet, where it was cited."""
+    from assetizer.topics.draft import shot
+    assert shot("abcdefghijk", 754.5, None)[0] == 754.5
+    assert shot("abcdefghijk", 100.0, 50.0)[0] == 49.8
+    assert shot("abcdefghijk", 12.04, 50.0)[1].name == "12.0.jpg"
+
+
+def test_a_line_is_read_as_youtube_has_it_and_only_youtube(home, monkeypatch):
+    """A phone's youtu.be link with a list is that one video; a link elsewhere (bilibili) is refused, not searched;
+    a channel page without https:// is a link. A list longer than one read says how long it is and reads on from
+    where it stopped. A video this account cannot open is said so (422), YouTube not answering is a retry (503)."""
+    from contextlib import contextmanager
+    from fastapi.testclient import TestClient
+    from assetizer import cookies, youtube
+    from assetizer.web import topics as T
+    from assetizer.web.app import app
+    c = TestClient(app, base_url="http://localhost")
+
+    def meta(url):
+        vid = youtube.video_id(url)
+        if vid == "mmmmmmmmmmm":
+            raise youtube.AcquireError("VIDEO_MEMBERS", "join this channel")
+        if vid == "nnnnnnnnnnn":
+            raise youtube.AcquireError("NETWORK", "timed out")
+        return {"id": vid, "title": "一期", "channel": "甲", "duration": 60}
+
+    @contextmanager
+    def login():
+        yield [], "none"
+    lists: list[list[str]] = []
+
+    def run(cmd, **_kw):
+        lists.append(cmd)
+        a, b = map(int, cmd[cmd.index("--playlist-items") + 1].split("-"))
+        entries = [{"id": f"v{n:010d}", "title": f"第 {n} 期"} for n in range(a, min(b, 120) + 1)]
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"title": "系列", "playlist_count": 120, "entries": entries}), "")
+    monkeypatch.setattr(youtube, "metadata", meta)
+    monkeypatch.setattr(cookies, "ytdlp_login", login)
+    monkeypatch.setattr(T.subprocess, "run", run)
+    peek = lambda url, **kw: c.get("/api/topics/peek", params={"url": url, **kw})  # noqa: E731
+    r = peek("https://youtu.be/abcdefghijk?si=Xy12&list=PLabcdefghij").json()
+    assert r["kind"] == "video" and [v["id"] for v in r["videos"]] == ["abcdefghijk"] and not lists
+    for url in ("https://www.bilibili.com/video/BV1xx411c7mD", "bilibili.com/video/BV1xx411c7mD", "b23.tv/abcd"):
+        x = peek(url)
+        assert (x.status_code, x.json()["detail"]) == (422, "只支持 YouTube 链接") and not lists
+    r = peek("youtube.com/@macro/videos").json()
+    assert lists[-1][-1] == "https://youtube.com/@macro/videos"
+    assert (r["kind"], len(r["videos"]), r["total"], r["more"]) == ("list", 50, 120, True)
+    r = peek("youtube.com/@macro/videos", start=101).json()
+    assert (r["videos"][0]["title"], len(r["videos"]), r["more"]) == ("第 101 期", 20, False)
+    peek("Node.js 教程")
+    assert lists[-1][-1].startswith("ytsearch")
+    x = peek("https://www.youtube.com/watch?v=mmmmmmmmmmm")
+    assert (x.status_code, x.json()["detail"]) == (422, "会员视频，这个账号看不了")
+    assert peek("https://www.youtube.com/watch?v=nnnnnnnnnnn").status_code == 503

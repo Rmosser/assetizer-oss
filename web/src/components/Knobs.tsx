@@ -117,15 +117,18 @@ export function DiskRows({ kn, save }: { kn: any; save: Save }) {
   );
 }
 
-function Secret({ set, value, onChange, hint, busy, label }: { set: boolean; value: string; onChange: (v: string) => void; hint?: string; busy: boolean; label: string }) {
+export function Secret({ set, value, onChange, hint, busy, label }: { set: boolean; value: string; onChange: (v: string) => void; hint?: string; busy: boolean; label: string }) {
   return (
     <input className="st-input" type="password" autoComplete="off" spellCheck={false} autoCapitalize="off" autoCorrect="off" data-1p-ignore
       aria-label={label} value={value} disabled={busy} placeholder={set ? "已设置，留空不改" : hint} onChange={(e) => onChange(e.target.value)} />
   );
 }
 
-/** 清除 takes a second click: what it clears has to be fetched again from where it was issued */
-function Clear({ disabled, onClear }: { disabled: boolean; onClear: () => void }) {
+/** 清除 takes a second click: what it clears has to be fetched again from where it was issued (断开 too).
+ *  `solid`: the sheet's own button (移到回收站), at full size */
+export function Clear({ disabled, onClear, label = "清除", sure = "确认清除", solid = false }: {
+  disabled: boolean; onClear: () => void; label?: string; sure?: string; solid?: boolean;
+}) {
   const [armed, setArmed] = useState(false);
   useEffect(() => {
     if (!armed) return;
@@ -133,8 +136,8 @@ function Clear({ disabled, onClear }: { disabled: boolean; onClear: () => void }
     return () => clearTimeout(t);
   }, [armed]);
   return (
-    <button type="button" className={`btn sm ${armed ? "armed" : "ghost"}`} disabled={disabled} onBlur={() => setArmed(false)}
-      onClick={() => { if (armed) { setArmed(false); onClear(); } else setArmed(true); }}>{armed ? "确认清除" : "清除"}</button>
+    <button type="button" className={`btn ${solid ? "solid" : "sm"}${armed ? " armed" : solid ? "" : " ghost"}`} disabled={disabled} onBlur={() => setArmed(false)}
+      onClick={() => { if (armed) { setArmed(false); onClear(); } else setArmed(true); }}>{armed ? sure : label}</button>
   );
 }
 
@@ -225,6 +228,7 @@ export function NotionRows({ n, reload, say }: { n: any; reload: () => void; say
           </div>
         </form>
       )}
+      {n.asks && <Row name="批注">近 30 天点名课代表 {n.asks.n} 次{n.asks.todo ? `，待修 ${n.asks.todo} 条` : ""}</Row>}
     </>
   );
 }

@@ -7,6 +7,8 @@ until 定稿 (delivery waits on the channel stage), so a draft cannot overwrite 
 """
 from __future__ import annotations
 
+from .topics import backup_rules
+
 import sqlite3
 
 from . import db
@@ -40,12 +42,14 @@ def add_sample(channel_id: str, url: str) -> str:
     vid = youtube.video_id(url)
     if not vid:
         raise ValueError("无法识别的 YouTube 链接")
-    if not db.one("SELECT id FROM sources WHERE id=?", vid):
-        db.exec("INSERT INTO sources(id, url, channel_id, created_at, updated_at) VALUES (?,?,?,?,?)",
-                vid, f"https://www.youtube.com/watch?v={vid}", channel_id, now(), now())
-    else:
-        db.exec("UPDATE sources SET channel_id=COALESCE(channel_id, ?) WHERE id=?", channel_id, vid)
-    db.exec("INSERT OR IGNORE INTO samples(channel_id, source_id, added_at) VALUES (?,?,?)", channel_id, vid, now())
+    with db.tx():
+        if not db.one("SELECT id FROM sources WHERE id=?", vid):
+            db.exec("INSERT INTO sources(id, url, channel_id, created_at, updated_at) VALUES (?,?,?,?,?)",
+                    vid, f"https://www.youtube.com/watch?v={vid}", channel_id, now(), now())
+        else:
+            db.exec("UPDATE sources SET channel_id=COALESCE(channel_id, ?) WHERE id=?", channel_id, vid)
+        db.exec("INSERT OR IGNORE INTO samples(channel_id, source_id, added_at) VALUES (?,?,?)", channel_id, vid, now())
+        backup_rules.track(vid)
     return vid
 
 
@@ -424,8 +428,9 @@ def lock_preview(channel_id: str, playbook_id: int) -> dict:
     }
 
 
+@backup_rules.serialized
 def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None, intake: dict | None = None,
-         backfill: list[dict] | None = None) -> dict:
+         backfill: list[dict] | None = None, backup_rule: dict | None = None) -> dict:
     """定稿单: lock the channel on one playbook and decide, sample by sample, what goes to Notion. All or nothing.
 
     write   → delivered after 定稿 (a leftover trial run no longer replaces it)
@@ -478,6 +483,9 @@ def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None,
     with db.tx():
         if db.one("SELECT stage FROM channels WHERE id=?", channel_id)["stage"] != "TUNING":  # two tabs: no second set of reruns
             raise ValueError("频道不在调试中")
+        if backup_rule is not None:
+            from .topics import backup_rules
+            backup_ids = backup_rules.save_channel(channel_id, backup_rule)
         confirm(playbook_id, clear_pins=False, intake=False)
         # trials still waiting in line belong to tuning: cancel them now, so a later 回到调试期 does not revive them
         db.exec("UPDATE trial_queue SET status='CANCELLED' WHERE channel_id=? AND status='PENDING'", channel_id)
@@ -507,6 +515,9 @@ def lock(channel_id: str, playbook_id: int, decisions: list[dict] | None = None,
         if ch["mode"] == "TRACKED" and ch["youtube_channel_id"]:
             on = True if intake is None else bool(intake.get("enabled", True))
             ing = set_enabled(channel_id, on, (intake or {}).get("min_minutes"))
+    if backup_rule is not None:
+        from .topics import backup_rules
+        backup_rules.reconcile(backup_ids)
     back = enqueue_backfill(channel_id, backfill)["queued"] if backfill else 0
     v = db.one("SELECT version FROM playbooks WHERE id=?", playbook_id)["version"]
     db.event("tuning", f"{ch['name']} 定稿 v{v}：写入 {counts['write'] + counts['replace']} 期，保留 {counts['keep']} 期，"

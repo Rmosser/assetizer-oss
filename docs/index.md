@@ -19,6 +19,7 @@
 | 知识单元、文章、截图、片段、字幕、校注预审 | [design.md](design.md) §R-2～§R-9 | `pipeline/semantic.py`、`pipeline/media_stages.py`、`pipeline/finish.py`、`media/` |
 | 原话模式 | [design.md](design.md) §R7 | `pipeline/fidelity.py`、`pipeline/semantic.py`、`pipeline/finish.py` |
 | 专题：一个问题、一批视频、合成一个回答 | [topics.md](topics.md)、[design.md](design.md) §R8 | `topics/`（`run.py` 调度、`draft.py` 底稿、`look.py` 回看、`write.py` 计划笔记与综合、`prompts/`）、`web/topics.py`、`web/src/pages/Topics.tsx`、`Topic.tsx`、`TopicVideo.tsx`、`web/src/components/topic/` |
+| 选片扩展：在 YouTube 上攒视频、交给新专题 | [topics.md](topics.md)「选片扩展」、[design.md](design.md) §R8-9 | `extension/`（`src/sites/youtube.js` 适配器、`src/content.js` 勾、`panel.*` 侧边栏、`src/bridge.js` 交接）、`web/src/basket.ts`、`web/src/components/topic/Picker.tsx` |
 | 学习目标编译、规程、稿纸批注、重新编译 | [channel-page.md](channel-page.md) §3.4 | `compiler.py`、`web/app.py`（重新编译与编译状态） |
 | 频道调试：样片、试跑、采用、对比、定稿 | [channel-page.md](channel-page.md) §3 | `tuning.py`、`pipeline/runner.py`（跑完自动采用）、`web/app.py`（定稿单查库）、`delivery.py` |
 | 频道页的界面、点亮与连线、展开并排、断点、样式坑 | [channel-page.md](channel-page.md) | `web/src/pages/Channel.tsx`、`web/src/components/channel/`、`web/src/channel.css` |

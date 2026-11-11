@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { post } from "../api";
-import { agyGroups, ALERT_FIX, boxLines, type Bucket, creditText, type Group, groupName, MAGPIE_DOWN, MAIN_STEPS, onCredits, resets, STEP, subFamily, subName } from "../box";
+import { agyGroups, alertFix, boxLines, type Bucket, creditText, type Group, groupName, MAGPIE_DOWN, MAIN_STEPS, onCredits, resets, STEP, subFamily, subName } from "../box";
 import { deJargon, issueHeadline } from "../cjk";
 import { agyAlert, openAgyLogin } from "../components/AgyLogin";
 import { about, big, Columns, HBars, hrs, Kpi, Meter, pct, Spark } from "../components/Figures";
@@ -524,18 +524,21 @@ export default function Engine() {
 
       {open.length > 0 && (
         <section className="attn" aria-label="告警">
-          {open.map((a: any) => (
-            <div className={`attn-row${a.severity === "info" ? "" : " bad"}`} key={a.key} role={a.severity === "info" ? "status" : "alert"}>
-              <span className="mark" aria-hidden />
-              <div className="attn-t">
-                <h4>{a.title}</h4>
-                {!agyAlert(a) && <p>{(a.body || "").replace(/`/g, "")}</p>}
+          {open.map((a: any) => {
+            const fix = alertFix(a);
+            return (
+              <div className={`attn-row${a.severity === "info" ? "" : " bad"}`} key={a.key} role={a.severity === "info" ? "status" : "alert"}>
+                <span className="mark" aria-hidden />
+                <div className="attn-t">
+                  <h4>{a.title}</h4>
+                  {!agyAlert(a) && <p>{(a.body || "").replace(/`/g, "")}</p>}
+                </div>
+                {agyAlert(a) ? <button className="btn zhu" onClick={openAgyLogin}>登录 agy</button>
+                  : fix ? <a className="btn sm" {...linkProps(fix.href)}>{fix.label}</a>
+                  : a.key === "AGY_AUTH_REQUIRED" ? <a className="btn sm" href={`${m.url}/?view=providers`} target="_blank" rel="noreferrer">打开 magpie</a> : null}
               </div>
-              {agyAlert(a) ? <button className="btn zhu" onClick={openAgyLogin}>登录 agy</button>
-                : ALERT_FIX[a.key] ? <a className="btn sm" {...linkProps(ALERT_FIX[a.key].href)}>{ALERT_FIX[a.key].label}</a>
-                : a.key === "AGY_AUTH_REQUIRED" ? <a className="btn sm" href={`${m.url}/?view=providers`} target="_blank" rel="noreferrer">打开 magpie</a> : null}
-            </div>
-          ))}
+            );
+          })}
         </section>
       )}
 

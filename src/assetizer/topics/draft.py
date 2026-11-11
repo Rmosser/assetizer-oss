@@ -177,6 +177,13 @@ def grab(src: Path, t: float, out: Path) -> Path:
     return out
 
 
+def shot(vid: str, t: float, duration: float | None) -> tuple[float, Path]:
+    """The original's frame at t (to a tenth of a second, inside the video) and where it is kept once taken: the frames
+    the notes cite are taken when the read ends (run.keep_shots), the page's others when asked (web/topics frame)."""
+    t = round(min(t, max(0.0, duration - 0.2)) if duration else t, 1)
+    return t, draft_dir(vid) / "shots" / f"{t:.1f}.jpg"
+
+
 def parse_text(text: str, n: int) -> list[str]:
     parts = SECTION.split(GLUED.sub("\n", text))
     got = {int(parts[i]): parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
@@ -243,7 +250,7 @@ class Draft:
     """Making one video's 底稿. `check` raises Stopped when the read it is for should stop; `progress(done, of)` tells the
     page how far it is (segments, then frame batches)."""
 
-    def __init__(self, vid: str, meta: dict, src: Path, llm: LLM, check: Callable[[], None],
+    def __init__(self, vid: str, meta: dict, src: Path | None, llm: LLM, check: Callable[[], None],
                  progress: Callable[[int, int], None]):
         self.vid, self.meta, self.src, self.llm, self.check, self.progress = vid, meta, src, llm, check, progress
         self.d = draft_dir(vid)
@@ -351,10 +358,13 @@ class Draft:
         return out
 
     def make(self) -> dict:
-        """The draft, made or as kept: {version, duration, gaps, language, chars, made_at}."""
+        """The draft, made or as kept: {version, duration, gaps, language, chars, made_at}. With no original (`src`
+        None: gone from YouTube) the one kept, of whatever version."""
         done = self.d / "draft.json"
-        if done.exists() and (d := read_json(done)).get("version") == VERSION and (self.d / "full.md").exists():
+        if done.exists() and (self.d / "full.md").exists() and ((d := read_json(done)).get("version") == VERSION or not self.src):
             return d
+        if not self.src:
+            raise RuntimeError("原片下载不了，也没有底稿")
         duration = ffmpeg.duration(self.src)
         plan = segments(duration)
         self.done, self.of = 0, len(plan)

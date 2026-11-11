@@ -82,7 +82,7 @@ async def guard(request: Request, call_next):
             return JSONResponse({"error": "access required"}, status_code=403)
     else:
         return JSONResponse({"error": "host not allowed"}, status_code=403)
-    if request.method == "POST" and not (request.headers.get("content-type") or "").startswith("application/json"):
+    if request.method in {"POST", "PUT"} and not (request.headers.get("content-type") or "").startswith("application/json"):
         return JSONResponse({"error": "json required"}, status_code=415)
     return await call_next(request)
 
@@ -475,6 +475,7 @@ def _providers() -> dict:
 def _box() -> dict:
     """What the box is set to and how each part of it is doing: all the 设置 page reads, and the 机房 reads it too."""
     from .. import ingest
+    from ..topics import backup
     from ..providers import magpie_state
     from ..providers.agy import groups_in_use, quota_logs, route_models
     s = config.get()
@@ -486,10 +487,11 @@ def _box() -> dict:
         "agy": db.setting("agy_health"), "agy_media": db.setting("agy_media_health"), "model": s.agy_model, "agy_models": route_models(),
         # agy's quota with the groups of it the stages draw on now, and a week of each Gemini group
         "quota": {"agy": {**q, "in_use": [g["name"] for g in groups_in_use(q)]} if q else None, "agy_log": quota_logs()},
-        "magpie": magpie_state.view(),
+        "magpie": magpie_state.view(), "gdrive": backup.view(),
         "providers": _providers(),
         "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
-                   "parent": db.setting("notion_parent_page_id"), "title": db.setting("notion_database_title", "课代表")},
+                   "parent": db.setting("notion_parent_page_id"), "title": db.setting("notion_database_title", "课代表"),
+                   "asks": _asks()},
         "knobs": knobs.view(), "backfill": ingest.backfill_view(), "asr": _asr_view(), "telegram": _telegram_view(),
         "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
                     "profile_ok": bool(s.browser_profile and s.browser_profile.exists()), **_cookie_status()},
@@ -1613,6 +1615,7 @@ def _missed(cid: str) -> tuple[list[dict], str | None]:
 
 
 class LockBody(BaseModel):
+    backup: dict | None = None
     playbook_id: int
     samples: list[dict] = []
     ingest: dict | None = None
@@ -1625,8 +1628,8 @@ def channel_lock(cid: str, body: LockBody):
     ing = body.ingest and {**body.ingest, "enabled": bool(body.ingest.get("enabled", True)),
                            "min_minutes": _minutes(body.ingest.get("min_minutes"))}
     try:
-        return tuning.lock(cid, body.playbook_id, body.samples, ing, [v.model_dump() for v in body.backfill])
-    except tuning.LockRefused as e:
+        return tuning.lock(cid, body.playbook_id, body.samples, ing, [v.model_dump() for v in body.backfill], backup_rule=body.backup)
+    except (tuning.LockRefused, FileExistsError) as e:
         raise HTTPException(409, str(e))
     except ValueError as e:
         _tuning_error(e)
@@ -2088,6 +2091,164 @@ def _put_secret(name: str, value: str | None) -> JSONResponse | None:
     return None
 
 
+# ------------------------------------------------------------------ 专题网盘：客户端与 token 只写不读
+async def _backup_json(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        raise HTTPException(400, "请求格式不正确") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "请求格式不正确")
+    return body
+
+
+@app.get("/api/gdrive/ready")
+def gdrive_ready():
+    from ..topics import backup
+    return {"ready": backup.available()}
+
+
+@app.get("/api/gdrive/rules")
+def gdrive_rules():
+    from ..topics import backup_rules
+    return backup_rules.view()
+
+
+@app.put("/api/gdrive/rules")
+async def gdrive_rules_put(request: Request):
+    from ..topics import backup_rules
+    try:
+        return await run_in_threadpool(backup_rules.update, await _backup_json(request))
+    except FileExistsError as e:
+        raise HTTPException(409, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.get("/api/channels/{cid}/backup")
+def channel_backup(cid: str):
+    from ..topics import backup_rules
+    try:
+        return backup_rules.channel(cid)
+    except KeyError:
+        raise HTTPException(404, "频道不存在") from None
+
+
+@app.put("/api/channels/{cid}/backup")
+async def channel_backup_put(cid: str, request: Request):
+    from ..topics import backup, backup_rules
+    body = await _backup_json(request)
+    try:
+        return await run_in_threadpool(backup_rules.update_channel, cid, body)
+    except KeyError:
+        raise HTTPException(404, "频道不存在") from None
+    except FileExistsError as e:
+        raise HTTPException(409, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.get("/api/gdrive/deletable")
+def gdrive_deletable():
+    from ..topics import backup
+    return backup.deletable()
+
+
+@app.post("/api/gdrive/delete", status_code=202)
+async def gdrive_delete(request: Request):
+    from ..topics import backup
+    body = await _backup_json(request)
+    try:
+        backup.require_ready()
+        if set(body) != {"videos"}:
+            raise ValueError("请选择要删除的视频")
+        return await run_in_threadpool(backup.start_delete, body["videos"])
+    except FileExistsError as e:
+        raise HTTPException(409, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.post("/api/gdrive/client")
+async def gdrive_client(request: Request):
+    from ..topics import backup
+    body = await _secret_body(request, {"client_id", "client_secret"})
+    if isinstance(body, JSONResponse):
+        return body
+    clear = body.get("clear") or []
+    if any(x != "client" for x in clear) or (clear and (body.get("client_id") or body.get("client_secret"))):
+        raise HTTPException(400, "只能清除 client，不能同时填写客户端")
+    try:
+        return await run_in_threadpool(backup.save_client, (body.get("client_id") or "").strip(),
+                                       (body.get("client_secret") or "").strip(), clear=bool(clear))
+    except (ValueError, OSError):
+        raise HTTPException(400, "客户端 ID 和密钥必须一起填写，且不能含换行或控制字符；请确认凭据目录可写") from None
+
+
+@app.post("/api/gdrive/login")
+def gdrive_login():
+    from ..topics import backup
+    try:
+        return backup.start_login()
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.post("/api/gdrive/login/code")
+async def gdrive_code(request: Request):
+    from ..topics import backup
+    # 不用 Pydantic：它的校验错误会把粘贴的授权码原样带回页面。
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 32768 else None
+    except ValueError:
+        body = None
+    if not isinstance(body, dict) or set(body) != {"url"} or not isinstance(body["url"], str) or len(body["url"]) > 4096:
+        raise HTTPException(400, "请粘贴授权后的地址或授权码（最多 4096 字符）")
+    try:
+        return await run_in_threadpool(backup.submit_code, body["url"])
+    except (ValueError, OSError) as e:
+        reason = str(e) if isinstance(e, ValueError) else "无法保存登录凭据，请确认凭据目录可写"
+        raise HTTPException(400, backup.redact(reason)) from None
+
+
+@app.post("/api/gdrive/login/cancel")
+def gdrive_cancel():
+    from ..topics import backup
+    return backup.cancel_login()
+
+
+@app.post("/api/gdrive/folder")
+async def gdrive_folder(request: Request):
+    from ..topics import backup
+    body = await _secret_body(request, {"path"})
+    if isinstance(body, JSONResponse):
+        return body
+    try:
+        return await run_in_threadpool(backup.create_folder, body.get("path") or backup.DEFAULT_FOLDER)
+    except FileExistsError:
+        raise HTTPException(409, "已经建过备份文件夹") from None
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, backup.redact(e) if isinstance(e, ValueError) else "无法保存网盘设置") from None
+
+
+@app.post("/api/gdrive/test")
+def gdrive_test():
+    from ..topics import backup
+    if busy := _throttled("gdrive", 5.0):
+        return busy
+    try:
+        return backup.test()
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.post("/api/gdrive/disconnect")
+def gdrive_disconnect():
+    from ..topics import backup
+    return backup.disconnect()
+
+
 def _asr_view() -> dict:
     """The GPU box: its address, whether a token is set (never the token), the last test, and which device the last
     transcription actually used (a GPU box that is off falls back to the CPU without stopping the run)."""
@@ -2139,6 +2300,13 @@ def asr_test():
     db.event("config", "测试 GPU 转写：通过" if out["ok"] else f"测试 GPU 转写没通过（{out['code']}）",
              level="info" if out["ok"] else "warn")
     return _asr_view()
+
+
+def _asks() -> dict:
+    """How much the words to 课代表 in Notion are used (design §R8-13): kept only if they are."""
+    from ..topics.comments import used
+    u = used(30)
+    return {"n": u["asks"], "todo": len(u["todo"])}
 
 
 def _telegram_view() -> dict:

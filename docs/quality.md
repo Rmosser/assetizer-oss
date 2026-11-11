@@ -15,10 +15,11 @@ npm --prefix web ci
 
 | 检查 | 命令 | 说明 |
 |---|---|---|
-| 后端测试 | `.venv/bin/pytest -q` | 在 `tests/test_core.py`，专题在 `tests/test_topics.py`（替身模型走完整的读与综合，不下载、不调模型）；`home` fixture 给每个测试一个隔离的数据库；Notion 调用全部打桩（`FakeNotion`），不会写真实 Notion |
+| 后端测试 | `.venv/bin/pytest -q` | 在 `tests/test_core.py`，专题在 `tests/test_topics.py`（替身模型走完整的读与综合，不下载、不调模型）和 `tests/test_topic_notion.py`（专题存到 Notion，内存里的假 Notion）；`home` fixture 给每个测试一个隔离的数据库；Notion 调用全部打桩（`FakeNotion`），不会写真实 Notion |
 | 定向测试 | `.venv/bin/pytest -q -k <关键词>` | 改哪块先跑哪块 |
 | 前端类型检查 + 构建 | `cd web && npm run build` | `tsc -b` 加 `vite build`，产物写入 `src/assetizer/web/static`（不进 Git） |
 | 前端工具函数 | `cd web && npm run test:util` | 中文数字（期数）和失败原因的标签；不用 build，也不用浏览器 |
+| 选片扩展 | `cd web && npm run test:extension` | 先 `npm run build`，再 `ASSETIZER_HOME=$(mktemp -d) .venv/bin/assetizer web --port 8771`（本机的 8770 被系统的隔空投送占着）；用 Playwright 自带的 Chrome for Testing 加载 `extension/`，在真实 YouTube（未登录）上勾、按 `x`、看侧边栏，先交给不应答的盒子（看「没交出去」、篮子不动），再交给本地实例建专题。不调模型；YouTube 给无头浏览器的可能是旧卡片组件，两种都认 |
 
 仓库没有配置 lint / format 工具；代码里的 `# noqa` 是给 ruff 规则看的，按现有风格写即可。
 

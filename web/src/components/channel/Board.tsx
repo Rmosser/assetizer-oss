@@ -1,15 +1,17 @@
 import { paceText } from "../../box";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { get, post } from "../../api";
+import { type ChannelBackup, gdrive, get, post } from "../../api";
 import { IssueTitle } from "../../cjk";
 import { linkProps } from "../../router";
 import { usePoll } from "../../hooks";
 import { Row } from "../../pages/Issues";
-import { BACKFILL_BAD, BACKFILL_STOP, parseDay, WAIT } from "../../util";
+import { BACKFILL_BAD, BACKFILL_STOP, bytes, parseDay, WAIT } from "../../util";
 import { about, big, Columns, hrs, Kpi, pct, ymd } from "../Figures";
 import { Sheet, type SheetHandle } from "../Sheet";
 import { Fault } from "../States";
 import { Days } from "./Days";
+import { TRASH_HASH } from "../GDrive";
+import { BackupSegs } from "./LockSheet";
 import { fmt, hm, nextScan, Stepper, Switch } from "./bits";
 import type { Mode } from "./Header";
 import type { Board as BoardData, Candidate, Channel, Scan } from "./types";
@@ -73,6 +75,49 @@ function Try({ ch, flash, onDone }: { ch: Channel; flash: (text: string) => void
   );
 }
 
+/** 网盘备份 of the channel's author, the 定稿单's line kept on the 看板: saved as it is clicked. Turned to 不传 with copies
+ *  of it no rule wants any more, it says how much can go and opens 可删除 (不传 only stops what is to come). */
+function Backup({ cid }: { cid: string }) {
+  const [b, setB] = useState<ChannelBackup | null>(null);
+  const [left, setLeft] = useState<{ videos: number; bytes: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const turn = useRef(0);  // clicks made: an answer, or a read, asked before the last one is out of date
+  const chain = useRef<Promise<unknown>>(Promise.resolve());
+  useEffect(() => {
+    let alive = true;
+    gdrive.channel(cid).then((x) => { if (alive) setB(x); }, () => { /* no line: nothing to set here */ });
+    return () => { alive = false; };
+  }, [cid]);
+  if (!b?.ready) return null;
+  // shown at once, sent one after another (the box takes the clicks in their order); the last click's answer is shown
+  const set = (f: "member" | "public", v: boolean) => {
+    const mine = ++turn.current;
+    setB((x) => x && { ...x, [f]: v });
+    setErr(null);
+    setLeft(null);
+    chain.current = chain.current.then(() => gdrive.setChannel(cid, { [f]: v })).then((x) => {
+      if (mine !== turn.current) return;
+      setB(x);
+      if (!v && x.deletable?.videos) setLeft(x.deletable);
+    }, (e) => {
+      if (mine !== turn.current) return;
+      setErr((e as Error).message);
+      const at = turn.current;
+      gdrive.channel(cid).then((x) => { if (at === turn.current) setB(x); }, () => {});  // what it is now, unless clicked since
+    });
+  };
+  return (
+    <>
+      <div className="ch-row2 ch-bbk">
+        <span className="t">网盘备份</span>
+        <BackupSegs name="网盘备份" member={b.member ?? null} pub={b.public ?? null} onChange={set} />
+      </div>
+      {left && <p className="ch-bbn">已关 · 可删 {left.videos} 期 {bytes(left.bytes)} · <a {...linkProps(`/settings${TRASH_HASH}`)}>去删除</a></p>}
+      {err && <p className="ch-err">{err}</p>}
+    </>
+  );
+}
+
 function Intake({ ch, mode, b, onSet, onScan }: {
   ch: Channel; mode: Mode; b: BoardData; onSet: (enabled: boolean, min: number) => Promise<void>; onScan: () => void;
 }) {
@@ -108,6 +153,7 @@ function Intake({ ch, mode, b, onSet, onScan }: {
         <Stepper label="最短时长" zero="不限" value={min} onChange={(v) => { setMin(v); clearTimeout(t.current); t.current = window.setTimeout(() => send(want.current, v), 600); }} />
         {min > 0 && <span>分钟的不收</span>}
       </div>
+      {mode === "locked" && <Backup cid={ch.id} />}
       {!can ? <p className="q">定稿后开启</p> : on ? (
         <div className="ch-bst">
           <p>{[last ? `${hm(last.at)} · ${found(last)}` : "等第一次扫描", nextScan(ing)].filter(Boolean).join(" · ")}</p>

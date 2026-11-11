@@ -155,23 +155,37 @@ def poll() -> dict:
     return {"queued": queued}
 
 
+class RetryTake(RuntimeError):
+    """入队和频道绑定事务已回滚，补录应保留到下一轮。"""
+
+
 def take(c: dict, en: dict, why: str, priority: int = 0, origin: str = "ingest", register: bool = True) -> tuple[str, str | None]:
     """Queue one video of the channel, unless the channel's Notion database already has it (written by another tool,
     say): then nothing is produced, and with `register` it is kept as 已登记. Returns ("queued", run id) or
     ("registered", None)."""
+    from .topics import backup_rules
     from .delivery import registered_in_target
     from .pipeline.runner import submit
     title = en.get("title") or None
     have = registered_in_target({"id": en["id"], "channel_id": c["id"]})
     if have:
         if register:
-            db.exec("""INSERT OR IGNORE INTO sources(id, url, channel_id, title, delivery, delivery_reason, notion_url, created_at, updated_at)
-                       VALUES (?,?,?,?, 'REGISTERED', ?, ?, ?, ?)""", en["id"], f"https://www.youtube.com/watch?v={en['id']}",
-                    c["id"], title, "库里已有", have.get("url"), now(), now())
+            with db.tx():
+                db.exec("""INSERT OR IGNORE INTO sources(id, url, channel_id, title, delivery, delivery_reason, notion_url, created_at, updated_at)
+                           VALUES (?,?,?,?, 'REGISTERED', ?, ?, ?, ?)""", en["id"], f"https://www.youtube.com/watch?v={en['id']}",
+                        c["id"], title, "库里已有", have.get("url"), now(), now())
+                backup_rules.track(en["id"])
         db.event("ingest", f"已登记，跳过：{c['name']} · {title or en['id']}（库里已有）")
         return "registered", None
-    r = submit(f"https://www.youtube.com/watch?v={en['id']}", priority=priority, origin=origin)
-    db.exec("UPDATE sources SET channel_id=?, title=COALESCE(title, ?) WHERE id=?", c["id"], title, en["id"])
+    try:
+        with db.tx():
+            r = submit(f"https://www.youtube.com/watch?v={en['id']}", priority=priority, origin=origin)
+            db.exec("UPDATE sources SET channel_id=?, title=COALESCE(title, ?) WHERE id=?", c["id"], title, en["id"])
+            backup_rules.track(en["id"])
+    except Exception as e:
+        if isinstance(e, sqlite3.IntegrityError) and str(e) == "UNIQUE constraint failed: sources.id":
+            raise  # 立即扫描与自动收录争同一期：沿用调用方的「已有」处理
+        raise RetryTake(str(e)) from e
     db.event("ingest", f"{why}：{c['name']} · {title or en['id']}", r["run_id"])
     return "queued", r["run_id"]
 
@@ -360,7 +374,11 @@ def dispatch_backfill() -> str | None:
             continue
         try:  # already in the library: skipped without a 已登记 row, so a long 补录 does not flood 往期
             state, rid = take(c, {"id": e["source_id"], "title": e["title"]}, "补录", priority=-1, origin="backfill", register=False)
-        except Exception as ex:  # noqa: BLE001 — e.g. intake took the same video at once; not to be tried every tick
+        except RetryTake as ex:
+            db.exec("UPDATE backfill_queue SET status='PENDING', dispatched_at=NULL, run_id=NULL WHERE id=?", e["id"])
+            db.event("ingest", f"补录稍后重试 {e['title'] or e['source_id']}：{ex}", level="warn")
+            return None
+        except Exception as ex:  # noqa: BLE001 — 例如并发收录已拿走同一期，沿用原跳过语义
             db.exec("UPDATE backfill_queue SET status='SKIPPED' WHERE id=?", e["id"])
             db.event("ingest", f"补录跳过 {e['title'] or e['source_id']}：{ex}", level="warn")
             continue

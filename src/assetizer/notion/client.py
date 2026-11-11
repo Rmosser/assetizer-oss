@@ -89,8 +89,31 @@ class Notion:
     def archive_page(self, page_id: str) -> dict:
         return self._req("PATCH", f"/pages/{page_id}", idempotent=True, json={"archived": True})
 
-    def append(self, block_id: str, children: list) -> dict:
-        return self._req("PATCH", f"/blocks/{block_id}/children", json={"children": children})
+    def append(self, block_id: str, children: list, after: str | None = None) -> dict:
+        """`after`: the block they go right after (else at the end)."""
+        body: dict = {"children": children}
+        if after:
+            body["after"] = after
+        return self._req("PATCH", f"/blocks/{block_id}/children", json=body)
+
+    def database(self, page_id: str, title: str, properties: dict) -> dict:
+        """A table on a page (an inline database), at the page's end."""
+        return self._req("POST", "/databases", json={
+            "parent": {"type": "page_id", "page_id": page_id}, "is_inline": True,
+            "title": [{"type": "text", "text": {"content": title}}], "properties": properties})
+
+    def rows(self, database_id: str) -> list[dict]:
+        """Every page of a database."""
+        out, cursor = [], None
+        while True:
+            body: dict = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            z = self._req("POST", f"/databases/{database_id}/query", idempotent=True, json=body)
+            out += z["results"]
+            if not z.get("has_more"):
+                return out
+            cursor = z["next_cursor"]
 
     def update_block(self, block_id: str, body: dict) -> dict:
         return self._req("PATCH", f"/blocks/{block_id}", json=body)

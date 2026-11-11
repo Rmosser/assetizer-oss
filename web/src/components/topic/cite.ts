@@ -67,9 +67,12 @@ function chip(c: Cite, ways: ChipWays, cont = false): string {
     : `<button type="button" class="${cls}" ${data} title="${esc(said)}" aria-label="${esc(said)}">${v}${body}</button>`;
 }
 
-/** The citations of brackets side by side, as chips: those of one video after another go together */
+/** The citations of brackets side by side, as chips: those of one video after another go together. Models write
+ *  [V1 12:34 说][13:02 帧]: a citation with no video, right after one that has it, is that video's. */
 function chips(cs: Cite[], ways: ChipWays): string {
-  return cs.map((c, i) => chip(c, ways, i > 0 && c.v != null && c.v === cs[i - 1].v && (c.t != null || !!c.look))).join("");
+  let v: number | undefined;
+  const all = cs.map((c) => (c.v != null ? ((v = c.v), c) : v != null ? { ...c, v } : c));
+  return all.map((c, i) => chip(c, ways, i > 0 && c.v != null && c.v === all[i - 1].v && (c.t != null || !!c.look))).join("");
 }
 
 /** The citation a chip stands for, from its data-* (the page's one click handler reads it). */
@@ -85,9 +88,10 @@ const MARKS: [RegExp, string][] = [[/两个模型说法不同/g, "tp-split"], [/
 // the browser breaks after an inline button even before a word joiner, and a line would start with the comma
 const RUN = /\uE000\d+\uE001(?:\s*\uE000\d+\uE001)*([\uFF0C\u3002\u3001\uFF1B\uFF1A\uFF01\uFF1F\uFF09\u300D\u300F\u300B\u201D\u2019,.;:!?)])?/g;
 
-/** Markdown with its citations as chips. The brackets are marked before the markdown is read and become chips after it
- *  is sanitized, in text only: a mark that lands in an attribute (an image's alt) is given back the words it stood for. */
-export function renderCited(src: string, ways: ChipWays = {}): string {
+/** Markdown with its citations as chips (`inline`: one line, no paragraph around it). The brackets are marked before the
+ *  markdown is read and become chips after it is sanitized, in text only: a mark that lands in an attribute (an image's
+ *  alt) is given back the words it stood for. */
+export function renderCited(src: string, ways: ChipWays = {}, inline = false): string {
   const found: Cite[][] = [], said: string[] = [];
   const pre = (src || "").replace(/[\uE000\uE001]/g, "").replace(/(!?)\[([^[\]\n]{1,160})\](?!\()/g, (m, bang: string, inner: string) => {
     const cs = bang ? null : parseCites(inner);
@@ -97,7 +101,8 @@ export function renderCited(src: string, ways: ChipWays = {}): string {
     return `\uE000${found.length - 1}\uE001`;
   });
   const doc = document.createElement("template");
-  doc.innerHTML = DOMPurify.sanitize(marked.parse(typeset(pre), { async: false, gfm: true, breaks: false }) as string);
+  const md = inline ? marked.parseInline(typeset(pre), { async: false, gfm: true }) : marked.parse(typeset(pre), { async: false, gfm: true, breaks: false });
+  doc.innerHTML = DOMPurify.sanitize(md as string);
   const back = (s: string) => s.replace(/\uE000(\d+)\uE001/g, (_, n: string) => said[+n] ?? "");
   for (const el of doc.content.querySelectorAll("*")) {
     for (const a of [...el.attributes]) if (a.value.includes("\uE000")) el.setAttribute(a.name, back(a.value));

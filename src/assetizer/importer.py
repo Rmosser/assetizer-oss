@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from . import config, db, seed
+from .topics import backup_rules
 from .pipeline import finish
 from .pipeline.context import RunContext
 from .pipeline.runner import STAGE_NAMES
@@ -39,13 +40,15 @@ def run14(root: Path) -> str:
     if db.one("SELECT id FROM runs WHERE id=?", run_id):
         return run_id
     media = root / "source/source.mkv"
-    db.exec("""INSERT OR REPLACE INTO sources(id, url, channel_id, youtube_channel_id, channel_title, title, published_at, duration, info,
-               media_path, media_sha256, media_bytes, media_height, media_state, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            vid, ref["original_media_reference"]["url"], "trader-tom", sm["channel_id"], sm["channel"], sm["title"],
-            sm["upload_date"], 3503.752, db.j(sm), str(media) if media.exists() else None,
-            ref["original_media_reference"]["sha256"], ref["original_media_reference"]["bytes"], 1080,
-            "CACHED" if media.exists() else "PURGED", now(), now())
+    with db.tx():
+        db.exec("""INSERT OR REPLACE INTO sources(id, url, channel_id, youtube_channel_id, channel_title, title, published_at, duration, info,
+                   media_path, media_sha256, media_bytes, media_height, media_state, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                vid, ref["original_media_reference"]["url"], "trader-tom", sm["channel_id"], sm["channel"], sm["title"],
+                sm["upload_date"], 3503.752, db.j(sm), str(media) if media.exists() else None,
+                ref["original_media_reference"]["sha256"], ref["original_media_reference"]["bytes"], 1080,
+                "CACHED" if media.exists() else "PURGED", now(), now())
+        backup_rules.track(vid)
     pb = db.one("SELECT id FROM playbooks WHERE channel_id='trader-tom' AND status='ACTIVE'")
     db.exec("""INSERT INTO runs(id, source_id, kind, playbook_id, production, pins, created_at, started_at, finished_at)
                VALUES (?,?,?,?,?,?,?,?,?)""", run_id, vid, "IMPORT", pb["id"], "COMPLETE_PARTIAL",

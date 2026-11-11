@@ -19,6 +19,7 @@ services:
       - ASSETIZER_AGY=/lzcapp/var/assetizer/home/.local/bin/agy
       - ASSETIZER_YTDLP=/usr/local/bin/yt-dlp
       - ASSETIZER_DENO=/usr/local/bin/deno
+      - ASSETIZER_RCLONE=/usr/local/bin/rclone
       - ASSETIZER_PORT=8770
       - ASSETIZER_TRUST_LAZYCAT=1
       - PYTHONPATH=/lzcapp/pkg/content/src

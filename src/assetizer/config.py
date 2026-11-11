@@ -43,6 +43,7 @@ class Settings:
     source_retention_days: int = 7
     log_retention_days: int = 30  # the logs iterating reads (logs.py)
     agy_print_timeout: str = "35m"
+    rclone_bin: str = "rclone"
     extra: dict = field(default_factory=dict)
 
     @property
@@ -104,6 +105,7 @@ def load() -> Settings:
         agy_model=_env("ASSETIZER_MODEL", "gemini-3.8-flash-high"),
         agy_state_dir=Path(_env("ASSETIZER_AGY_STATE", str(Path.home() / ".gemini/antigravity-cli"))).expanduser(),
         ytdlp_bin=_env("ASSETIZER_YTDLP", "yt-dlp"),
+        rclone_bin=_env("ASSETIZER_RCLONE", "rclone"),
         deno_bin=deno or None,
         browser_profile=Path(profile).expanduser() if profile else None,
         whisper_model=_env("ASSETIZER_WHISPER_MODEL", "large-v3-turbo"),

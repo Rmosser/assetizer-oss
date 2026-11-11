@@ -144,6 +144,18 @@ def cmd_logs(a) -> None:
     _print(logs.summary(a.days or logs.WEEK) if a.summary else logs.export(a.days))
 
 
+def cmd_asks(a) -> None:
+    """The words to 课代表 in Notion: how much it is used, and the 待修 list (a developer's); --fixed N --version V marks a
+    待修 mended, 课代表 says so in its thread (design §R8-13)."""
+    from .topics import comments
+    if a.fixed is not None:
+        if not a.version:
+            raise SystemExit("--fixed 要带 --version（修好的版本，如 0.4.43）")
+        print("已记下，下一次读批注时在原讨论串里回复「已修」" if comments.fixed(a.fixed, a.version) else f"没有待修 #{a.fixed}")
+        return
+    _print(comments.used(a.days))
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="assetizer")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -169,6 +181,9 @@ def main(argv: list[str] | None = None) -> None:
     x.set_defaults(fn=cmd_notify_digest)
     x = sub.add_parser("logs", help="只读：最近的日志（去掉凭据），给开发用的 agent 扫；--summary 只看这一周")
     x.add_argument("--days", type=int); x.add_argument("--summary", action="store_true"); x.set_defaults(fn=cmd_logs)
+    x = sub.add_parser("asks", help="Notion 里点名课代表的批注：用了几次、待修清单；--fixed N --version V 记下修好了")
+    x.add_argument("--days", type=int, default=30); x.add_argument("--fixed", type=int); x.add_argument("--version")
+    x.set_defaults(fn=cmd_asks)
     a = p.parse_args(argv)
     a.fn(a)
 

@@ -911,21 +911,37 @@ def retention() -> dict:
     rows = db.q("""SELECT s.* FROM sources s WHERE s.media_state='CACHED' AND NOT EXISTS
                    (SELECT 1 FROM runs r WHERE r.source_id=s.id AND r.production IN ('QUEUED','RUNNING','WAITING'))""")
     import datetime as dt
-    for r in rows:
-        # delivered issues are done with their media; tuning samples (never delivered) keep it for re-runs
-        delivered = r["delivery"] == "DELIVERED" and r["delivered_at"]
-        ref = r["delivered_at"] if delivered else r["updated_at"]
-        days = knobs.get("delivered_retention_days" if delivered else "retention_days")
-        try:
-            age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(ref)).days
-        except (TypeError, ValueError):
+    from ..topics import backup, backup_rules
+    from ..topics.run import MIN_FREE
+    from ..topics.backup_retention import plan, due, mark_missed
+    enabled = backup.available()
+    low = enabled and shutil.disk_usage(s.home).free < MIN_FREE
+    for candidate in rows:
+        if not due(plan(candidate["id"], low=low), "source_media"):
             continue
-        if age >= days and r["media_path"]:
-            d = Path(r["media_path"]).parent
-            if d.is_relative_to(s.media_dir):
-                shutil.rmtree(d, ignore_errors=True)
-            db.exec("UPDATE sources SET media_state='PURGED', purged_at=? WHERE id=?", now(), r["id"])
-            purged += 1
+        with backup.media_lock, backup.retention_claim(candidate["id"]) as free:
+            if not free:
+                continue
+            with backup_rules.cleanup(candidate["id"]) as locked:
+                if not locked:
+                    continue
+                with db.tx():
+                    r = db.one("SELECT * FROM sources WHERE id=?", candidate["id"])
+                    if not r or r["media_state"] != "CACHED":
+                        continue
+                    if db.one("SELECT 1 FROM runs WHERE source_id=? AND production IN ('QUEUED','RUNNING','WAITING')", r["id"]):
+                        continue
+                    p = plan(r["id"], low=low)
+                    if due(p, "source_media"):
+                        mark_missed(r["id"], p)
+                        if enabled:
+                            backup_rules.track(r["id"])
+                        d = Path(r["media_path"]).parent
+                        if d.is_relative_to(s.media_dir):
+                            shutil.rmtree(d, ignore_errors=True)
+                        db.exec("UPDATE sources SET media_state='PURGED', purged_at=? WHERE id=?", now(), r["id"])
+                        purged += 1
+    backup.pending_alert()
     finish.sweep_agy_state()
     today = dt.date.today().isoformat()
     if db.setting("logs_pruned") != today:  # once a day: the logs past their month (logs.py)

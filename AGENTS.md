@@ -10,7 +10,8 @@
 |---|---|
 | `src/assetizer/` | 后端：FastAPI（`web/app.py`）、生产流水线（`pipeline/`）、编译（`compiler.py`）、调试与定稿（`tuning.py`）、模型调用（`llm.py`、`providers/`）、Notion 交付（`delivery.py`、`notion/`、`preview.py`）、专题（`topics/`、`web/topics.py`） |
 | `web/` | 前端（React + Vite + TS）；构建产物写入 `src/assetizer/web/static`，不进 Git |
-| `tests/test_core.py`、`tests/test_topics.py` | 全部后端测试（专题在后者） |
+| `extension/` | Chrome 扩展「选片篮」：在 YouTube 上攒视频交给新专题（开发者模式加载，不上架） |
+| `tests/test_core.py`、`tests/test_topics.py`、`tests/test_topic_notion.py`、`tests/test_topic_backup.py`、`tests/test_backup_rules.py` | 全部后端测试（专题、Notion 交付、假 rclone 与 OAuth 网盘备份） |
 | `seeds/` | 两个频道的初始学习目标与规程（`assetizer init` 使用；只在源码环境有，LPK 不含） |
 | `assets/` | 字幕用的中文字体；代码按源码目录的相对路径找它，打包时与 `src/` 放在一起 |
 | `experiments/` | 2026-10-05 对照实验的一次性脚本，不参与运行 |

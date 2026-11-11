@@ -3,9 +3,9 @@
    answers beside the notes: the player at that moment, the frame, the look. On a phone the player stays on top while it
    plays and a frame or a look comes up as a sheet. */
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { get, post } from "../api";
+import { get, type ItemBackup, post } from "../api";
 import { typeset, Words } from "../cjk";
-import { Armed, FIT, type Held, itemState, type Item, len, Phases, STEP, thumbOf, useToast } from "../components/topic/bits";
+import { Armed, FIT, handoff, type Held, itemState, type Item, LeaveOut, len, Phases, STEP, thumbOf, useToast } from "../components/topic/bits";
 import { type Cite, citeOf, renderCited } from "../components/topic/cite";
 import { Lightbox } from "../components/Lightbox";
 import { Sheet } from "../components/Sheet";
@@ -23,10 +23,13 @@ type Look = {
 };
 type VView = {
   topic: { id: number; question: string; rev: number; paused: boolean };
-  video: { id: string; url: string; title: string | null; channel: string | null; duration: number | null; published: string | null; thumb: string };
+  video: { id: string; url: string; title: string | null; channel: string | null; duration: number | null; published: string | null; thumb: string;
+    gone: string | null };
   item: Item; plan: { fit: string; reason: string } | null; notes: string | null; looks: Look[];
-  playback: boolean; rev: number; draft: boolean; frames: boolean; held: Held;
+  playback: boolean; rev: number; draft: boolean; frames: boolean; shots: string[]; held: Held;
   prev: string | null; next: string | null;
+  /** 网盘备份: `restored`, the original fetched back from the drive; when */
+  backup: ItemBackup | null; restored_at: string | null;
 };
 type Ev = { kind: "say" | "frame"; t: number; at: string } | { kind: "look"; id: string };
 
@@ -250,7 +253,7 @@ function Evidence({ ev, v, looks, onSeek, onShots }: {
     const src = `/api/topics/${v.topic.id}/videos/${v.video.id}/frame?t=${ev.t}`;
     return (
       <figure className="tp-ev-frame">
-        {v.frames ? (
+        {v.frames || v.shots.includes(ev.t.toFixed(1)) ? (
           <button type="button" onClick={() => onShots([{ id: `f${ev.t}`, src, start: ev.t, meta: { reason: undefined } }], 0)} aria-label="放大看">
             <img src={src} alt={`${ev.at} 的画面`} />
           </button>
@@ -325,10 +328,10 @@ export default function TopicVideo({ tid, vid }: { tid: number; vid: string }) {
     return <main className="page tp-video">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   }
   const v = data, item = v.item, s = itemState(item, v.topic.paused ? "paused" : v.held ? "held" : undefined);
-  const act = async (action: string, ok?: string) => {
+  const act = async (action: string, ok?: string, why?: string) => {
     try {
-      await post(`/api/topics/${tid}/videos/${vid}`, { action });
-      if (action === "remove") { navigate(`/topics/${tid}`, { replace: true }); return; }
+      await post(`/api/topics/${tid}/videos/${vid}`, { action, why });
+      if (action === "remove") { handoff.out = { tid, vid, no: item.no }; navigate(`/topics/${tid}`, { replace: true }); return; }
       setData(await get<VView>(`/api/topics/${tid}/videos/${vid}`));
       setLive(true);
       if (ok) say({ text: ok });
@@ -367,6 +370,7 @@ export default function TopicVideo({ tid, vid }: { tid: number; vid: string }) {
         <h1><Words>{v.video.title || vid}</Words></h1>
         <p className="tp-vmeta">
           {meta.map((m, i) => <span key={i}>{m}</span>)}
+          {v.video.gone && <span>{v.backup?.restored ? "原片已下架 · 网盘备份" : "原片已下架"}</span>}
           <a href={v.video.url} target="_blank" rel="noreferrer">YouTube ↗</a>
         </p>
         <div className="tp-vhead-b">
@@ -378,7 +382,8 @@ export default function TopicVideo({ tid, vid }: { tid: number; vid: string }) {
           <div className="tp-acts">
             {none && !item.force && <button className="btn sm" onClick={() => act("force", "照样读这期")}>仍然读</button>}
             {retry && <button className="btn sm" onClick={() => act("retry", "重新排上")}>重试</button>}
-            <button className="btn ghost sm" onClick={() => act(item.excluded ? "include" : "exclude", item.excluded ? "算进回答" : "不算进回答")}>{item.excluded ? "算这期" : "不算这期"}</button>
+            {item.excluded ? <button className="btn ghost sm" onClick={() => act("include", "算进回答")}>算这期</button>
+              : <LeaveOut onGo={(why) => act("exclude", `不算：${why}`, why)} />}
             <Armed label="移出专题" sure="确认移出" onGo={() => act("remove")} />
           </div>
         </div>

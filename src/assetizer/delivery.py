@@ -384,7 +384,7 @@ def _yours(n: Notion, source_id: str, page_id: str) -> list[str]:
     bot = _bot(n)
     if not bot:
         raise RuntimeError("读不到课代表在 Notion 里的身份，换页前看不出页上有没有你的改动；稍后再试")
-    blocks = n.children(page_id)
+    blocks = _blocks_of(n, page_id, bot)
     out = []
     if any((b.get("created_by") or {}).get("id") != bot for b in blocks):
         out.append("加了段落")
@@ -394,14 +394,37 @@ def _yours(n: Notion, source_id: str, page_id: str) -> list[str]:
     last = db.setting(f"notion_props:{source_id}") or {}
     if last and any(pid in last and last[pid] != h for pid, h in _prop_hashes(n.page(page_id).get("properties")).items()):
         out.append("改了属性")
-    try:
-        said = n._req("GET", f"/comments?block_id={page_id}&page_size=100", idempotent=True).get("results", [])
-    except NotionError as e:
-        if e.status not in (403, 404):
-            raise
-        said = []
-    if any((c.get("created_by") or {}).get("id") != bot for c in said):
+    if _commented(n, [page_id] + [b["id"] for b in blocks if (b.get("created_by") or {}).get("id") == bot], bot):
         out.append("加了评论")
+    return out
+
+
+def _commented(n: Notion, ids: list[str], bot: str) -> bool:
+    """Someone else commented on the page or on one of these blocks. Notion lists a page's comments without those on
+    its blocks, so each is asked for (only when a page is about to be replaced); no right to read comments: none."""
+    for bid in ids:
+        try:
+            said = n._req("GET", f"/comments?block_id={bid}&page_size=100", idempotent=True).get("results", [])
+        except NotionError as e:
+            if e.status == 403:
+                return False
+            if e.status in (400, 404):
+                continue
+            raise
+        if any((c.get("created_by") or {}).get("id") != bot for c in said):
+            return True
+    return False
+
+
+def _blocks_of(n: Notion, block_id: str, bot: str) -> list[dict]:
+    """The page's blocks, and inside each block Assetizer made that has blocks of its own (a fold, a callout, a table)
+    those too: an edit inside a fold is an edit. A block someone else made counts as theirs whole; a sub-page is a page."""
+    out = []
+    for b in n.children(block_id):
+        out.append(b)
+        if (b.get("has_children") and (b.get("created_by") or {}).get("id") == bot
+                and b.get("type") not in ("child_page", "child_database")):
+            out += _blocks_of(n, b["id"], bot)
     return out
 
 

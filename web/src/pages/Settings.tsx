@@ -1,10 +1,12 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { post } from "../api";
-import { boxLines, cookieState, type Line, MAGPIE_DOWN, MAIN_STEPS, quotaLefts, STEP } from "../box";
+import { boxLines, cookieState, gdriveLine, type Line, MAGPIE_DOWN, MAIN_STEPS, quotaLefts, STEP } from "../box";
 import { openAgyLogin } from "../components/AgyLogin";
 import { BackfillPanel } from "../components/BackfillPanel";
 import { Cmd } from "../components/Cmd";
 import { CookieCloudSheet } from "../components/CookieCloud";
+import { GDriveRows, TRASH_HASH } from "../components/GDrive";
+import { DefaultPlace } from "../components/topic/Notion";
 import { AsrForm, DiskRows, NotionRows, ParallelRows, Row, type Save, Stepper, TelegramForm, useKnobs } from "../components/Knobs";
 import { type Left, lostRoutes, NO_ROUTE, RouteCells, RoutePicker, TopicRouteCells } from "../components/Routes";
 import { Fault, Stale, Unroll } from "../components/States";
@@ -16,7 +18,7 @@ import { ago, bytes, errorLabel, smooth } from "../util";
    itself; a form with text in it saves when asked to. /settings#<section> goes straight to one; #cc opens CookieCloud. */
 
 const SECTIONS: { k: string; name: string }[][] = [
-  [{ k: "models", name: "模型分工" }, { k: "retry", name: "自动重试" }, { k: "slots", name: "并行" }, { k: "backfill", name: "补录" }, { k: "topics", name: "专题" }, { k: "disk", name: "磁盘" }],
+  [{ k: "models", name: "模型分工" }, { k: "retry", name: "自动重试" }, { k: "slots", name: "并行" }, { k: "backfill", name: "补录" }, { k: "topics", name: "专题" }, { k: "disk", name: "磁盘" }, { k: "gdrive", name: "网盘备份" }],
   [{ k: "agy", name: "Gemini" }, { k: "magpie", name: "Magpie" }, { k: "youtube", name: "YouTube" }, { k: "notion", name: "Notion" }, { k: "asr", name: "GPU 转写" }, { k: "notify", name: "通知" }],
 ];
 const ALL = SECTIONS.flat();
@@ -82,7 +84,7 @@ function useSections(ready: boolean, nav: React.RefObject<HTMLElement | null>) {
     addEventListener("wheel", takenOver, { passive: true });
     addEventListener("touchstart", takenOver, { passive: true });
     addEventListener("hashchange", toHash);
-    const hash = location.hash === "#cc" ? "youtube" : location.hash.slice(1);
+    const hash = location.hash === "#cc" ? "youtube" : location.hash === TRASH_HASH ? "gdrive" : location.hash.slice(1);
     // gone back to, the page is where the reader left it (useRestoreScroll); opened or reloaded, where the address says
     if (IDS.includes(hash) && !back) go(hash, false);
     else read();
@@ -258,9 +260,10 @@ function Youtube({ data, lamp, onCc }: { data: any; lamp: string; onCc: () => vo
 const share = (v: number) => `${Math.round(v * 100)}%`;
 
 /** 专题: how many of its videos are read at once (within 同时印), and what of each quota it leaves untouched (run.held) */
-function TopicRows({ kn, save }: { kn: any; save: Save }) {
+function TopicRows({ kn, save, say }: { kn: any; save: Save; say: (s: { text: string; bad?: boolean }) => void }) {
   return (
     <>
+      <Row name="Notion"><DefaultPlace say={say} /></Row>
       <Row name="同时读"><Stepper k="topic_slots" value={kn.topic_slots} lo={1} hi={8} fmt={(v) => `${v} 期`} save={save} label="同时读" /></Row>
       <h3 className="st-group">额度留底</h3>
       <Row name="每周额度"><Stepper k="topic_min_weekly" value={kn.topic_min_weekly} lo={0} hi={0.9} step={0.05} fmt={share} save={save} label="专题留下的周额度" /></Row>
@@ -297,7 +300,7 @@ export default function Settings() {
   const routes = { default: data.providers?.default || "agy", stages: data.providers?.stages || {} };
   const missing: string[] = data.magpie?.missing || [];
   const lost = lostRoutes(MAIN_STEPS, routes, models, missing);
-  const lines: Record<string, Line | undefined> = { ...boxLines(data), models: lost ? { lamp: "bad", value: `${lost} 处要换` } : undefined };
+  const lines: Record<string, Line | undefined> = { ...boxLines(data), gdrive: gdriveLine(data.gdrive), models: lost ? { lamp: "bad", value: `${lost} 处要换` } : undefined };
   const bad = ALL.filter((s) => lines[s.k]?.lamp === "bad");
   const lefts = quotaLefts(data);
   const jump = (id: string) => (e: React.MouseEvent) => {
@@ -361,9 +364,10 @@ export default function Settings() {
             <div className="st-routes">
               <TopicRouteCells routes={data.providers?.topic || {}} efforts={kn.efforts || {}} save={save} models={models} missing={missing} lefts={lefts} />
             </div>
-            <TopicRows kn={kn} save={save} />
+            <TopicRows kn={kn} save={save} say={say} />
           </Sec>
           <Sec id="disk" title="磁盘" line={lines.disk}><Disk data={data} save={save} /></Sec>
+          <Sec id="gdrive" title="网盘备份" line={lines.gdrive}>{data.gdrive && <GDriveRows g={data.gdrive} reload={reload} say={say} />}</Sec>
           <Sec id="agy" title="Gemini" line={lines.agy}><Gemini data={data} /></Sec>
           <Sec id="magpie" title="Magpie" line={lines.magpie}><Magpie data={data} lamp={lines.magpie!.lamp} /></Sec>
           <Sec id="youtube" title="YouTube" line={lines.youtube}><Youtube data={data} lamp={lines.youtube!.lamp} onCc={() => setCc(true)} /></Sec>

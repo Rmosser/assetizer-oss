@@ -110,6 +110,16 @@ mark.tp-split { background: none; color: var(--zhu-ink); text-decoration: underl
 .tp-pick .tp-urls:focus { border-color: var(--ink); box-shadow: 0 0 0 4px var(--zhu-wash); }
 .tp-hint { margin: -2px 0 0; font: 12.5px var(--sans); color: var(--ink-3); }
 
+/* 新专题 ｜ 已有专题: a basket from the extension may go to a topic that is there */
+.sheet-title .tp-mode { vertical-align: middle; }
+.sheet-title .tp-mode button { height: 32px; padding: 0 16px; font: 700 15px var(--serif); }
+.tp-pick .tp-q-old { display: block; width: 100%; text-align: left; color: var(--ink); cursor: pointer; }
+.tp-pick .tp-q-old:hover, .tp-pick .tp-q-old:focus-visible { border-bottom-color: var(--ink); }
+.tp-olds { display: grid; max-height: 42vh; overflow-y: auto; border-top: 1px solid var(--rule); }
+.tp-old { display: block; width: 100%; padding: 12px 0; border-bottom: 1px solid var(--rule); text-align: left; font: 700 16px/1.5 var(--serif); color: var(--ink); }
+.tp-old:hover, .tp-old:focus-visible { color: var(--ink); background: var(--paper-2); }
+.tp-old.on { box-shadow: inset 3px 0 0 var(--ink); padding-left: 12px; }
+
 .tp-found { display: grid; gap: var(--s2); }
 .tp-fd { border-top: 1px solid var(--rule); }
 .tp-fd-h { display: flex; align-items: baseline; gap: var(--s3); padding: 10px 0 4px; }
@@ -150,6 +160,15 @@ mark.tp-split { background: none; color: var(--zhu-ink); text-decoration: underl
 .tp-sum { flex: 1; min-width: 0; margin: 0; font: 13px/1.5 var(--sans); color: var(--ink-2); }
 .tp-sum.bad { color: var(--zhu-ink); }
 .tp-pick-foot .btn { flex: none; min-width: 96px; }
+/* 网盘备份 beside 开始; on a phone the sum takes the line above them */
+.tp-bk { flex: none; display: inline-flex; align-items: center; gap: var(--s2); font: 13px var(--sans); color: var(--ink-2); white-space: nowrap; }
+@media (max-width: 640px) {
+  .tp-pick-foot.bk { flex-wrap: wrap; gap: var(--s2) var(--s3); }
+  .tp-pick-foot.bk .tp-sum { flex-basis: 100%; }
+  .tp-pick-foot.bk .tp-sum:empty { display: none; }
+  .tp-pick-foot.bk .tp-bk { margin-right: auto; }
+  .tp-pick-foot.bk .btn { margin-left: auto; }   /* on a line of its own where the two do not fit, still at the right */
+}
 
 /* ───────────────────────── a topic ───────────────────────── */
 .page.tp-topic { max-width: calc(40rem + 22rem + 72px + 2 * var(--gutter)); }
@@ -190,6 +209,96 @@ mark.tp-split { background: none; color: var(--zhu-ink); text-decoration: underl
 .tp-sfoot .btn { margin-left: auto; }
 .tp-busy { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); }
 .tp-busy::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-2); animation: breathe 1.4s ease-in-out infinite; }
+
+/* the answer made of claims (components/topic/Claims, design §R8-10): how sure, what changed, the disputes under the
+   conclusion, each claim with its kind and its videos, the predictions still open, the claims settled or replaced, the
+   sources, the versions. Ink throughout; 朱 only for the rule beside a dispute. */
+.tp-answer > :not(.tp-sec) + .tp-sec { border-top-color: var(--ink); }
+.tp-since { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s4); margin: 0 0 var(--s5); padding: 10px 12px 10px 14px;
+  border-left: 2px solid var(--ink); background: var(--paper-2); font: 13.5px/1.55 var(--sans); color: var(--ink); }
+.tp-since .btn { margin-left: auto; flex: none; }
+.tp-lv { display: inline-flex; align-items: center; height: 19px; padding: 0 6px; border-radius: 3px; font: 500 11.5px/1 var(--sans); letter-spacing: 0.04em; white-space: nowrap; }
+.tp-lv.hi { background: var(--ink); color: var(--paper); }
+.tp-lv.mid { box-shadow: inset 0 0 0 1px var(--ink-2); color: var(--ink); }
+.tp-lv.lo { box-shadow: inset 0 0 0 1px var(--rule-2); color: var(--ink-3); }
+.tp-lv.vlo { outline: 1px dashed var(--rule-2); outline-offset: -1px; color: var(--ink-3); }
+.tp-cert { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px var(--s3); margin: var(--s3) 0 0; font: 13.5px/1.6 var(--sans); color: var(--ink-2); }
+.tp-cert .tp-lv { height: 21px; font-size: 12px; }
+.tp-chg { margin: var(--s2) 0 0; font: 13.5px/1.6 var(--sans); color: var(--ink-2); }
+.tp-who { font: 12.5px/1.5 var(--sans); color: var(--ink-3); }
+.tp-cl-t { font: 16.5px/1.75 var(--serif); color: var(--ink); }
+.tp-cl-m { display: flex; align-items: center; flex-wrap: wrap; gap: 4px var(--s3); margin-top: 4px; font: 12.5px/1.5 var(--sans); color: var(--ink-3); }
+.tp-past { color: var(--ink); font-weight: 600; }
+.tp-see { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
+.tp-see:hover { color: var(--ink); text-decoration-color: currentColor; }
+.tp-hit { animation: tp-hit 1.8s var(--ease); }
+@keyframes tp-hit { from { background: color-mix(in srgb, var(--ink) 9%, transparent); } }
+
+.tp-disp .tp-d { margin-top: var(--s4); padding: 2px 0 2px var(--s4); border-left: 2px solid color-mix(in srgb, var(--zhu) 55%, transparent); }
+.tp-d h3 { margin: 0 0 var(--s2); font: 700 17px/1.5 var(--serif); color: var(--ink); }
+.tp-d ul { list-style: none; margin: 0; padding: 0; }
+.tp-d li { padding: 6px 0; }
+.tp-d li + li { border-top: 1px solid var(--rule); }
+.tp-d li .tp-who { display: block; }
+.tp-d p { margin: 6px 0 0; font: 14.5px/1.7 var(--serif); color: var(--ink-2); }
+.tp-d p b { margin-right: 8px; font: 600 12.5px var(--sans); letter-spacing: 0.06em; color: var(--ink-3); }
+
+.tp-cls, .tp-pred ol, .tp-old ul, .tp-vers ol { list-style: none; margin: 0; padding: 0; }
+.tp-cl, .tp-old li { display: grid; grid-template-columns: 2.6em minmax(0, 1fr) auto; column-gap: var(--s3); align-items: start; padding: 10px 0; }
+.tp-cl + .tp-cl { border-top: 1px solid var(--rule); }
+.tp-cl:first-child { padding-top: 0; }
+.tp-ty, .tp-st { padding-top: 6px; font: 500 12px/1.4 var(--sans); letter-spacing: 0.04em; color: var(--ink-3); white-space: nowrap; }
+.tp-old li { border-bottom: 1px solid var(--rule); }
+.tp-old .tp-cl-t { color: var(--ink-2); }
+
+.tp-mk { position: relative; display: inline-flex; margin-top: 4px; }
+.tp-mk-b { display: grid; place-items: center; width: 26px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--ink-3); cursor: pointer; }
+.tp-mk-b svg { fill: currentColor; }
+.tp-mk-b:hover, .tp-mk-b[aria-expanded="true"] { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.tp-mk-p { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; display: flex; flex-direction: column; gap: 8px; width: 260px; padding: 8px;
+  border: 1px solid var(--rule); border-radius: 10px; background: var(--paper); box-shadow: 0 18px 40px -16px rgba(0, 0, 0, 0.35); animation: tp-pop 0.18s var(--ease); }
+.tp-mk-p input { width: 100%; padding: 7px 9px; border: 1px solid var(--rule); border-radius: 7px; background: transparent; color: var(--ink); font: 13.5px var(--sans); }
+.tp-mk-p input:focus { outline: none; border-color: var(--ink-3); }
+.tp-mk-w { display: flex; flex-wrap: wrap; gap: 6px; }
+.tp-mk-x { margin-top: 5px; padding: 0; border: 0; background: none; font: 12.5px/1.5 var(--sans); color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; cursor: pointer; }
+.tp-mk-x:hover { color: var(--ink); text-decoration-color: currentColor; }
+
+.tp-pred li { display: grid; grid-template-columns: 6.4em minmax(0, 1fr) auto; column-gap: var(--s3); align-items: start; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+.tp-due { padding-top: 4px; font: 500 12.5px var(--sans); color: var(--ink-3); }
+.tp-pred li.past .tp-due { color: var(--ink); font-weight: 700; }
+.tp-pred-t a { font: 15.5px/1.7 var(--serif); color: var(--ink); text-decoration: none; }
+.tp-pred-t a:hover { text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 4px; }
+.tp-pred-t .tp-who { display: block; }
+
+.tp-bal { margin: var(--s3) 0 0; font: 13.5px/1.6 var(--sans); color: var(--ink-2); }
+.tp-adds .t small.tp-src-m { white-space: normal; overflow: visible; color: var(--ink-2); }
+.tp-vers { margin-top: var(--s6); font: 13px/1.6 var(--sans); color: var(--ink-3); }
+.tp-vers summary { width: max-content; cursor: pointer; color: var(--ink-2); }
+.tp-vers summary:hover { color: var(--ink); }
+.tp-vers ol { margin-top: var(--s2); }
+.tp-vers li { display: grid; grid-template-columns: 4.6em minmax(0, 1fr); column-gap: var(--s3); padding: 6px 0; border-top: 1px solid var(--rule); }
+.tp-vers-c { grid-column: 2; color: var(--ink-2); }
+
+/* a topic kept alive (components/topic/Living, design §R8-11): new videos of what it watches, the watch, the archive */
+.tp-cands { margin: var(--s3) 0 var(--s2); padding: var(--s3) var(--s3) var(--s2); border-radius: 6px; background: var(--paper-2); }
+.tp-cands h3 { display: flex; align-items: baseline; gap: 6px; margin: 0 0 var(--s2); font: 700 14px/1.4 var(--serif); letter-spacing: 0.1em; }
+.tp-cands h3 .num { font: 500 12px var(--sans); color: var(--ink-3); letter-spacing: 0; }
+.tp-cands ol { list-style: none; margin: 0; padding: 0; }
+.tp-cands li { padding: var(--s2) 0; }
+.tp-cands li + li { border-top: 1px solid var(--rule); }
+.tp-cand-a { display: grid; grid-template-columns: 84px minmax(0, 1fr); column-gap: var(--s3); align-items: start; }
+.tp-cand-a:hover b { text-decoration: underline; text-decoration-color: var(--rule-2); text-underline-offset: 3px; }
+.tp-cand-b { display: flex; gap: var(--s1); margin: 6px 0 0 calc(84px + var(--s3)); }
+.tp-watch { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px var(--s3); margin: var(--s3) 0 0; font: 12.5px/1.6 var(--sans); color: var(--ink-3); }
+.tp-watch .link { font-size: 12.5px; }
+.tp-arch-how { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.tp-watch-c { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.tp-watch-c label { display: flex; align-items: center; gap: 10px; padding: 6px 0; font: 15px/1.5 var(--sans); color: var(--ink); cursor: pointer; }
+.tp-watch-c input { width: 16px; height: 16px; accent-color: var(--ink); }
+.tp-pick .tp-watch-w { width: 100%; background: none; outline: none; color: var(--ink); }
+.tp-rows-h { padding: var(--s6) 0 var(--s2); border-bottom: 1px solid var(--ink); font: 700 14px/1.4 var(--serif); letter-spacing: 0.2em; color: var(--ink-2); }
+.tp-row-arch .tp-row { opacity: 0.72; }
+.tp-offer { font-weight: 600; color: var(--ink); }
 
 /* the batch, beside the answer */
 .tp-side {
@@ -357,6 +466,8 @@ mark.tp-split { background: none; color: var(--zhu-ink); text-decoration: underl
   .tp-head-b .tp-acts { margin-left: -10px; margin-right: 0; }
   .tp-f { grid-template-columns: 96px minmax(0, 1fr); }
   .tp-sec > h2 { font-size: 20px; }
+  .tp-pred li { grid-template-columns: 5.8em minmax(0, 1fr) auto; column-gap: var(--s2); }
+  .tp-mk-p { width: min(260px, calc(100vw - 2 * var(--gutter))); }
   .tp-v-a { grid-template-columns: 84px minmax(0, 1fr); }
   .tp-vhead h1 { font-size: 22px; }
   .tp-verdict { display: block; }   /* the tag starts the line the gist runs on */
@@ -374,5 +485,40 @@ mark.tp-split { background: none; color: var(--zhu-ink); text-decoration: underl
   .tp-pk { min-height: 56px; }
   .tp-step .iconbtn { width: 44px; height: 44px; }
   .tp-x { width: 44px; height: 44px; }
+  .tp-mk-b { width: 40px; height: 32px; margin: -6px -8px -6px 0; }
   .tp-pick .tp-q { font-size: 18px !important; }   /* over the 16px every field gets on a phone (styles.css): the question stays the heading */
 }
+
+/* 存到 Notion (components/topic/Notion): the answer's foot, the place picker, the head's line when a write did not happen */
+.tp-nfoot { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s4); margin-top: var(--s3); font: 12.5px/1.5 var(--sans); color: var(--ink-3); }
+.tp-nfoot .btn { margin-left: auto; }
+.tp-answer > .tp-none + .tp-nfoot { justify-content: center; }
+.tp-answer > .tp-none + .tp-nfoot .btn { margin-left: 0; }
+.tp-nlink, .tp-nplace, .tp-nact { color: var(--ink-2); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--ink-4); }
+.tp-nlink:hover, .tp-nplace:hover, .tp-nact:hover { color: var(--ink); text-decoration-color: currentColor; }
+.tp-nplace, .tp-nact { font: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.tp-np-at { position: relative; display: inline-block; }
+.tp-np { position: absolute; left: 0; top: calc(100% + 6px); z-index: 30; width: 300px; padding: 6px; border-radius: 12px; background: var(--paper);
+  border: 1px solid var(--rule); box-shadow: 0 18px 40px -16px rgba(0, 0, 0, 0.35); animation: tp-pop 0.18s var(--ease); text-align: left; }
+@keyframes tp-pop { from { opacity: 0; transform: translateY(-4px); } }
+.tp-np-q { width: 100%; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 8px; background: transparent; color: var(--ink); font: 13.5px var(--sans); }
+.tp-np-q:focus { outline: none; border-color: var(--ink-3); }
+.tp-np-r .tp-np { left: auto; right: 0; }
+.tp-np-l { max-height: 300px; overflow-y: auto; margin-top: 4px; }
+.tp-np-i { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: 8px; text-align: left; font: 13.5px var(--sans); color: var(--ink); background: none; border: 0; cursor: pointer; }
+.tp-np-i:hover, .tp-np-i.on { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.tp-np-i .g { width: 18px; flex: none; text-align: center; color: var(--ink-3); }
+.tp-np-i .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-np-i.q { color: var(--ink-2); }
+.tp-np-sep { height: 1px; background: var(--rule); margin: 6px 4px; }
+.tp-np-l > .tp-np-sep:first-child { display: none; }
+.tp-np-say { margin: 0; padding: 10px; font: 13px/1.6 var(--sans); color: var(--ink-3); }
+.tp-ntrouble { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s2) var(--s4); margin: var(--s3) 0 0; font: 13px/1.6 var(--sans); color: var(--ink-2); }
+.tp-ntrouble.bad > span:first-child { color: var(--zhu-ink); }
+
+/* 不算这期 asks why; 撤销 in the toast */
+.tp-why { display: inline-flex; gap: var(--s1); animation: ch-rise 0.18s var(--ease); }
+.ch-toast .tp-undo { margin: -4px -8px -4px 0; padding: 4px 8px; border: 0; border-radius: 999px; background: none; color: var(--paper);
+  font: 600 13.5px var(--sans); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.ch-toast .tp-undo:hover { background: color-mix(in srgb, var(--paper) 14%, transparent); }
+.ch-toast .tp-undo:focus-visible { outline: 2px solid var(--paper); outline-offset: 1px; }

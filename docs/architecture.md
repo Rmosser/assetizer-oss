@@ -57,6 +57,8 @@ CLEANUP                                                     非阻塞
 
 专题（[topics.md](topics.md)、[design §R8](design.md)）不走上面的流水线、不建运行：每期在 `topic_videos` 里有自己的状态与步骤（`ACQUIRE → DRAFT → PLAN → LOOK → SECOND → WRITE`，有没把握的再 `LOOK2 → SECOND2 → REVISE`），读完再综合。worker 在派完生产和试跑、补录之前调 `topics.run.dispatch`：先派要做的综合，再在 `topic_slots` 之内派下一期；一期占一个并行槽（`Worker.active` 里的 `topic:<专题>:<视频>`），不占运行。分工用到的订阅低于专题的额度留底（`run.held`）时不派新的；槽满又有运行排队时，在读的一期在下一步之前让出槽（`run.crowded`）；同一个视频的底稿同时只有一个专题在录（`run.drafting`）。四道工序的模型由 `knobs.topic_routes` 决定，`providers.for_stage` 遇到 `draft`、`look`、`second`、`topic` 开头的工序名就走它，不看 `stage_providers`。
 
+专题的回答另存到 Notion 由 `topics/notion.py` 做：worker 在整批的综合做好后接着写（`run.put_together`），页面要求的写由 `dispatch` 起一个不占槽的短线程（`topic-notion:<专题>`）；复用 `notion/client.py`（插在某块之后、页内数据库、列出行）、`notion/blocks.py` 和 `delivery` 里认课代表身份、建行、记属性的函数，不经交付的计划与检查点。页上的块由 `Sync` 逐块比对着写：只换课代表写过、内容变了、没人动过的块，别人写的和被人改过、评论过的都不动；「来源」表是页内数据库（`topics.notion_db`），每行的页面和写过的内容记在 `topics.notion_rows`。页上和各行里的评论由 `topics/comments.py` 读回（worker 的 `housekeeping` 每 10 分钟起一个后台线程，每页 6 小时读一次，`put_together` 综合前再读），记在 `topic_comments`；点名课代表的讨论串交给下一次综合（停笔 10 分钟后自动排一次），回复在写完 Notion 后发，每一句点名记在 `asks`（用量和待修清单）。
+
 ## 交付到 Notion
 
 - 每个频道有自己的目标库与属性映射（设置 `notion:<频道>`，`notion/mapping.py`）；没有频道目标的期写入课代表自己的数据库（设置 `notion_database_id`，没有时在 `notion_parent_page_id` 下自动创建）。
@@ -69,14 +71,14 @@ CLEANUP                                                     非阻塞
 - 几种情况先不写、停下等你（`HELD`，原因在 `delivery_reason`，刊的「需要你」里各有一行）：
   - `PARTIAL`：当前版本是「部分完成」（`COMPLETE_PARTIAL`：一道非阻塞工序整体记了 `WARN`）。不管从定稿、钉住还是重新交付过来都不写；重试这一版跑完整后照常交付（`adopt_completed` 解除）。工序内部的局部失败不算：部分片段剪辑失败、截图失败、预审某批失败时仍是 `COMPLETE`，照常交付，片段和截图的失败记成校注。
   - `MAYBE_HAVE`：补录进来的期，库里有这个频道没填视频链接的页（手写的）可能就是它。按日期起标题的频道（汤姆）比「内容所属 + 日期」，日期取 YouTube 的上传日、纽约当天和标题里的 MM/DD；用视频原标题的频道（王海滨）比标题。你选「照写」（另写一页）或「算已有」（登记为 `REGISTERED`）。补录列表里同样的比对标「可能已有」，默认不勾（列表的日期是近似值，只用标题里的 MM/DD）。
-  - `YOURS_ON_PAGE`：要换掉旧页（重印、换成新版本、同一版内容变了要重建）之前，先看旧页上有没有别人做的事：加的段落、改过的课代表段落、改过的属性、评论（integration 有读评论权限时）。有就不动旧页，你选「留着旧页」（这一版不写进 Notion）或「换新页」（旧页进 Notion 回收站，30 天内能找回）。
+  - `YOURS_ON_PAGE`：要换掉旧页（重印、换成新版本、同一版内容变了要重建）之前，先看旧页上有没有别人做的事：加的段落、改过的课代表段落、改过的属性、评论（integration 有读评论权限时；Notion 按页取评论不含块上的，所以页和课代表写的每一块都问一遍）。有就不动旧页，你选「留着旧页」（这一版不写进 Notion）或「换新页」（旧页进 Notion 回收站，30 天内能找回）。
 - 映射按属性 id 记；在 Notion 删掉一个属性又建了同名同类型的，库里只有这一个、也没被别的映射用上时自动接上（`mapping.sync`），类型变了或已被占用仍要重新选。
 - 频道的 Notion 设置带修订号（`rev`，保存和换库时加一，跟随 Notion 里的改名不加）。页面保存时带回读到的修订号，对不上返回 412，界面让你选「用我的覆盖」或「放弃我的」。
 - 已写进 Notion 的视频再贴一次，不重印：返回那一页（`kept`），要重印时带 `reprint` 再提交。
 
 ## 主要数据表
 
-`channels`、`channel_prompts`（学习目标版本）、`playbooks`（规程版本）、`sources`（每一期：采用的运行 `current_run_id`、是否钉住 `adopt_pinned`、交付状态 `delivery`、题眼 `headline`）、`runs`（`origin`：manual / ingest / backfill / trial / lock（定稿单排入或等着的），2026-10-28 之前的为空；`stop_at`：「清空」要它停下）、`stages`、`backfill_queue`（补录）、`units`（知识单元）、`sections`、`assets`（截图、片段、海报）、`flags`（校注）、`samples`（调试样片）、`trial_queue`、`notion_blocks`、`alerts`（`notified_at`：推送过没有，非紧急的等 10 分钟）、`notify_outbox`（没发出去的 Telegram 通知）、`decisions`、`events`、`settings`、`model_calls`、`speakers`、`run_votes`（旧的「喜欢 / 备注」，只保留数据）；专题的 `topics`（问题、修订号、综合）、`videos`（专题的视频，原片与底稿按视频，几个专题共用）、`topic_videos`（一个专题里的一期：状态、步骤、判断、是否算进回答）。表结构与迁移都在 `db.py`（启动时自动补列）。
+`channels`、`channel_prompts`（学习目标版本）、`playbooks`（规程版本）、`sources`（每一期：采用的运行 `current_run_id`、是否钉住 `adopt_pinned`、交付状态 `delivery`、题眼 `headline`）、`runs`（`origin`：manual / ingest / backfill / trial / lock（定稿单排入或等着的），2026-10-28 之前的为空；`stop_at`：「清空」要它停下）、`stages`、`backfill_queue`（补录）、`units`（知识单元）、`sections`、`assets`（截图、片段、海报）、`flags`（校注）、`samples`（调试样片）、`trial_queue`、`notion_blocks`、`alerts`（`notified_at`：推送过没有，非紧急的等 10 分钟）、`notify_outbox`（没发出去的 Telegram 通知）、`decisions`、`events`、`settings`、`model_calls`、`speakers`、`run_votes`（旧的「喜欢 / 备注」，只保留数据）；专题的 `topics`（问题、修订号、综合、你的标记、盯着什么、归档、选片篮的批次、存到 Notion 的目标与那一页）、`videos`（专题的视频，原片与底稿按视频，几个专题共用；`gone` 是 YouTube 上没了）、`topic_videos`（一个专题里的一期：状态、步骤、判断、是否算进回答和为什么）、`topic_versions`（每次综合的一版）、`topic_removed`（移出后暂存 7 天的期）、`topic_candidates`（盯着的频道和关键词里冒出来的新视频）。表结构与迁移都在 `db.py`（启动时自动补列）。
 
 ## 前端
 

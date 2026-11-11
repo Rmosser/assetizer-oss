@@ -311,23 +311,96 @@ CREATE TABLE IF NOT EXISTS notify_outbox (           -- Telegram messages it cou
   at TEXT NOT NULL,
   text TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS topics (                  -- 专题：一个问题和一批视频（design §R8），不进刊、不写 Notion
+CREATE TABLE IF NOT EXISTS topics (                  -- 专题：一个问题和一批视频（design §R8），不进刊；可另存一份到 Notion
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  backup INTEGER CHECK (backup IN (0,1)),              -- NULL 待定；没有默认选择
   question TEXT NOT NULL,
   notes TEXT,                                          -- 要什么、不要什么
   rev INTEGER NOT NULL DEFAULT 1,                      -- 问题改过几次：改了就按新问题从看计划起重读
   last_no INTEGER NOT NULL DEFAULT 0,                  -- 给过的最大期号：回答按 V 号引用，移出的号不再给别的视频
   paused INTEGER NOT NULL DEFAULT 0,
+  batch TEXT,                                          -- 扩展选片篮送来的批次：同一批再送一次就打开这个专题，不再新建
   synth TEXT,                                          -- JSON: the latest 综合
   synth_state TEXT,                                    -- NULL | QUEUED | RUNNING | DONE | FAILED
   synth_error TEXT,
   synth_of TEXT,                                       -- JSON: what the 综合 was made from (topics.run.signature)
   synth_at TEXT,
+  notion_target TEXT,                                  -- JSON {kind: page|database, id, title}: 存到 Notion 的哪里（NULL 不存）
+  notion_page_id TEXT,                                 -- 写过的那页：之后只认它（在 Notion 里挪了照样更新）
+  notion_state TEXT,                                   -- NULL | QUEUED | RUNNING | DONE | FAILED
+  notion_error TEXT,                                   -- JSON {kind: TOKEN|NO_ACCESS|GONE|OTHER|YOURS, message, found}
+  notion_at TEXT,                                      -- 写进去的那次综合的 synth_at
+  notion_db TEXT,                                      -- 那页里的来源表（Notion 数据库）id
+  notion_rows TEXT,                                    -- JSON {video id: {page 那一行的页 id, want/props 写过的列（认出你改过的）, sig 写过的笔记}}
+  marks TEXT,                                          -- JSON {论断 id: {status, why, at}}：用户淘汰的说法、结算的预测（design §R8-10）
+  reminded TEXT,                                       -- JSON [论断 id]：到期提醒过的预测
+  watch TEXT,                                          -- JSON {channels: [频道], words: [关键词]}：盯着的频道和关键词（design §R8-11）
+  watched_at TEXT,                                     -- 上次看有没有新视频
+  archived_at TEXT,                                    -- 归档：结论定格，不再读、不再综合、不再盯、不再推
+  archived_how TEXT,                                   -- 归档时写的：应验 | 落空 | 部分应验 | 不判
+  archived_why TEXT,                                   -- 归档时写的一句话（可不写）
+  comments_at TEXT,                                    -- 上次读 Notion 页上的批注（design §R8-13）
+  comments_err TEXT,                                   -- NO_READ（integration 没开读评论）| NO_INSERT（没开插入评论，回复不了）
+  replies TEXT,                                        -- JSON [{discussion, text, n}]：还没在 Notion 讨论串里发出去的回复
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS topic_comments (          -- Notion 页上的批注：用户的意见交给下一次综合，在原讨论串里回复（design §R8-13）
+  topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  id TEXT NOT NULL,                                    -- Notion 的评论 id
+  discussion TEXT NOT NULL,                            -- 讨论串
+  page TEXT NOT NULL,                                  -- 在哪一页：专题页，或来源表的一行
+  block TEXT,                                          -- 在哪一块（NULL：整页的讨论）
+  video_id TEXT,                                       -- 来源表那一行的视频（NULL：专题页）
+  quote TEXT,                                          -- 那一块当时的字
+  under TEXT,                                          -- 那一块所在的一节（上面最近的标题）
+  kind TEXT,                                           -- 那一块的类型
+  text TEXT NOT NULL,
+  hash TEXT NOT NULL,                                  -- 改过的批注算新的
+  ours INTEGER NOT NULL DEFAULT 0,                     -- 课代表的回复
+  asked INTEGER NOT NULL DEFAULT 0,                    -- 以「课代表」开头：点名课代表（它在的讨论串才处理）
+  created TEXT,
+  open INTEGER NOT NULL DEFAULT 1,                     -- 上次读时还在（解决了、删了的 Notion 不再给）
+  seen INTEGER,                                        -- 收进了第几版（NULL：还没有）
+  PRIMARY KEY (topic_id, id)
+);
+CREATE TABLE IF NOT EXISTS asks (                    -- 点名课代表的批注：用了几次、怎么处理的；记进待修的是待修清单（design §R8-13）
+  n INTEGER PRIMARY KEY AUTOINCREMENT,                 -- 回复和待修清单里的编号
+  id TEXT NOT NULL UNIQUE,                             -- Notion 的评论 id
+  at TEXT NOT NULL,                                    -- 课代表读到它的时候
+  topic_id INTEGER,                                    -- 哪个专题（专题删了也留着：这是用量）
+  discussion TEXT NOT NULL,
+  text TEXT NOT NULL,
+  result TEXT,                                         -- 已改 | 没改 | 已答 | 记进待修（NULL：还没处理）
+  reply TEXT,                                          -- 回复的话
+  answered_at TEXT,                                    -- 回复发进 Notion 的时候
+  fixed TEXT,                                          -- 记进待修的：在哪一版修好（开发用 asks --fixed 记）
+  fixed_told TEXT                                      -- 「已修」回复发进 Notion 的时候
+);
+CREATE TABLE IF NOT EXISTS topic_versions (          -- 每次综合留一版：回答底部的版本记录，下一次综合拿上一版对照
+  topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  n INTEGER NOT NULL,
+  at TEXT NOT NULL,
+  read INTEGER NOT NULL,                               -- 用了几期
+  total INTEGER NOT NULL,                              -- 当时专题里算数的有几期
+  synth TEXT NOT NULL,                                 -- JSON: 这一版的综合
+  PRIMARY KEY (topic_id, n)
+);
+CREATE TABLE IF NOT EXISTS topic_candidates (        -- 盯着的频道、关键词里冒出来的新视频：问「要加吗」，不自动加
+  topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  video_id TEXT NOT NULL,
+  title TEXT,
+  channel TEXT,
+  duration REAL,
+  published TEXT,
+  why TEXT,                                            -- 从哪里来的：频道名或关键词
+  state TEXT NOT NULL DEFAULT 'NEW',                   -- NEW（问要不要加）| ADDED | DROPPED | SEEN（盯上时就有的、不相关的：不问）
+  found_at TEXT NOT NULL,
+  PRIMARY KEY (topic_id, video_id)
+);
 CREATE TABLE IF NOT EXISTS videos (                  -- 专题的视频：媒体和中立底稿按视频存，几个专题共用
   id TEXT PRIMARY KEY,                                 -- youtube video id
+  youtube_channel_id TEXT,
   url TEXT NOT NULL,
   title TEXT,
   channel TEXT,
@@ -339,7 +412,40 @@ CREATE TABLE IF NOT EXISTS videos (                  -- 专题的视频：媒体
   media_state TEXT NOT NULL DEFAULT 'ABSENT',          -- ABSENT | CACHED | PURGED
   draft TEXT,                                          -- JSON: what the 底稿 holds (language, segments, frames), once made
   used_at TEXT,                                        -- last read for a topic: media kept `retention_days` after it
+  gone TEXT,                                           -- YouTube 那边没了（VIDEO_REMOVED、VIDEO_PRIVATE、VIDEO_MEMBERS…）：重读只用底稿和留下的帧
+  gone_at TEXT,
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS backup_authors (
+  id TEXT PRIMARY KEY,                                -- YouTube channel ID，名字不参与身份判断
+  name TEXT,
+  member INTEGER CHECK (member IN (0,1)),
+  public INTEGER CHECK (public IN (0,1))
+);
+CREATE TABLE IF NOT EXISTS video_backups (            -- 两条线共用；不引用本地行，清理本地后仍保留规则依据与用量
+  id TEXT PRIMARY KEY,
+  youtube_channel_id TEXT,
+  author_name TEXT,
+  member INTEGER NOT NULL DEFAULT 0,
+  title TEXT,
+  gone TEXT,
+  backup_due INTEGER NOT NULL DEFAULT 0,
+  backup_gen INTEGER NOT NULL DEFAULT 0,               -- 排队代次：旧上传不能确认后来追加的内容
+  backup_at TEXT,                                       -- 原片在网盘核对过的时间、大小和文件夹
+  backup_bytes INTEGER,
+  backup_md5 TEXT,
+  backup_draft_bytes INTEGER NOT NULL DEFAULT 0,
+  delete_intent TEXT,                                  -- purge 前持久化；未决时不能信任确认，身份只存摘要
+  backup_folder TEXT,
+  backup_draft_at TEXT,                                 -- 底稿最后一次传完
+  backup_draft_folder TEXT,                             -- 底稿只认当前网盘文件夹
+  backup_bad_md5 TEXT,                                  -- 已知不一致的远端原片，用户处理前不能确认备份
+  backup_src_md5 TEXT,                                  -- 上传前记下的原片 md5，待跨轮核对
+  backup_error TEXT,                                    -- 上次失败（脱敏），稍后再试
+  backup_failed_at TEXT,
+  backup_missed_at TEXT,                                -- 原片没备份就被清理了
+  restored_at TEXT,                                     -- 最后从网盘取回原片
+  draft_restored_at TEXT                                -- 最后取回底稿，不代表原片可回看
 );
 CREATE TABLE IF NOT EXISTS topic_videos (
   topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
@@ -358,12 +464,22 @@ CREATE TABLE IF NOT EXISTS topic_videos (
   gist TEXT,                                           -- one line: what it has for the question
   excluded INTEGER NOT NULL DEFAULT 0,                 -- the user: leave it out of the 综合
   force INTEGER NOT NULL DEFAULT 0,                    -- read it through even though the plan found it off the question
+  excluded_why TEXT,                                   -- 不算这期的原因：离题 | 质量差 | 转述别人
+  wait_since TEXT,                                     -- 第一次在等的时刻：等太久（12 小时）就先综合别的期
+  card TEXT,                                           -- JSON {interests, relays}：笔记记下的利益相关、转述的来源
   added_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT,
   PRIMARY KEY (topic_id, video_id)
 );
 CREATE INDEX IF NOT EXISTS topic_videos_state ON topic_videos(state);
+CREATE TABLE IF NOT EXISTS topic_removed (            -- 移出专题的视频：7 天内能撤销，加回来还是原来的期号和笔记
+  topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  video_id TEXT NOT NULL,
+  item TEXT NOT NULL,                                  -- JSON: its topic_videos row as it was
+  removed_at TEXT NOT NULL,
+  PRIMARY KEY (topic_id, video_id)
+);
 """
 
 _local = threading.local()
@@ -381,7 +497,6 @@ def connect() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=120000")
-        conn.executescript(SCHEMA)
         _migrate(conn)
         _local.conn, _local.path = conn, path
     return conn
@@ -389,7 +504,23 @@ def connect() -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Additive column migrations for databases created before the column existed."""
+    """写锁内检查、建表、加列、搬迁、删列；任何一步失败都回到原结构。"""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        statement = ""
+        for line in SCHEMA.splitlines(keepends=True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                conn.execute(statement)
+                statement = ""
+        _migrate_locked(conn)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def _migrate_locked(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(sources)")}
     if "headline" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN headline TEXT")
@@ -430,6 +561,41 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # a channel whose playbook is already confirmed has been through tuning
         conn.execute("""UPDATE channels SET stage='LOCKED'
                         WHERE id IN (SELECT channel_id FROM playbooks WHERE status='ACTIVE' AND channel_id IS NOT NULL)""")
+    tcols = {r[1] for r in conn.execute("PRAGMA table_info(topics)")}
+    if "batch" not in tcols:
+        conn.execute("ALTER TABLE topics ADD COLUMN batch TEXT")
+    for c in ("notion_target", "notion_page_id", "notion_state", "notion_error", "notion_at"):
+        if c not in tcols:  # topics made before 0.4.40 are 不存
+            conn.execute(f"ALTER TABLE topics ADD COLUMN {c} TEXT")
+    for c in ("notion_db", "notion_rows", "marks", "reminded", "watch", "watched_at", "archived_at", "archived_how", "archived_why",
+              "comments_at", "comments_err", "replies"):
+        if c not in tcols:  # 0.4.41: claims, versions, watching, archive, the source table, comments
+            conn.execute(f"ALTER TABLE topics ADD COLUMN {c} TEXT")
+    if "asked" not in {r[1] for r in conn.execute("PRAGMA table_info(topic_comments)")}:
+        conn.execute("ALTER TABLE topic_comments ADD COLUMN asked INTEGER NOT NULL DEFAULT 0")
+    # 0.4.41: a page someone changed is written around what they wrote, not held (留着 / 另写一页 are gone); a page held
+    # is as it was, its 更新 on the topic's page
+    conn.execute("UPDATE topics SET notion_state='DONE' WHERE notion_state='HELD'")
+    conn.execute("UPDATE topics SET notion_state='QUEUED' WHERE notion_state='NEW'")
+    vcols = {r[1] for r in conn.execute("PRAGMA table_info(topic_videos)")}
+    for c in ("excluded_why", "wait_since", "card"):
+        if c not in vcols:
+            conn.execute(f"ALTER TABLE topic_videos ADD COLUMN {c} TEXT")
+    vidcols = {r[1] for r in conn.execute("PRAGMA table_info(videos)")}
+    for c in ("gone", "gone_at"):
+        if c not in vidcols:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {c} TEXT")
+    if "backup" not in tcols:
+        conn.execute("ALTER TABLE topics ADD COLUMN backup INTEGER CHECK (backup IN (0,1))")
+    if "youtube_channel_id" not in vidcols:
+        conn.execute("ALTER TABLE videos ADD COLUMN youtube_channel_id TEXT")
+    bcols = {r[1] for r in conn.execute("PRAGMA table_info(video_backups)")}
+    for c, kind in {"backup_gen": "INTEGER NOT NULL DEFAULT 0", "backup_bad_md5": "TEXT", "backup_draft_folder": "TEXT",
+                    "draft_restored_at": "TEXT", "backup_src_md5": "TEXT", "backup_md5": "TEXT",
+                    "backup_draft_bytes": "INTEGER NOT NULL DEFAULT 0", "delete_intent": "TEXT"}.items():
+        if c not in bcols:
+            conn.execute(f"ALTER TABLE video_backups ADD COLUMN {c} {kind}")
+    _backup_migrate(conn)
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='trial_queue_pending'").fetchone():
         # a version of a sample is queued once (two overlapping requests put it in twice): the doubles go first
         conn.execute("""UPDATE trial_queue SET status='CANCELLED' WHERE status='PENDING' AND id NOT IN
@@ -442,9 +608,85 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('migrated:not_available', 'true')")
 
 
+def _backup_migrate(conn: sqlite3.Connection) -> None:
+    """一次性原子迁移：预填只针对当时存在的专题、频道；旧状态与 inventory 合流后删除旧列。"""
+    from .notion.mapping import access_kind
+    if not conn.execute("SELECT 1 FROM settings WHERE key='migrated:backup_rules_v1'").fetchone():
+        conn.execute("UPDATE topics SET backup=1")
+        conn.execute("""INSERT INTO backup_authors(id,name,member,public)
+                        SELECT youtube_channel_id,name,1,1 FROM channels WHERE youtube_channel_id IS NOT NULL
+                        ON CONFLICT(id) DO NOTHING""")
+        oldcols = {r[1] for r in conn.execute("PRAGMA table_info(videos)")}
+        statecols = {r[1] for r in conn.execute("PRAGMA table_info(video_backups)")}
+        legacy = sorted((oldcols & statecols) - {"id", "title", "youtube_channel_id", "gone"})
+        for table in ("videos", "sources"):
+            for r in list(conn.execute(f"SELECT * FROM {table}")):
+                v = dict(r)
+                info = json.loads(v.get("info") or "{}")
+                if table == "sources":
+                    topic_info = conn.execute("SELECT info FROM videos WHERE id=?", (v["id"],)).fetchone()
+                    if topic_info and topic_info[0]:
+                        info = json.loads(topic_info[0])
+                ch = conn.execute("SELECT youtube_channel_id FROM channels WHERE id=?", (v.get("channel_id"),)).fetchone() if table == "sources" else None
+                cid = v.get("youtube_channel_id") or info.get("channel_id") or (ch[0] if ch else None)
+                name = v.get("channel") or v.get("channel_title") or info.get("channel")
+                conn.execute("""INSERT INTO video_backups(id,youtube_channel_id,author_name,member,title,gone)
+                                VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                                youtube_channel_id=COALESCE(video_backups.youtube_channel_id,excluded.youtube_channel_id),
+                                author_name=COALESCE(video_backups.author_name,excluded.author_name),
+                                member=excluded.member,title=COALESCE(video_backups.title,excluded.title)""",
+                             (v["id"], cid, name, int(access_kind(info).startswith("member_")), v.get("title"), v.get("gone")))
+                if table == "videos":
+                    conn.execute("UPDATE videos SET youtube_channel_id=? WHERE id=?", (cid, v["id"]))
+                    if legacy:
+                        conn.execute("UPDATE video_backups SET " + ",".join(f"{c}=?" for c in legacy) + " WHERE id=?",
+                                     (*[v[c] for c in legacy], v["id"]))
+                if cid:
+                    conn.execute("INSERT INTO backup_authors(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING", (cid, name))
+        inv = conn.execute("SELECT value FROM settings WHERE key='gdrive_inventory'").fetchone()
+        if inv:
+            inventory = json.loads(inv[0]) or {}
+            for vid, v in inventory.get("videos", {}).items():
+                # 旧本地状态（包括 NULL 确认）优先；inventory 仅能补没有旧行的视频。
+                if conn.execute("SELECT 1 FROM videos WHERE id=?", (vid,)).fetchone():
+                    continue
+                conn.execute("""INSERT INTO video_backups(id,backup_at,backup_bytes,backup_folder,backup_md5) VALUES (?,?,?,?,?)
+                                ON CONFLICT(id) DO UPDATE SET backup_at=COALESCE(video_backups.backup_at,excluded.backup_at),
+                                backup_bytes=COALESCE(video_backups.backup_bytes,excluded.backup_bytes),
+                                backup_folder=COALESCE(video_backups.backup_folder,excluded.backup_folder),
+                                backup_md5=COALESCE(video_backups.backup_md5,excluded.backup_md5)""",
+                             (vid, now(), v.get("bytes", 0), inventory.get("folder"), v.get("md5")))
+            conn.execute("DELETE FROM settings WHERE key='gdrive_inventory'")
+        conn.execute("UPDATE video_backups SET backup_at=NULL WHERE backup_bad_md5 IS NOT NULL OR backup_src_md5 IS NOT NULL")
+        for c in sorted(oldcols):
+            if c.startswith("backup_") or c in ("restored_at", "draft_restored_at"):
+                conn.execute(f"ALTER TABLE videos DROP COLUMN {c}")
+        conn.execute("INSERT INTO settings(key,value) VALUES ('migrated:backup_rules_v1','true')")
+
+
+@contextmanager
+def read_tx() -> Iterator[sqlite3.Connection]:
+    """多表规则读取共享同一个快照；已有事务时沿用调用者的快照。"""
+    c = connect()
+    if c.in_transaction:
+        yield c
+        return
+    c.execute("BEGIN")
+    try:
+        yield c
+        c.execute("COMMIT")
+    except BaseException:
+        c.execute("ROLLBACK")
+        raise
+
+
 @contextmanager
 def tx() -> Iterator[sqlite3.Connection]:
+    """嵌套调用沿用外层事务；提交和回滚由最外层负责。"""
     c = connect()
+    if c.in_transaction:
+        yield c
+        return
     c.execute("BEGIN IMMEDIATE")
     try:
         yield c

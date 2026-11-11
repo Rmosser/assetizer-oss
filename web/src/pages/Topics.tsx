@@ -1,8 +1,10 @@
 /* 专题: one question and a batch of videos, each read for it, then put together into one answer (design §R8). The list:
    each topic's question, its answer's first sentence or where its reads stand, and the batch at a glance. */
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import { type Incoming, useIncoming } from "../basket";
 import { Words } from "../cjk";
 import { Deck, heldText, hours, Mix, TOPIC_WAIT, when } from "../components/topic/bits";
+import { type Archived, archivedText } from "../components/topic/Living";
 import { Picker } from "../components/topic/Picker";
 import { Empty, Fault, Stale, Unroll } from "../components/States";
 import { usePoll } from "../hooks";
@@ -10,7 +12,7 @@ import { linkProps, useRestoreScroll } from "../router";
 import "../topic.css";
 
 type Row = {
-  id: number; question: string; paused: boolean; created_at: string; updated_at: string;
+  id: number; question: string; paused: boolean; archived: Archived; offered: number; created_at: string; updated_at: string;
   videos: number; excluded: number; queued: number; running: number; waiting: number; done: number; failed: number;
   high: number; some: number; none: number; hours: number; answer: string | null; synth_state: string | null; thumbs: string[];
 };
@@ -19,6 +21,7 @@ type Row = {
  *  that have not started wait for a quota (the page head says which) */
 function standing(t: Row, held: boolean): { text: string; tone?: "bad" | "quiet" } {
   const open = t.running + t.queued + t.waiting;
+  if (t.archived) return { text: [archivedText(t.archived), t.archived.why].filter(Boolean).join(" · "), tone: "quiet" };
   if (t.paused) return { text: `已暂停 · 读完 ${t.done}/${t.videos}`, tone: "quiet" };
   if (open) {
     const where = [t.running ? `在读 ${t.running} 期` : "",
@@ -34,9 +37,10 @@ function standing(t: Row, held: boolean): { text: string; tone?: "bad" | "quiet"
 function TopicRow({ t, held }: { t: Row; held: boolean }) {
   const s = standing(t, held);
   const figs = [`${t.videos} 期`, t.hours ? hours(t.hours) : null, t.high ? `${t.high} 期值得看` : null,
-    t.failed ? <span className="tp-bad">{t.failed} 期没读成</span> : null].filter(Boolean);
+    t.failed ? <span className="tp-bad">{t.failed} 期没读成</span> : null,
+    t.offered && !t.archived ? <b className="tp-offer">{t.offered} 期新视频要加吗</b> : null].filter(Boolean);
   return (
-    <li>
+    <li className={t.archived ? "tp-row-arch" : undefined}>
       <a className="tp-row" {...linkProps(`/topics/${t.id}`)}>
         <Deck thumbs={t.thumbs} />
         <div className="tp-row-t">
@@ -56,6 +60,10 @@ function TopicRow({ t, held }: { t: Row; held: boolean }) {
 export default function Topics() {
   const { data, error, loadedAt, reload } = usePoll<any>("/api/topics", 8000);
   const [making, setMaking] = useState(false);
+  // a 选片篮 handed over by the extension opens the sheet with it (a sheet already open keeps what is in it)
+  const [incoming, take] = useIncoming();
+  const [batch, setBatch] = useState<Incoming | null>(null);
+  useEffect(() => { if (incoming && data && !making) { setBatch(incoming); take(); setMaking(true); } }, [incoming, data, making]);
   useRestoreScroll(!!data);
   if (!data) return <main className="page tp-list">{error ? <Fault error={error} retry={reload} /> : <Unroll />}</main>;
   const topics: Row[] = data.topics;
@@ -78,11 +86,20 @@ export default function Topics() {
         )}
       </header>
       {topics.length ? (
-        <ol className="tp-rows">{topics.map((t) => <TopicRow key={t.id} t={t} held={!!held} />)}</ol>
+        <ol className="tp-rows">
+          {topics.map((t, i) => (
+            <Fragment key={t.id}>
+              {t.archived && !topics[i - 1]?.archived && <li className="tp-rows-h" aria-hidden>已归档</li>}
+              <TopicRow t={t} held={!!held} />
+            </Fragment>
+          ))}
+        </ol>
       ) : (
         <Empty title="还没有专题" action={make}>一个问题，一批视频：逐期读完，再合成一个回答。</Empty>
       )}
-      {making && <Picker budget={data.budget} onClose={() => { setMaking(false); reload(); }} />}
+      {making && <Picker budget={data.budget} incoming={batch || undefined}
+        topics={batch ? topics.map((t) => ({ id: t.id, question: t.question })) : undefined}
+        onClose={() => { setMaking(false); setBatch(null); reload(); }} />}
     </main>
   );
 }

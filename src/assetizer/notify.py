@@ -153,6 +153,8 @@ def send_due_alerts() -> None:
     """The non-urgent alerts open for ALERT_WAIT and not pushed yet: pushed now, and marked so."""
     cut = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=ALERT_WAIT)).isoformat(timespec="seconds")
     for a in db.q("SELECT * FROM alerts WHERE resolved_at IS NULL AND notified_at IS NULL AND created_at<=? ORDER BY created_at", cut):
+        if a["key"] == "BACKUP_RULES_PENDING":  # 只在刊的「需要你」，不另推一次
+            continue
         alert_raised(a["severity"], a["title"], a["body"] or "")
         db.exec("UPDATE alerts SET notified_at=? WHERE key=? AND notified_at IS NULL", now(), a["key"])
 
@@ -170,10 +172,44 @@ def trials_done(n: int) -> None:
     send(f"🧪 调试台排队的试跑都跑完了（这一批 {n} 个），可以去对比投票。\n{link()}".strip())
 
 
-def topic_answered(tid: int, question: str, n: int, ok: bool = True) -> None:
-    """A topic's batch is read through and its answer put together (topics/run.py), or putting it together failed."""
-    head = f"🔎 专题读完了（{n} 期）" if ok else "🔎 专题读完了，综合没成，到页面上再试"
-    send(f"{head}：{question[:80]}\n{link(f'/topics/{tid}')}".strip())
+def topic_answered(tid: int, question: str, n: int, ok: bool = True, notion: dict | None = None,
+                   changes: list[str] | None = None, waiting: list[str] | None = None) -> None:
+    """A topic's batch is read through and its answer put together (topics/run.py), or putting it together failed;
+    `notion`: what writing it to its Notion place came to (topics/notion.write), when it has one; `changes`: an answer
+    put together again whose conclusion or certainty changed, and what changed (design §R8-11); `waiting`: videos the
+    answer went on without after waiting half a day, and why (design §R8-5)."""
+    read = f"{n} 期，{len(waiting)} 期还在等" if waiting else f"{n} 期"
+    head = ("🔎 专题更新了" if changes is not None else f"🔎 专题读完了（{read}）") if ok else "🔎 专题读完了，综合没成，到页面上再试"
+    lines = [f"{head}：{question[:80]}", *(f"· {c}" for c in (changes or [])[:5]),
+             *(f"· {w}，读完再补上" for w in (waiting or [])[:5])]
+    if notion and notion.get("url"):
+        lines.append(notion["url"])
+    elif notion and notion.get("state") == "FAILED":
+        lines.append(f"没写进 Notion：{(notion.get('error') or {}).get('message') or '原因见专题页'}")
+    elif notion and notion.get("gone"):
+        lines.append("Notion 那页已删，没有重写")
+    lines.append(link(f"/topics/{tid}"))
+    send("\n".join(x for x in lines if x).strip())
+
+
+def predictions_due(tid: int, question: str, claims: list[dict]) -> None:
+    """Predictions of a topic past their day, not settled (topics/run.remind): settle them on its page (design §R8-11)."""
+    from .topics.write import plain
+    lines = [f"⏰ 预测到期了：{question[:80]}", *(f"· {plain(c['text'])[:120]}（{c['due']}）" for c in claims[:5])]
+    if len(claims) > 5:
+        lines.append(f"等 {len(claims)} 条")
+    lines.append(link(f"/topics/{tid}"))
+    send("\n".join(lines))
+
+
+def topic_candidates(tid: int, question: str, videos: list[dict]) -> None:
+    """New videos of the channels and words a topic watches, offered on its page, not added (topics/watch, design §R8-11)."""
+    lines = [f"👀 有 {len(videos)} 期新视频可能相关：{question[:80]}",
+             *(f"· {(v.get('title') or v['id'])[:80]}（{v.get('channel') or '?'}）" for v in videos[:5])]
+    if len(videos) > 5:
+        lines.append(f"等 {len(videos)} 期")
+    lines.append(link(f"/topics/{tid}"))
+    send("\n".join(lines))
 
 
 def digest() -> str:
@@ -190,7 +226,7 @@ def digest() -> str:
     waiting = db.one("SELECT COUNT(*) n FROM runs WHERE production='WAITING'")["n"]
     lines.append(f"正在跑：{run['id']}（{run['stage'] or '准备中'}）" if run else "正在跑：无")
     lines.append(f"排队：生产 {queued} · 试跑 {trials}" + (f" · 等待中 {waiting}" if waiting else ""))
-    alerts = db.q("SELECT title FROM alerts WHERE resolved_at IS NULL ORDER BY created_at")
+    alerts = db.q("SELECT title FROM alerts WHERE resolved_at IS NULL AND key!='BACKUP_RULES_PENDING' ORDER BY created_at")
     lines.append("未解决告警：" + ("；".join(a["title"] for a in alerts) if alerts else "无"))
     try:
         st = os.statvfs(config.get().home)

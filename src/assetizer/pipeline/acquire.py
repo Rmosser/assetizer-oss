@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .. import config, db, knobs, youtube
 from ..media import ffmpeg
+from ..topics import backup, backup_rules
 from ..util import fmt_tc, now, read_json, sha256_file, write_json
 from .context import RunContext, Waiting
 
@@ -54,6 +55,8 @@ def resolve(ctx: RunContext) -> dict:
     try:
         info = youtube.metadata(src["url"] or src["id"])
     except youtube.AcquireError as e:
+        if e.kind in youtube.UNAVAILABLE:
+            backup_rules.track(src["id"], gone=e.kind)
         if e.needs_human:
             raise Waiting("YOUTUBE_AUTH", str(e))
         if e.kind == "LIVE_UPCOMING":  # yt-dlp refuses a scheduled live outright instead of reporting is_upcoming
@@ -75,11 +78,13 @@ def resolve(ctx: RunContext) -> dict:
         raise Waiting("LIVE_IN_PROGRESS", "还读不到视频时长（直播刚结束或首播还没开始），稍后再判断")
     if intake and info.get("duration") is not None and info["duration"] < 60 * cfg.get("min_minutes", 10):
         raise RuntimeError(f"SKIPPED_SHORT: {info.get('duration')}s below channel minimum")
-    db.exec("""UPDATE sources SET youtube_channel_id=?, channel_title=?, title=?, published_at=?, duration=?, info=?,
-               channel_id=COALESCE(channel_id, ?), updated_at=? WHERE id=?""",
-            info.get("channel_id"), info.get("channel"), info.get("title"), info.get("upload_date"),
-            info.get("duration"), db.j(info), channel["id"] if channel else None, now(), src["id"])
-    ctx.reload_source()
+    with db.tx():
+        db.exec("""UPDATE sources SET youtube_channel_id=?, channel_title=?, title=?, published_at=?, duration=?, info=?,
+                   channel_id=COALESCE(channel_id, ?), updated_at=? WHERE id=?""",
+                info.get("channel_id"), info.get("channel"), info.get("title"), info.get("upload_date"),
+                info.get("duration"), db.j(info), channel["id"] if channel else None, now(), src["id"])
+        ctx.reload_source()
+        backup_rules.track(src["id"])
     return {"title": info.get("title"), "channel": info.get("channel"), "duration": info.get("duration"),
             "matched_channel": channel["id"] if channel else None}
 
@@ -118,23 +123,31 @@ def acquire(ctx: RunContext) -> dict:
     src = ctx.source
     if src.get("media_state") == "CACHED" and src.get("media_path") and Path(src["media_path"]).exists():
         if sha256_file(Path(src["media_path"])) == src["media_sha256"]:
+            backup_rules.queue(src["id"])
             return {"cached": True, "bytes": src["media_bytes"]}
     est = (src.get("duration") or 3600) * 0.25e6
     need = max(15e9, 6 * est)
     if _free_bytes(s.home) < need:
         raise Waiting("DISK_LOW", f"剩余空间不足 {need / 1e9:.0f} GB")
     dest = s.media_dir / src["id"]
+    from_backup = False
     try:
         with DOWNLOADS:
             p = youtube.download(src["url"] or src["id"], dest)
     except youtube.AcquireError as e:
-        if e.needs_human:
-            raise Waiting("YOUTUBE_AUTH", str(e))
-        if e.kind in ("NETWORK", "RATE_LIMITED"):  # the connection kept dropping, or YouTube held back: resume it later
-            raise Waiting("NETWORK", str(e))
-        if e.kind in WAITS:
-            raise Waiting(WAITS[e.kind], str(e))
-        raise
+        if e.kind in youtube.UNAVAILABLE:
+            backup_rules.track(src["id"], gone=e.kind)
+        rescue = e.kind in youtube.UNAVAILABLE or e.needs_human or e.kind in ("TOOL_OUTDATED", "YOUTUBE_REFUSED")
+        p = backup.restore_source(src["id"], dest / "source.mkv", min_height=720) if rescue and backup.available() else None
+        from_backup = p is not None
+        if not p:
+            if e.needs_human:
+                raise Waiting("YOUTUBE_AUTH", str(e))
+            if e.kind in ("NETWORK", "RATE_LIMITED"):
+                raise Waiting("NETWORK", str(e))
+            if e.kind in WAITS:
+                raise Waiting(WAITS[e.kind], str(e))
+            raise
     except subprocess.TimeoutExpired as e:  # a download throttled past its time: not this video's fault — again later
         raise Waiting("NETWORK", f"下载超时：{e}")
     pr = ffmpeg.probe(p)
@@ -147,6 +160,12 @@ def acquire(ctx: RunContext) -> dict:
                duration=COALESCE(?, duration), updated_at=? WHERE id=?""",
             str(p), digest, p.stat().st_size, height, float(pr["format"]["duration"]), now(), src["id"])
     ctx.reload_source()
+    try:
+        backup_rules.queue(src["id"])
+    except Exception as e:
+        if not from_backup:
+            raise
+        backup._warn_once(src["id"], f"取回后归集备份队列失败：{backup.redact(e)}")
     return {"bytes": p.stat().st_size, "height": height, "sha256": digest}
 
 
