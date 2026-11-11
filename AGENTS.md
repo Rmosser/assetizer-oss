@@ -27,7 +27,7 @@
 cd web && npm run build      # 前端类型检查 + 构建
 ```
 
-界面、交付和发版的验证方法见 [docs/quality.md](docs/quality.md)。
+PR 和 main 上由 Woodpecker 跑全量（后端、前端构建、hook-tunnel），本机只跑改到的那块。界面、交付和发版的验证方法见 [docs/quality.md](docs/quality.md)。
 
 ## 高后果规则
 

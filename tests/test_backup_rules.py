@@ -20,6 +20,9 @@ from assetizer.pipeline import acquire as A, runner
 from assetizer.pipeline.context import RunContext, Waiting
 from assetizer.util import now, sha256_file
 
+# d97754b 时的 db.py 与 topics/backup.py；这个提交不在远端分支上，新克隆取不到，所以原样存一份
+BASELINE = Path(__file__).parent / 'fixtures' / 'backup-baseline-d97754b'
+
 AUTHOR = "UCabcdefghijklmnopqrstuv"
 
 
@@ -779,14 +782,13 @@ def test_r2_a5_deadline_alert_cleanup_matrix(cloud,monkeypatch,days,form,low):
 
 def baseline_db(home):
     # 用真实基线代码创建旧库，避免手写旧表结构遗漏历史迁移。
-    code='''import subprocess
-source=subprocess.check_output(['git','show','d97754b:src/assetizer/db.py'],text=True)
+    code='''source=Path(BASELINE_DIR,'db.py').read_text(encoding='utf-8')
 exec(compile(source,'baseline-db.py','exec'),db.__dict__)
 db.connect()
 db.exec("INSERT INTO topics(question,created_at,updated_at) VALUES ('old','2026-01-01','2026-01-01')")
 db.exec("INSERT INTO videos(id,url,created_at,backup_at,backup_folder,backup_gen) VALUES ('abcdefghijk','url','2026-01-01','checked','folder',8)")
 '''
-    subprocess.run(child_code(code),check=True,capture_output=True,text=True)
+    subprocess.run(child_code(code.replace('BASELINE_DIR',repr(str(BASELINE)))),check=True,capture_output=True,text=True)
 
 
 def test_r2_a6_real_processes_migrate_after_barrier_and_rollback(home):
@@ -892,10 +894,10 @@ def test_r2_a1_baseline_upload_corruption_then_migrate(cloud):
     # 子进程加载签名基线真实实现：成功上传、远端丢失、重新上传损坏。
     # 使用独立小库，不让当前 fixture 的已迁移数据库污染初始状态。
     oldhome=config.get().home/'legacy-evolution'
-    code='''import subprocess,hashlib,shutil,datetime as dt
+    code='''import hashlib,shutil,datetime as dt
 from assetizer.topics import media_dir
 for module,path in ((db,'db.py'),(backup,'topics/backup.py')):
- source=subprocess.check_output(['git','show','d97754b:src/assetizer/'+path],text=True)
+ source=Path(BASELINE_DIR,path).read_text(encoding='utf-8')
  exec(compile(source,'baseline-'+path,'exec'),module.__dict__)
 config.override(dataclasses.replace(config.get(),home=Path(sys.argv[3])))
 db.connect();db.set_setting('gdrive',{'folder_id':'folder'})
@@ -915,7 +917,7 @@ assert db.one('SELECT backup_at,backup_bad_md5,backup_src_md5 FROM videos')['bac
 # inventory-only 的视频没有任何旧本地行。
 inv=db.setting('gdrive_inventory');inv['videos']['lmnopqrstuv']={'bytes':19,'md5':'inventory-only'};db.set_setting('gdrive_inventory',inv)
 '''
-    subprocess.run(child_code(code,oldhome),check=True,capture_output=True,text=True)
+    subprocess.run(child_code(code.replace('BASELINE_DIR',repr(str(BASELINE))),oldhome),check=True,capture_output=True,text=True)
     config.override(dataclasses.replace(config.get(),home=oldhome))
     db.connect()
     monkey=pytest.MonkeyPatch()
@@ -1176,6 +1178,31 @@ def test_r3_a10_rollback_instructions():
     assert '先停 web、worker' in rollback and '升级前的数据库备份' in rollback
     assert '升级后新增的规则、副本记录' in rollback and '网盘上的文件不受影响' in rollback
     assert '低水位也不清' in rollback and '先重新登录' in rollback
+
+
+def test_r3_a13_a_waiting_delete_is_let_in_between_back_to_back_writes(cloud):
+    stop=threading.Event()
+    def write():
+        while not stop.is_set():
+            with rules.mutation():time.sleep(.1)  # 慢机器上每次写都要占锁一阵，写方一个接一个
+    writers=[threading.Thread(target=write) for _ in range(3)]
+    for th in writers:th.start()
+    time.sleep(.3)
+    code='''import dataclasses,sys,time
+from pathlib import Path
+from assetizer import config
+from assetizer.topics import backup_rules
+config.override(dataclasses.replace(config.load(),home=Path(sys.argv[1])))
+start=time.monotonic()
+with backup_rules.mutation(writer=False):print(round(time.monotonic()-start,3))
+'''
+    try:
+        r=subprocess.run([sys.executable,'-B','-c',code,str(config.get().home)],capture_output=True,text=True,timeout=20)
+    finally:
+        stop.set()
+        for th in writers:th.join(5)
+    assert r.returncode==0,r.stderr[-300:]
+    assert float(r.stdout)<1
 
 
 def test_r3_a13_batch_yields_to_cross_process_writers(cloud,monkeypatch):

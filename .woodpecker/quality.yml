@@ -1,0 +1,41 @@
+clone:
+  git:
+    image: 127.0.0.1:17892/woodpecker/plugin-git@sha256:34f642370d1f0b251aa5e4bf2244ed66db8bc82e246ca5d7e957ad8d7310d61d
+    pull: false
+    settings:
+      depth: 0
+      partial: false
+
+labels:
+  hostname: devbox-docker-01
+  backend: docker
+
+# 叠在别的分支上的 PR 也跑，不只限往 main 开的。
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+  - event: pull_request_metadata
+    evaluate: 'CI_PIPELINE_EVENT_REASON == "ready_for_review"'
+
+steps:
+  - name: backend
+    depends_on: []
+    image: 127.0.0.1:17892/woodpecker/python313@sha256:87104faaf9ab1fc017386cf41da7c34b7f93d6328932a31d8a7101bca44342aa
+    pull: false
+    commands:
+      - bash scripts/ci/backend.sh
+
+  - name: web
+    depends_on: []
+    image: 127.0.0.1:17892/woodpecker/node24@sha256:952fe33d9087817836a888c7e02e27b049577ad7c8583df1087cd45bfad8ac5f
+    pull: false
+    commands:
+      - bash scripts/ci/web.sh
+
+  - name: hook-tunnel
+    depends_on: []
+    image: 127.0.0.1:17892/woodpecker/python313@sha256:87104faaf9ab1fc017386cf41da7c34b7f93d6328932a31d8a7101bca44342aa
+    pull: false
+    commands:
+      - if [ -f scripts/lzc/hook-tunnel-process.test.sh ]; then sh scripts/lzc/hook-tunnel-process.test.sh; else echo "这个提交还没有 hook-tunnel 测试"; fi

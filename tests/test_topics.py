@@ -373,6 +373,24 @@ def test_two_topics_with_one_video_make_its_draft_once(stand_in, home):
     assert [k for k in stand_in if k.startswith("draft-")] == drafted
 
 
+def test_the_speech_does_not_wait_for_a_visual_to_make_the_drafts_folder(stand_in, home, monkeypatch):
+    import time
+    from assetizer import db
+    from assetizer.topics import draft, run
+    visual = draft.Draft._visual
+
+    def late(self, *args, **kwargs):  # a busy host: the speech thread gets to ffmpeg first
+        time.sleep(0.5)
+        return visual(self, *args, **kwargs)
+    monkeypatch.setattr(draft.Draft, "_visual", late)
+    db.set_setting("worker_slots", 4)
+    w = Worker()
+    run.dispatch(w)
+    w.settle()
+    item = db.one("SELECT state, error FROM topic_videos")
+    assert item["state"] == "DONE", item["error"]
+
+
 def test_a_read_paused_while_its_call_is_tried_again_goes_back_in_the_queue(stand_in, home, monkeypatch):
     from assetizer import db
     from assetizer.providers.agy import ProviderError

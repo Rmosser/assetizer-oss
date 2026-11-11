@@ -17,7 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 asr = ["faster-whisper>=1.0"]
-dev = ["pytest>=8", "numpy"]  # the ASR tests build synthetic audio with numpy
+# numpy: the ASR tests build synthetic audio; opencc: subtitles to simplified Chinese; pillow: frames and thumbnails
+dev = ["pytest>=8", "numpy", "opencc-python-reimplemented", "pillow"]
 
 [project.scripts]
 assetizer = "assetizer.cli:main"

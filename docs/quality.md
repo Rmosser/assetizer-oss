@@ -1,6 +1,18 @@
 # 质量检查
 
-只列仓库里真实可运行的检查。没有 CI；提交前在本机跑。
+只列仓库里真实可运行的检查。
+
+## CI
+
+每个 PR（不论往哪个分支开）和推到 main 的提交，都在 devbox 上的 Woodpecker（`https://ci.example.com`）跑 `.woodpecker/quality.yml`，结果以 `ci/woodpecker/pr/quality`、`ci/woodpecker/push/quality` 显示在 GitHub 上。三步并行：
+
+| 步骤 | 做什么 |
+|---|---|
+| `backend` | 装 ffmpeg，按 `docker/requirements.lock` 的版本装 `.[dev]`，跑 `.venv/bin/pytest -q`（`scripts/ci/backend.sh`） |
+| `web` | `npm ci` 后跑 `npm run build`（`scripts/ci/web.sh`） |
+| `hook-tunnel` | `sh scripts/lzc/hook-tunnel-process.test.sh`；提交里还没有这个脚本时跳过 |
+
+全量后端测试交给 CI，本机只跑改到的那块（`-k <关键词>`）。后端的 apt 和 pip 先直连清华镜像，不通再经 devbox 的下载代理连官方源（从 devbox 连官方源太慢），前端的 npm 先走 devbox 的 npm 镜像、不通再直连；每个阶段的耗时打在 `CI_CACHE_PHASE` 行里。读失败步骤的日志用 woodpecker-devbox 仓库的 `scripts/read-woodpecker-pipeline.sh Rmosser/assetizer <pipeline> <step>`。
 
 ## 环境
 

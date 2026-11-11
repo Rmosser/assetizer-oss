@@ -22,7 +22,8 @@ WRITE_WAIT = 3.0
 
 @contextlib.contextmanager
 def mutation(*, wait: float | None = None, writer: bool = True):
-    """规则写与单期最终删除共用跨进程锁；先于数据库事务，等待有上限。"""
+    """规则写与单期最终删除共用跨进程锁；先于数据库事务，等待有上限。两边互相让：删除释放后先让已等候的写方
+    （yield_writers），写方动手前先让正在等锁的删除，连续不断的写不会把删除拖到时限而跳过这一期。"""
     if getattr(_held, "depth", 0):
         _held.depth += 1
         try:
@@ -42,10 +43,13 @@ def mutation(*, wait: float | None = None, writer: bool = True):
         if shared:
             p = config.get().home / "cache/gdrive-locks/rules.lock"
             p.parent.mkdir(parents=True, exist_ok=True)
-            if writer:
-                waiter = p.with_name("writer-" + secrets.token_hex(16))
+            if writer or wait > 0:  # 不等的删除（本地清理）用不着别人让
+                waiter = p.with_name(("writer-" if writer else "deleter-") + secrets.token_hex(16))
                 waiter_fd = os.open(waiter, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
                 fcntl.flock(waiter_fd, fcntl.LOCK_EX)
+            if writer:  # 在拿进程内锁之前让：同进程的删除线程也要先拿到它
+                while any([_waiting(q) for q in p.parent.glob("deleter-*")]) and time.monotonic() < deadline:
+                    time.sleep(.01)
             fd = os.open(p, os.O_CREAT | os.O_RDWR, 0o600)
         acquired = _guard.acquire(timeout=max(0, deadline - time.monotonic()))
         if not acquired:
@@ -73,22 +77,25 @@ def mutation(*, wait: float | None = None, writer: bool = True):
             os.close(waiter_fd)
 
 
+def _waiting(p: Path) -> bool:
+    """等候标记还有进程 flock 着；没人持有的是退出者留下的，顺手删掉。"""
+    try:
+        with p.open("rb") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            p.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+    return False
+
+
 def yield_writers() -> None:
     """单期删除释放规则锁后，让已等候的跨进程写方先完成，最多一秒。"""
     pending = list((config.get().home / "cache/gdrive-locks").glob("writer-*"))
     deadline = time.monotonic() + 1
-    def alive(p):
-        try:
-            with p.open("rb") as f:
-                try:
-                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return True
-                p.unlink(missing_ok=True)
-        except FileNotFoundError:
-            pass
-        return False
-    while any([alive(p) for p in pending]) and time.monotonic() < deadline:
+    while any([_waiting(p) for p in pending]) and time.monotonic() < deadline:
         time.sleep(.01)
 
 

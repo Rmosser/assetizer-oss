@@ -370,6 +370,7 @@ class Draft:
         self.done, self.of = 0, len(plan)
         self.progress(0, self.of)
         limit = getattr(self.llm.provider("draft"), "media_size_limit", ffmpeg.VIEW_FILE_LIMIT)
+        self.d.mkdir(parents=True, exist_ok=True)  # the speech thread writes its wav here before any visual makes it
         with ThreadPoolExecutor(1) as speech:
             heard_ = speech.submit(self._speech)
             with ThreadPoolExecutor(3) as ex:
