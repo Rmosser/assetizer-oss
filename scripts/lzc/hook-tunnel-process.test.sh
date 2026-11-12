@@ -51,6 +51,7 @@ start_tunnel() {
   ASSETIZER_HOOK_TUNNEL_CLOUDFLARED="$fake" \
   HOOK_FAKE_MARKER="$marker" \
   HOOK_FAKE_EXIT_FIRST="${3:-0}" \
+  ASSETIZER_HOOK_TUNNEL_WATCH=0.2 \
     sh "$root/scripts/lzc/hook-tunnel.sh" >"$stdout" 2>"$fixture/$1.stderr" &
   tunnel_pid=$!
 }
@@ -120,5 +121,28 @@ grep -q '^hook-tunnel: cloudflared exited code=3, retrying in 30s\.\.\.$' "$stdo
 stop_tunnel
 [ "$status" -eq 0 ] || fail "TERM stop after restart returned $status"
 grep -q '^unregistered$' "$marker" || fail "restarted cloudflared was not stopped gracefully"
+
+# A replaced token stops cloudflared gracefully and starts it again at once,
+# without the 30-second back-off; a removed token stops it and idles.
+printf '%s' 'synthetic-token' >"$token"
+start_tunnel change "$token"
+wait_for_starts 1 5
+printf '%s' 'synthetic-token-2' >"$token.new" && mv "$token.new" "$token"
+wait_for_starts 2 5
+grep -q '^hook-tunnel: token changed, cloudflared stopped code=0$' "$stdout" \
+  || fail "missing the token-change log"
+[ "$(sed -n '2p;3p' "$marker" | tr '\n' ' ')" = 'term unregistered ' ] \
+  || fail "cloudflared was not stopped gracefully on a token change"
+rm "$token"
+deadline=$(( $(date +%s) + 5 ))
+until [ "$(grep -c '^unregistered$' "$marker")" -ge 2 ]; do
+  [ "$(date +%s)" -lt "$deadline" ] || fail "cloudflared kept running after the token was removed"
+  sleep 0.05
+done
+sleep 0.5
+[ "$(grep -c '^start ' "$marker")" -eq 2 ] || fail "cloudflared started again without a token"
+stop_tunnel
+[ "$status" -eq 0 ] || fail "idle stop after removal returned $status"
+[ "$elapsed" -le 2 ] || fail "idle stop after removal took ${elapsed}s"
 
 echo 'hook-tunnel process test OK'

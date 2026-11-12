@@ -164,6 +164,14 @@ export function gdriveLine(g?: GDriveView | null): Line | undefined {
   return pending ? { lamp: "warn", value: pending } : line;
 }
 
+/** Notion: the token Notion does not know first, then where unrouted videos go, with the integration's name */
+function notionLine(n: any): Line {
+  if (!n.token) return { lamp: "idle", value: "未配置" };
+  if (n.me?.ok === false && n.me.code === "token") return { lamp: "bad", value: "token 不对" };
+  const who = n.me?.name ? ` · ${n.me.name}` : "";
+  return { lamp: n.database || n.parent ? "ok" : "idle", value: (n.database ? "已连接" : "待指定位置") + who };
+}
+
 /** How each part of the box is doing: a lamp and a few words, the same on both pages. */
 export function boxLines(data: any): Record<"agy" | "magpie" | "youtube" | "notion" | "disk" | "slots" | "backfill" | "asr" | "notify", Line> {
   const n = data.notion, d = data.disk, kn = data.knobs;
@@ -171,7 +179,7 @@ export function boxLines(data: any): Record<"agy" | "magpie" | "youtube" | "noti
     agy: agyLine(data),
     magpie: magpieLine(data.magpie || {}),
     youtube: youtubeLine(data),
-    notion: { lamp: n.token && (n.database || n.parent) ? "ok" : "idle", value: n.token ? (n.database ? "已连接" : "待指定位置") : "未配置" },
+    notion: notionLine(n),
     disk: { lamp: d.free / d.total < 0.15 ? "bad" : "ok", value: `${bytes(d.free)} 可用` },
     slots: { lamp: "ok", value: `印 ${kn.worker_slots} · 补录 ${data.backfill.slots} · 下载 ${kn.download_slots}` },
     backfill: backfillLine(data.backfill),
@@ -187,6 +195,7 @@ export const ALERT_FIX: Record<string, { href: string; label: string }> = {
   cookiecloud: { href: "/settings#cc", label: "配置与测试" },
   PROVIDER_MODEL: { href: "/settings#models", label: "换模型" },
   DISK_LOW: { href: "/settings#disk", label: "看磁盘" },
+  "notion-auth": { href: "/settings#notion", label: "换 token" },
 };
 
 /** Where an alert is fixed: what the box raised it with (`action` {label, href}, a page of this app), else ALERT_FIX */

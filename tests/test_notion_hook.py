@@ -757,3 +757,86 @@ def test_setup_docs_and_runtime_comments_match_the_contract():
     docker = (root / "docker/runtime.Dockerfile").read_text()
     assert docker.index("# Optional Notion webhook connector") < docker.index("RUN curl -fsSL --retry 3 -o /tmp/cloudflared")
     assert docker.index("/usr/local/bin/cloudflared") < docker.index("# yt-dlp solves") < docker.index("RUN curl -fsSL -o /tmp/deno.zip")
+
+
+TUNNEL = "eyJhIjoiYWNjb3VudC1zeW50aGV0aWMiLCJ0IjoidHVubmVsLXN5bnRoZXRpYyIsInMiOiJzZWNyZXQtc3ludGhldGljIn0="
+
+
+def test_tunnel_token_is_placed_from_settings_write_only(c, monkeypatch):
+    import base64
+    assert json.loads(base64.b64decode(TUNNEL)) == {"a": "account-synthetic", "t": "tunnel-synthetic", "s": "secret-synthetic"}
+    monkeypatch.setattr(hook.httpx, "get", lambda *a, **kw: SimpleNamespace(status_code=503))
+    path = "/api/notion/hook/tunnel"
+    for body in [{}, {"token": "not-a-tunnel-token"}, {"token": base64.b64encode(b'{"a":"x"}').decode()}, {"token": 1}, {"other": "x"}]:
+        r = c.post(path, json=body)
+        assert r.status_code == 400 and "not-a-tunnel" not in r.text
+    assert not hook.TUNNEL_TOKEN_FILE.exists()
+    r = c.post(path, json={"token": f"  {TUNNEL[:20]}\n{TUNNEL[20:]} "})  # pasted across lines: whitespace dropped
+    assert r.status_code == 200 and r.json()["tunnel"] == "down" and TUNNEL not in r.text
+    assert hook.TUNNEL_TOKEN_FILE.read_text() == TUNNEL
+    assert hook.TUNNEL_TOKEN_FILE.stat().st_mode & 0o777 == 0o600
+    assert hook.TUNNEL_TOKEN_FILE.parent.stat().st_mode & 0o777 == 0o700
+    assert [p.name for p in hook.TUNNEL_TOKEN_FILE.parent.iterdir()] == ["tunnel-token"]
+    assert c.post(path, json={"clear": ["token"]}).json()["tunnel"] == "off"
+    assert not hook.TUNNEL_TOKEN_FILE.exists()
+    assert c.post(path, json={"clear": ["token"]}).status_code == 200  # already gone
+    assert TUNNEL not in "\n".join(e["message"] for e in db.q("SELECT message FROM events"))
+    assert c.post(path, json={"token": TUNNEL}, headers={"Host": "notion-hook"}).status_code == 404
+
+
+ME = {"object": "user", "id": "bot-课代表", "name": "课代表", "type": "bot", "bot": {"workspace_name": "Demo"}}
+NOTION = "ntn_" + "S" * 46
+
+
+def test_notion_token_is_checked_with_notion_then_kept(c, home, monkeypatch):
+    from assetizer import config
+    from assetizer.notion import client as NC
+    asked = []
+    answer = {"v": ME}
+
+    def me(self, **kw):
+        asked.append((self.c.headers["Authorization"], kw, self.c.timeout.read))
+        if isinstance(answer["v"], Exception):
+            raise answer["v"]
+        return answer["v"]
+    monkeypatch.setattr(NC.Notion, "me", me)
+    path = "/api/notion/token"
+    secret = home / "secrets/notion-token"
+    assert c.post(path, json={}).status_code == 400
+    r = c.post(path, json={"token": "nonsense-value"})
+    assert r.status_code == 400 and "nonsense" not in r.text and not asked
+    answer["v"] = NC.NotionError(401, '{"message":"API token is invalid."}')
+    r = c.post(path, json={"token": NOTION})
+    assert r.status_code == 400 and r.json()["detail"].startswith("token 不对") and not secret.exists()
+    answer["v"] = httpx.ConnectError("synthetic")
+    r = c.post(path, json={"token": NOTION})
+    assert r.status_code == 502 and "没有保存" in r.json()["detail"] and not secret.exists()
+    db.raise_alert("notion-auth", "critical", "Notion token 已失效，交付暂停")
+    answer["v"] = ME
+    r = c.post(path, json={"token": NOTION})
+    assert r.status_code == 200 and NOTION not in r.text
+    assert db.one("SELECT resolved_at FROM alerts WHERE key='notion-auth'")["resolved_at"]
+    v = r.json()
+    assert v["token"] is True and v["me"]["ok"] is True and v["me"]["name"] == "课代表" and v["me"]["workspace"] == "Demo"
+    assert asked[-1] == (f"Bearer {NOTION}", {"tries": 1}, 5)
+    assert config.get().secret("notion-token") == NOTION and secret.stat().st_mode & 0o777 == 0o600
+    assert c.get("/api/settings").json()["notion"]["me"]["name"] == "课代表"
+
+    # 测试: a failure keeps the name last seen
+    answer["v"] = NC.NotionError(401, "{}")
+    t = c.post("/api/notion/test", json={}).json()["me"]
+    assert t["ok"] is False and t["code"] == "token" and t["name"] == "课代表"
+    assert c.post("/api/notion/test", json={}).status_code == 429
+    web._throttle_at.pop("notion", None)
+    answer["v"] = ME
+    t = c.post("/api/notion/test", json={}).json()["me"]
+    assert t["ok"] is True and "code" not in t
+
+    assert c.post(path, json={"clear": ["token"]}).json() | {"asks": None} == {
+        "token": False, "me": None, "database": None, "parent": None, "title": "课代表", "asks": None}
+    assert not secret.exists()
+    assert c.post("/api/notion/test", json={}).status_code == 400
+    assert NOTION not in "\n".join(e["message"] for e in db.q("SELECT message FROM events"))
+
+    monkeypatch.setenv(config.secret_env("notion-token"), NOTION)
+    assert c.post(path, json={"token": NOTION}).status_code == 409

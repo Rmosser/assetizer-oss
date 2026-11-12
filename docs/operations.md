@@ -108,7 +108,7 @@ agy 和 yt-dlp 更新得勤，改适配代码时要参考它们最近的表现�
   没验证的：真实懒猫 web、worker 两容器之间共享卷上的 `flock` 是否互斥，仍需上机确认。
   rclone 固定版本在 `docker/runtime.Dockerfile`：升级同时修改 `PINNED_RCLONE_VERSION` 和对应 linux-amd64 zip 的 `PINNED_RCLONE_SHA256`，从官方 SHA256SUMS 核对（构建参数不能用 `RCLONE_` 开头：rclone 会把这类环境变量当参数读）；web 与 worker 的 `ASSETIZER_RCLONE` 都指向 `/usr/local/bin/rclone`（开发时可指定其他二进制）。换 token 的 httpx 与 rclone 沿用容器代理，不用 rclone 自带 OAuth 客户端或 `rclone authorize`。未安装 rclone、未填客户端、未登录或未建文件夹时备份层不工作。
 
-- **Notion token**：`/lzcapp/var/assetizer/data/secrets/notion-token`。在自己的终端里执行下面这条，粘贴 token，回车后按 Ctrl-D；不用重启：
+- **Notion token**：`/lzcapp/var/assetizer/data/secrets/notion-token`。在设置 → Notion「Token」点「放」或「换」，粘贴后保存：盒子先问一次 Notion 这是哪个 integration（`/users/me`，单次、5 秒），Notion 不认就提示「token 不对」、不保存；存下后「Integration」一行写它的名字，「测试」再问一次。每台盒子用自己的 integration（生产是「课代表」），换 integration 后课代表靠回复开头的「〔课代表〕」认出自己以前的回复。也可以在自己的终端里执行下面这条，粘贴 token，回车后按 Ctrl-D；都不用重启：
 
   ```bash
   lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; cat > /lzcapp/var/assetizer/data/secrets/notion-token'
@@ -175,7 +175,7 @@ whisper 转写可以交给局域网里的 Windows 显卡机（RTX 4070 Ti，`192
 | 盒子 | 推送域名 | 订阅地址 |
 |---|---|---|
 | devbox | `notion-hook-dev.example.com` | `https://notion-hook-dev.example.com/api/notion/webhook` |
-| prodbox | 待定，独立隧道和域名 | 域名确定后再配置；不复用开发机的订阅 |
+| prodbox | `notion-hook.example.com` | `https://notion-hook.example.com/api/notion/webhook` |
 
 每台盒子的 integration、验证令牌和隧道 token 相互独立。先在设置 → Notion填写对应的完整推送地址（设置项 `notion_hook_url`，默认空），也可以在选好的盒子里运行：
 
@@ -202,7 +202,7 @@ ingress:
 
 入口不加 Access 登录或 challenge。Host 改为 `notion-hook` 后，应用 guard 只放行这一个精确路径的 POST，其余全部 404。隧道的路由、DNS 和令牌不在包里配置。
 
-**隧道 token 由本人放置**，和 Notion token 的放法相同：在自己的终端里执行下面这条，粘贴 token，回车后按 Ctrl-D。文件在持久卷里，不用重装；监督脚本最多等 30 秒就会看见它。
+**隧道 token 由本人放置**，和 Notion token 的放法相同：在设置 → Notion「隧道 token」点「放」或「换」，粘贴后保存（只认得出远程管理隧道 token 的格式，不向 Cloudflare 核对）；也可以在自己的终端里执行下面这条，粘贴 token，回车后按 Ctrl-D。文件在持久卷里，不用重装；监督脚本 5 秒内就会看见新放的 token。cloudflared 运行中 token 被换掉或删掉时，同样 5 秒内发现（只比较校验和，不把 token 放进变量），让 cloudflared 正常退出，换了就立即用新 token 重启，删了就停着等。
 
 ```bash
 lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; mkdir -p /lzcapp/var/assetizer/hook-tunnel; cat > /lzcapp/var/assetizer/hook-tunnel/tunnel-token'

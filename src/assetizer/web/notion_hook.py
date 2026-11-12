@@ -39,3 +39,21 @@ def hook_token():
 @router.post("/api/notion/hook/rearm")
 def hook_rearm():
     return JSONResponse(hook.rearm(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/notion/hook/tunnel")
+async def hook_tunnel(request: Request):
+    """Place or clear the tunnel token: {token?, clear?: ["token"]}. Write-only; the answer is the hook's status."""
+    from .. import db
+    from .app import _secret_body
+    body = await _secret_body(request, {"token"})
+    if isinstance(body, JSONResponse):
+        return body
+    token = "".join((body.get("token") or "").split())
+    if not token and "token" not in (body.get("clear") or []):
+        return JSONResponse({"detail": "没有要修改的内容"}, status_code=400)
+    if token and not hook.tunnel_token_ok(token):
+        return JSONResponse({"detail": "这不像 Cloudflare 隧道 token", "field": "token"}, status_code=400)
+    await run_in_threadpool(hook.put_tunnel_token, token or None)
+    db.event("config", "批注推送的隧道 token：" + ("已更新" if token else "已清除"))
+    return JSONResponse(await run_in_threadpool(hook.status), headers={"Cache-Control": "no-store"})

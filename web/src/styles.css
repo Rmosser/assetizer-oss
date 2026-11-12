@@ -1779,7 +1779,7 @@ a.chip:hover { text-decoration: underline; }
   .gd-grp label { min-height: 48px; }
   .gd-grp input { width: 20px; height: 20px; }
 }
-.st-v .cmd { margin-top: 0; }
+.st-v .cmd { margin-top: 0; min-width: 0; }   /* a long address scrolls inside its box, beside 改地址 */
 
 /* 自动重试: what it has come to beside the name, the way back to the default against the stepper */
 .st-retry { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s3); }

@@ -44,8 +44,8 @@ DB_PROPS = {
 }
 
 
-TOKEN_FIX = ("在本机终端执行 `lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; "
-             "cat > /lzcapp/var/assetizer/data/secrets/notion-token'`，粘贴新 token 后按 Ctrl-D；"
+TOKEN_FIX = ("在设置 → Notion 换 token（或在本机终端执行 `lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c "
+             "'umask 077; cat > /lzcapp/var/assetizer/data/secrets/notion-token'`，粘贴新 token 后按 Ctrl-D）；"
              "并把 Integration 加到目标数据库（数据库右上角 ··· → Connections）。")
 
 

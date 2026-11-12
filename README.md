@@ -29,8 +29,8 @@
 | 模型（agy）登录失效 | 首页与机房的红色告警，队列自动暂停 | 点告警上的「登录 agy」：打开 Google 授权页登录，把授权页最后给出的授权码（或整段地址）贴回来。登录后队列自动继续。网页登录不成时，仍可进 worker 容器运行 agy（命令见 [docs/operations.md](docs/operations.md)） |
 | agy 读不了视频 | 首页与机房的红色告警，队列自动暂停 | agy 升级后读不了视频时出现。系统每小时自检一次，通过后自动继续；一直不过就要改适配代码，把告警交给维护者 |
 | ChatGPT 或兔子的密钥失效 | 首页与机房的红色告警「模型密钥失效」，队列自动暂停 | 把有效的密钥放进服务器的 `secrets/`，放法见 [docs/operations.md](docs/operations.md)。恢复后队列自动继续 |
-| 开批注推送 | 设置 → Notion 的推送状态、验证令牌 | 由本人放好隧道 token，在 integration 开「读取评论」并订阅评论创建、修改、删除；设置 → Notion 点「复制验证令牌」，粘到 Notion 的 Verify。地址和步骤见 [docs/operations.md](docs/operations.md#notion-批注推送) |
-| Notion token 失效 | 首页与机房的红色告警，交付暂停 | 换 token，放置命令见 [docs/operations.md](docs/operations.md) |
+| 开批注推送 | 设置 → Notion 的推送状态、验证令牌 | 由本人在设置 → Notion 放好隧道 token，在 integration 开「读取评论」并订阅评论创建、修改、删除；设置 → Notion 点「复制验证令牌」，粘到 Notion 的 Verify。地址和步骤见 [docs/operations.md](docs/operations.md#notion-批注推送) |
+| Notion token 失效 | 首页与机房的红色告警，交付暂停 | 在设置 → Notion 换 token，见 [docs/operations.md](docs/operations.md) |
 | YouTube 需要登录 | 首页红色告警，该期进入等待 | 用 CookieCloud（服务器直接用你 Chrome 里的登录态）：「设置」→「YouTube」→「配置 CookieCloud」（配好后叫「配置与测试」），按面板里的 4 步做：配对 Chrome 插件 → 填 Access 服务令牌 → 填 App Token → 测试。每一步都写了值从哪里来。最后用「视频测试」填一个会员视频：读得到就说明 YouTube 认这份登录态，等待登录的视频会立刻重试。密钥只写不读，手机上也能填。卡片显示「读不到 CookieCloud」时，看下面的错误码与说明：入口或隧道的问题（HTTP 530 / 502）在 CookieCloud 那头；Token 失效、Access 被拒、读不到 YouTube cookie 这几类，回到面板对应的步骤处理；`ip_not_allowed` 是出口 IP 换了，令牌不用动，按面板顶部的提示更新白名单。系统每 30 分钟自动重试 |
 | YouTube 拒绝下载 | 首页红色告警，要下载的期进入等待，试跑和补录先不派 | YouTube 回 HTTP 403 又不说原因时出现：先让 CookieCloud 插件同步一次，在「设置」→「YouTube」做视频测试；测试能读到、下载仍被拒，就是 yt-dlp 跟不上，按下一行更新。每 30 分钟自动重试 |
 | 下载工具需要更新 | 首页红色告警，要下载的期进入等待，试跑和补录先不派 | YouTube 改版后 yt-dlp 读不出视频时出现：更新 `docker/requirements.lock` 里的 yt-dlp，重新打包安装（升级前看 [docs/operations.md](docs/operations.md)）。等待的期每 30 分钟自动重试，读得出就继续，告警随之解除 |
@@ -55,7 +55,7 @@
 
 两个频道目前都写入正式库。换库不需要命令行：在卡片「叁」里点「换库」选目标数据库，映射按属性名迁移，新库里没有的属性会在换库后列出来，固定关联（比如上级项目）要重选一次。Integration 需要先被加到目标数据库（或它的上级页面）的 Connections 里，否则列表里看不到它。验收交付用「🧪 知识领袖长期追踪库（测试副本）」，注意事项见 [docs/operations.md](docs/operations.md)。没有指定目标的来源写入 `notion_parent_page_id` 下的「课代表」数据库（已经建好的库保留原名）。
 
-Notion token 放在服务器的 `secrets/notion-token`，放置命令见 [docs/operations.md](docs/operations.md)。命令行的 `notion-target <频道 id> <数据库> [--parent <页面>]`（频道 id 如 `trader-tom`、`wang-haibin`）仍可用于脚本化配置。
+Notion token 在「设置」→「Notion」放：保存前先问 Notion 这是哪个 integration，不认就不存；它放在服务器的 `secrets/notion-token`，终端放置命令见 [docs/operations.md](docs/operations.md)。命令行的 `notion-target <频道 id> <数据库> [--parent <页面>]`（频道 id 如 `trader-tom`、`wang-haibin`）仍可用于脚本化配置。
 
 ## 通知
 

@@ -497,9 +497,7 @@ def _box() -> dict:
         "quota": {"agy": {**q, "in_use": [g["name"] for g in groups_in_use(q)]} if q else None, "agy_log": quota_logs()},
         "magpie": magpie_state.view(), "gdrive": backup.view(),
         "providers": _providers(),
-        "notion": {"token": bool(s.secret("notion-token")), "database": db.setting("notion_database_id"),
-                   "parent": db.setting("notion_parent_page_id"), "title": db.setting("notion_database_title", "课代表"),
-                   "asks": _asks()},
+        "notion": _notion_box(),
         "knobs": knobs.view(), "backfill": ingest.backfill_view(), "asr": _asr_view(), "telegram": _telegram_view(),
         "youtube": {"profile": str(s.browser_profile) if s.browser_profile else None,
                     "profile_ok": bool(s.browser_profile and s.browser_profile.exists()), **_cookie_status()},
@@ -2335,6 +2333,88 @@ def telegram_setup():
     db.event("config", f"Telegram 通知接到「{r['chat']}」" + ("" if r["test_sent"] else "，但测试消息没发出去"),
              level="info" if r["test_sent"] else "warn")
     return _telegram_view()
+
+
+def _notion_box() -> dict:
+    """The integration the token is (its name as Notion last said it, never the token), and where unrouted videos go."""
+    return {"token": bool(config.get().secret("notion-token")), "me": db.setting("notion_me"),
+            "database": db.setting("notion_database_id"), "parent": db.setting("notion_parent_page_id"),
+            "title": db.setting("notion_database_title", "课代表"), "asks": _asks()}
+
+
+def _notion_me(token: str) -> dict:
+    """Who this token is: one /users/me, 5 s. Raises NotionError or httpx.HTTPError."""
+    from ..notion.client import Notion
+    n = Notion(token, timeout=5)
+    try:
+        me = n.me(tries=1)
+    finally:
+        n.c.close()
+    return {"ok": True, "name": me.get("name"), "workspace": (me.get("bot") or {}).get("workspace_name"), "at": now()}
+
+
+def _notion_fail(e: Exception) -> str:
+    """token: Notion does not know the token; net: Notion did not answer; http_<n>: it answered something else."""
+    from ..notion.client import NotionError
+    if isinstance(e, NotionError):
+        return "token" if e.status == 401 else f"http_{e.status}"
+    return "net"
+
+
+@app.post("/api/notion/token")
+async def notion_token(request: Request):
+    """Place or clear the integration token: {token?, clear?: ["token"]}. Write-only. A new token is asked who it is
+    first and kept only if Notion knows it; the integration's name is kept for the page."""
+    import httpx
+    from ..notion.client import NotionError
+    body = await _secret_body(request, {"token"})
+    if isinstance(body, JSONResponse):
+        return body
+    token = (body.get("token") or "").strip()
+    if not token and "token" not in (body.get("clear") or []):
+        return JSONResponse({"detail": "没有要修改的内容"}, status_code=400)
+    if os.environ.get(env := config.secret_env("notion-token")):
+        return JSONResponse({"detail": f"由服务器环境变量 {env} 提供，这里改不了"}, status_code=409)
+    me = None
+    if token:
+        if not re.fullmatch(r"(?:ntn|secret)_[A-Za-z0-9]{20,}", token):
+            return JSONResponse({"detail": "Notion token 以 ntn_ 开头，在 integration 的 Configuration 里复制", "field": "token"},
+                                status_code=400)
+        try:
+            me = await run_in_threadpool(_notion_me, token)
+        except (NotionError, httpx.HTTPError) as e:
+            code = _notion_fail(e)
+            if code == "token":
+                return JSONResponse({"detail": "token 不对：Notion 不认", "field": "token"}, status_code=400)
+            return JSONResponse({"detail": f"没连上 Notion（{code}），token 没有保存"}, status_code=502)
+    if busy := _put_secret("notion-token", token or None):
+        return busy
+    db.set_setting("notion_me", me)
+    if me:
+        db.resolve_alert("notion-auth")  # Notion knows this one; a delivery that still fails says why on its own
+    db.event("config", f"Notion token：换成「{me['name']}」" if me else "Notion token：已清除")
+    return _notion_box()
+
+
+@app.post("/api/notion/test")
+def notion_test():
+    """Ask Notion who the token is, once; a failure keeps the name last seen."""
+    import httpx
+    from ..notion.client import NotionError
+    token = config.get().secret("notion-token")
+    if not token:
+        return JSONResponse({"detail": "还没有放 Notion token"}, status_code=400)
+    if busy := _throttled("notion", 5.0):
+        return busy
+    try:
+        out = _notion_me(token)
+    except (NotionError, httpx.HTTPError) as e:
+        out = {**(db.setting("notion_me") or {}), "ok": False, "code": _notion_fail(e), "at": now()}
+    db.set_setting("notion_me", out)
+    who = f"（{out['name']}）" if out.get("name") else ""
+    db.event("config", f"测试 Notion{who}：" + ("通过" if out["ok"] else f"没通过（{out['code']}）"),
+             level="info" if out["ok"] else "warn")
+    return _notion_box()
 
 
 class NotionDefault(BaseModel):

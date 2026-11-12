@@ -119,10 +119,42 @@ export function DiskRows({ kn, save }: { kn: any; save: Save }) {
   );
 }
 
-export function Secret({ set, value, onChange, hint, busy, label }: { set: boolean; value: string; onChange: (v: string) => void; hint?: string; busy: boolean; label: string }) {
+export function Secret({ set, value, onChange, hint, busy, label, autoFocus, onEscape }: {
+  set: boolean; value: string; onChange: (v: string) => void; hint?: string; busy: boolean; label: string; autoFocus?: boolean; onEscape?: () => void;
+}) {
   return (
     <input className="st-input" type="password" autoComplete="off" spellCheck={false} autoCapitalize="off" autoCorrect="off" data-1p-ignore
-      aria-label={label} value={value} disabled={busy} placeholder={set ? "已设置，留空不改" : hint} onChange={(e) => onChange(e.target.value)} />
+      aria-label={label} value={value} disabled={busy} placeholder={set ? "已设置，留空不改" : hint} onChange={(e) => onChange(e.target.value)}
+      autoFocus={autoFocus} onKeyDown={onEscape && ((e) => { if (e.key === "Escape") onEscape(); })} />
+  );
+}
+
+/** A credential placed here and never shown again: 已放 with 换 and 清除, or 没有放 with 放; 换 and 放 open the field */
+function SecretRow({ name, set, path, hint, reload, say }: {
+  name: string; set: boolean; path: string; hint?: string; reload: () => void; say: (s: Said) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [v, setV] = useState("");
+  const close = () => { setV(""); setOpen(false); };
+  const { busy, act } = useAct(reload, say, close);
+  const typed = v.trim();
+  if (!open) {
+    return (
+      <Row name={name}>
+        <span>{set ? "已放" : "没有放"}</span>
+        <button type="button" className={`btn sm${set ? "" : " solid"}`} onClick={() => setOpen(true)}>{set ? "换" : "放"}</button>
+        {set && <Clear disabled={busy} onClear={() => act(path, { clear: ["token"] }, "已清除")} />}
+      </Row>
+    );
+  }
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); if (typed && !busy) act(path, { token: typed }, "已保存"); }}>
+      <Row name={name}><Secret set={false} value={v} onChange={setV} hint={hint} busy={busy} label={name} autoFocus onEscape={close} /></Row>
+      <div className="st-acts">
+        <button type="button" className="btn ghost sm" disabled={busy} onClick={close}>取消</button>
+        <button type="submit" className={`btn sm${typed ? " solid" : ""}`} disabled={busy || !typed}>保存</button>
+      </div>
+    </form>
   );
 }
 
@@ -205,20 +237,35 @@ export function TelegramForm({ tg, save, reload, say }: { tg: any; save: Save; r
   );
 }
 
-/** Where a video with no channel target goes: the 课代表 database under a page the user names */
+const NOTION_FAIL: Record<string, string> = { token: "token 不对", net: "连不上 Notion" };
+
+/** 连接: which integration the token is (asked of Notion when it is placed, and on 测试), the token, and where a video
+ *  with no channel target goes (the 课代表 database under a page the user names); 批注: how much 课代表 is asked */
 export function NotionRows({ n, reload, say }: { n: any; reload: () => void; say: (s: Said) => void }) {
   const [open, setOpen] = useState(false);
   const [page, setPage] = useState("");
   const { busy, act } = useAct(reload, say, () => { setPage(""); setOpen(false); });
-  if (!n.token) return <Row name="Notion token">没有放</Row>;
   const where = n.database ? n.title : n.parent ? "第一次交付时新建" : "未指定";
+  const me = n.me;
   return (
     <>
-      <Row name="默认库">
-        <span>{where}</span>
-        {!open && <button type="button" className="btn sm" onClick={() => setOpen(true)}>{n.parent || n.database ? "换位置" : "指定位置"}</button>}
-      </Row>
-      {open && (
+      <h3 className="st-group">连接</h3>
+      {n.token && (
+        <Row name="Integration">
+          {me?.ok === false
+            ? <span className="zhu">{NOTION_FAIL[me.code] ?? `Notion 回 ${String(me.code).replace("http_", "")}`} · {ago(me.at)}</span>
+            : <span>{me?.name ?? "—"}</span>}
+          <button type="button" className="btn sm" disabled={busy} onClick={() => act("/api/notion/test")}>测试</button>
+        </Row>
+      )}
+      <SecretRow name="Token" set={n.token} path="/api/notion/token" hint="ntn_ 开头" reload={reload} say={say} />
+      {n.token && !open && (
+        <Row name="默认库">
+          <span>{where}</span>
+          <button type="button" className="btn sm" onClick={() => setOpen(true)}>{n.parent || n.database ? "换位置" : "指定位置"}</button>
+        </Row>
+      )}
+      {n.token && open && (
         <form onSubmit={(e) => { e.preventDefault(); if (page.trim() && !busy) act("/api/notion/default", { parent: page.trim() }, "已保存"); }}>
           <Row name="上级页面">
             <input className="st-input mono" value={page} onChange={(e) => setPage(e.target.value)} inputMode="url" autoComplete="off" spellCheck={false}
@@ -230,7 +277,12 @@ export function NotionRows({ n, reload, say }: { n: any; reload: () => void; say
           </div>
         </form>
       )}
-      {n.asks && <Row name="批注">近 30 天点名课代表 {n.asks.n} 次{n.asks.todo ? `，待修 ${n.asks.todo} 条` : ""}</Row>}
+      {n.asks && (
+        <>
+          <h3 className="st-group">批注</h3>
+          <Row name="点名"><span className="num">近 30 天 {n.asks.n} 次 · 待修 {n.asks.todo} 条</span></Row>
+        </>
+      )}
     </>
   );
 }
@@ -250,9 +302,10 @@ function hookLine(h: Hook): { lamp: string; text: string } {
   return { lamp: "ok", text: h.events.last_at ? `已通 · ${ago(h.events.last_at)}` : "已通" };
 }
 
-/** Notion 批注推送: Notion posts new comments to the box through the tunnel. Its address goes into the integration's
- *  Webhooks; the verification token Notion then sends goes back into its Verify, copied from here and never shown.
- *  Read every 10 s while something is on its way (a token, the first signed event, a 重新接收 window open), else once. */
+/** Notion 批注推送: Notion posts new comments to the box through the tunnel, whose token is placed here. Its address goes
+ *  into the integration's Webhooks; the verification token Notion then sends goes back into its Verify, copied from here
+ *  and never shown. Read every 10 s while something is on its way (the tunnel coming up after its token was placed, a
+ *  token, the first signed event, a 重新接收 window open), else once. */
 export function NotionHook({ save, say }: { save: Save; say: (s: Said) => void }) {
   const [every, setEvery] = useState(0);
   const { data: h, error, reload, setData } = usePoll<Hook>(HOOK, every);
@@ -260,7 +313,7 @@ export function NotionHook({ save, say }: { save: Save; say: (s: Said) => void }
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const open = h?.rearm_until != null;  // the box says null once the window is over
-  const waiting = !!h && (open || (h.tunnel !== "off" && (h.token === "none" || !h.events.signed_at)));
+  const waiting = !!h && (open || (h.tunnel !== "off" && (h.tunnel === "down" || h.token === "none" || !h.events.signed_at)));
   useEffect(() => setEvery(waiting ? 10000 : 0), [waiting]);
   useEffect(() => {
     addEventListener("az:refresh", reload);
@@ -324,29 +377,31 @@ export function NotionHook({ save, say }: { save: Save; say: (s: Said) => void }
   const rejected = h.events.rejected > 0 && !!ra && Date.now() - Date.parse(ra) < 24 * 3600e3;  // a day on, an old story
   const note = [rejected && `拒收 ${h.events.rejected} 次 · ${ago(ra)}`, error && "刷新失败"].filter(Boolean).join(" · ");
   return (
-    <form onSubmit={(e) => { e.preventDefault(); void saveUrl(); }}>
+    <>
       <h3 className="st-group">批注推送</h3>
       <Row name="状态" note={note || undefined}>
         <span className={`st-state ${line.lamp}`}><i className={`lamp ${line.lamp}`} aria-hidden />{line.text}</span>
       </Row>
-      <Row name="地址">
-        {editing
-          ? <input className="st-input mono" value={url ?? ""} onChange={(e) => setUrl(e.target.value)} inputMode="url" autoComplete="off" spellCheck={false}
-              placeholder="https://…/api/notion/webhook" aria-label="地址" disabled={busy} autoFocus={!!h.url}
-              onKeyDown={(e) => { if (e.key === "Escape" && h.url) setUrl(null); }} />
-          : <Cmd text={h.url!} />}
-      </Row>
-      {(h.url || dirty || open || h.token === "set") && <div className="st-acts">
-        {editing && h.url && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => setUrl(null)}>取消</button>}
-        {editing && (dirty || h.url) && <button type="submit" className={`btn sm${dirty ? " solid" : ""}`} disabled={busy || !dirty}>保存</button>}
-        {!editing && <button type="button" className="btn ghost sm" onClick={() => setUrl(h.url)}>改地址</button>}
-        {open
-          ? <span className="st-until num">到 {at8(h.rearm_until!)} 前接收新令牌</span>
-          : h.token === "set" && <button type="button" className="btn sm" disabled={busy} onClick={rearm}>重新接收</button>}
-        {h.token === "set" && (
-          <button type="button" className={`btn sm${h.events.signed_at ? "" : " solid"}`} onClick={copyToken}>{copied ? "已复制" : "复制验证令牌"}</button>
-        )}
-      </div>}
-    </form>
+      <SecretRow name="隧道 token" set={h.tunnel !== "off"} path={`${HOOK}/tunnel`} hint="Cloudflare 隧道的 token" reload={reload} say={say} />
+      <form onSubmit={(e) => { e.preventDefault(); void saveUrl(); }}>
+        <Row name="地址">
+          {editing
+            ? <input className="st-input mono" value={url ?? ""} onChange={(e) => setUrl(e.target.value)} inputMode="url" autoComplete="off" spellCheck={false}
+                placeholder="https://…/api/notion/webhook" aria-label="地址" disabled={busy} autoFocus={!!h.url}
+                onKeyDown={(e) => { if (e.key === "Escape" && h.url) setUrl(null); }} />
+            : <><Cmd text={h.url!} /><button type="button" className="btn ghost sm" onClick={() => setUrl(h.url)}>改地址</button></>}
+        </Row>
+        {(dirty || (editing && h.url) || open || h.token === "set") && <div className="st-acts">
+          {editing && h.url && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => setUrl(null)}>取消</button>}
+          {editing && (dirty || h.url) && <button type="submit" className={`btn sm${dirty ? " solid" : ""}`} disabled={busy || !dirty}>保存</button>}
+          {open
+            ? <span className="st-until num">到 {at8(h.rearm_until!)} 前接收新令牌</span>
+            : h.token === "set" && <button type="button" className="btn sm" disabled={busy} onClick={rearm}>重新接收</button>}
+          {h.token === "set" && (
+            <button type="button" className={`btn sm${h.events.signed_at ? "" : " solid"}`} onClick={copyToken}>{copied ? "已复制" : "复制验证令牌"}</button>
+          )}
+        </div>}
+      </form>
+    </>
   );
 }

@@ -51,12 +51,15 @@ def token() -> str | None:
 
 
 def _put_token(value: str) -> None:
-    folder = config.get().secrets_dir
+    _put_file(config.get().secrets_dir, "notion-hook-verification", value)
+
+
+def _put_file(folder: Path, name: str, value: str) -> None:
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     # mkstemp is exclusive and 0600 as well; set umask only during creation, not while doing I/O in a web thread.
     mask = os.umask(0o077)
     try:
-        fd, path = tempfile.mkstemp(prefix=".notion-hook-", dir=folder)
+        fd, path = tempfile.mkstemp(prefix=f".{name}-", dir=folder)
     finally:
         os.umask(mask)
     try:
@@ -65,10 +68,33 @@ def _put_token(value: str) -> None:
             f.write(value)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(path, folder / "notion-hook-verification")
+        os.replace(path, folder / name)
     finally:
         if os.path.exists(path):
             os.unlink(path)
+
+
+def tunnel_token_ok(value: str) -> bool:
+    """The shape of a remotely-managed tunnel's token (base64 JSON with account, tunnel and secret); nothing is sent."""
+    import base64
+    try:
+        body = json.loads(base64.b64decode(value + "=" * (-len(value) % 4), validate=True))
+    except ValueError:
+        return False
+    return isinstance(body, dict) and all(isinstance(body.get(k), str) and body[k] for k in ("a", "t", "s"))
+
+
+def put_tunnel_token(value: str | None) -> None:
+    """Write (None: remove) the token hook-tunnel runs cloudflared with: 0600, atomically replaced, never read back here.
+    The supervisor sees a new, changed or removed file within seconds and restarts or stops cloudflared
+    (scripts/lzc/hook-tunnel.sh)."""
+    if value:
+        _put_file(TUNNEL_TOKEN_FILE.parent, TUNNEL_TOKEN_FILE.name, value)
+    else:
+        try:
+            TUNNEL_TOKEN_FILE.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _setting(key: str, default=None, cx=None):
