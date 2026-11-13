@@ -37,7 +37,7 @@ REPORT_DAYS = 30        # the first report goes this far back: as far as the 机
 WINDOWS = {"5 hours": ("5h", "5 小时"), "7 days": ("weekly", "周额度")}
 SIGNED_OUT = re.compile(r"sign(ed)?[ -]?(in|out)|log[ -]?in|auth|expired|credential", re.I)
 NOT_READ = "not read yet"  # magpie holds its reads until asked: no reading yet, nothing the matter
-LEVELLED = re.compile(r"(.+)-(minimal|low|medium|high)")  # agy's model ids say the level; magpie prices the model, not the level
+LEVELLED = re.compile(r"(.+)-(minimal|low|medium|high|xhigh)")  # agy's model ids say the level; magpie prices the model, not the level
 CREDITS = re.compile(r"([\d,]+(?:\.\d+)?)\s*credits?", re.I)  # a ChatGPT account's balance as magpie tells it: "72785.81 credits"
 
 

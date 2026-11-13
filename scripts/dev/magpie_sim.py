@@ -69,7 +69,9 @@ SCENARIOS = {"ok": "正常", "down": "连不上 magpie", "held": "Key 受限", "
 SUBS = {"codex": "ChatGPT", "claude": "Claude Code", "grok": "Grok", "gemini": "Gemini（agy）", "argon": "Gemini 4 Argon（agy）"}
 # what the fake agy offers (`agy models`). Its /usage gives Argon a group of its own, as agy 1.2.16 did (tests USAGE_JSON),
 # so a stage on another group can be seen; agy 1.5 has no such group and Argon counts with Flash and Pro
-AGY_MODELS = [{"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash"}, {"id": "gemini-4-argon-high", "name": "Gemini 4 Argon"}]
+AGY_MODELS = [{"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash"}, {"id": "gemini-4-argon-high", "name": "Gemini 4 Argon"},
+              {"id": "gemini-4-carbon-high", "name": "Gemini 4 Carbon"},  # a channel's 底稿 goes here (knobs.CHANNEL_DRAFT)
+              {"id": "gemini-4-hydrogen-high", "name": "Gemini 4 Hydrogen", "levels": ["low", "medium", "high", "xhigh"]}]
 
 
 class Sim:
@@ -545,7 +547,7 @@ def install(home: Path) -> None:
         """The windows a model draws on: Argon's own, or the ones Flash and Pro share."""
         return SIM.argon if "argon" in model else SIM.gemini
 
-    def agy_call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None):
+    def agy_call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None, quiet=None):
         call_dir = Path(call_dir)
         call_dir.mkdir(parents=True, exist_ok=True)
         with SIM.lock:

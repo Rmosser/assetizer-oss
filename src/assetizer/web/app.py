@@ -477,7 +477,9 @@ def _providers() -> dict:
             "in_use": list(dict.fromkeys(p.name for p in in_use())),
             # 专题's steps: where each goes now, and the ones set on the page (the rest follow their defaults)
             "topic": {k: resolve(v) for k, v in knobs.topic_routes().items()},
-            "topic_set": {k: resolve(v) for k, v in knobs.get("topic_providers").items()}}
+            "topic_set": {k: resolve(v) for k, v in knobs.get("topic_providers").items()},
+            # a channel's 底稿 while it is tuned (design §R-21): where it goes now
+            "channel_draft": resolve(knobs.channel_draft_route())}
 
 
 def _box() -> dict:

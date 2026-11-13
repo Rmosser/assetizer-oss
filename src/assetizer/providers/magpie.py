@@ -183,7 +183,8 @@ class MagpieProvider:
         return parts, info
 
     def call(self, call_dir: Path, prompt: str, *, kind: str, schema: dict | None = None,
-             media: list[str] | None = None, effort: str | None = None, timeout: str | None = None) -> CallResult:
+             media: list[str] | None = None, effort: str | None = None, timeout: str | None = None,
+             quiet: float | None = None) -> CallResult:  # quiet: agy's watchdog (agy.QUIET); a request here has its own timeout
         call_dir = Path(call_dir)
         call_dir.mkdir(parents=True, exist_ok=True)
         receipt_path = call_dir / "invocation.json"

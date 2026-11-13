@@ -112,6 +112,52 @@ def test_topic_steps_route_apart_from_production(home):
     assert knobs.topic_routes()["topic"] == "magpie"  # no Claude on this box: where 知识 goes
 
 
+def test_a_channels_draft_routes_on_its_own_to_carbon(home):
+    """A channel's 底稿 while it is tuned (design §R-21): Gemini 4 Carbon when agy lists it, else where 理解 goes; never
+    production's stages nor the topics', and its quota never pauses the channels."""
+    from assetizer import db, knobs, providers
+    from assetizer.providers.agy import AgyProvider
+    base = providers.resolve("agy")
+    assert knobs.channel_draft_route() == "agy"  # agy not asked yet: where 理解 goes
+    db.set_setting("agy_models", [{"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash", "levels": ["low", "medium", "high"]},
+                                  {"id": "gemini-4-carbon-high", "name": "Gemini 4 Carbon", "levels": ["low", "medium", "high"]}])
+    assert knobs.channel_draft_route() == "agy/gemini-4-carbon-high"
+    p = providers.for_stage("channel_draft-visual-P001")
+    assert isinstance(p, AgyProvider) and p.model == "gemini-4-carbon-high"
+    assert providers.for_stage("understand-CH01").model == providers.for_stage("draft-visual-P001").model == base[len("agy/"):]
+    assert "agy/gemini-4-carbon-high" not in providers.routes()
+    db.set_setting("magpie_state", {"models": [{"id": "claude/claude-opus-5-5", "inputs": ["text", "image"]}]})
+    with pytest.raises(knobs.KnobError, match="频道底稿要看视频"):
+        knobs.save({"channel_draft": "claude/claude-opus-5-5"})
+    knobs.save({"channel_draft": "agy/gemini-3.8-flash-high"})
+    assert knobs.channel_draft_route() == "agy/gemini-3.8-flash-high"
+    assert db.one("SELECT message FROM events ORDER BY id DESC LIMIT 1")["message"] == \
+        "设置：频道底稿 agy/gemini-4-carbon-high → agy/gemini-3.8-flash-high"
+    knobs.save({"channel_draft": "agy/gemini-4-carbon-high"})  # its default needs no entry
+    assert knobs.get("channel_draft") is None and db.setting("channel_draft") is None
+    knobs.save({"effort": {"channel_draft": "high"}})
+    assert knobs.effort("channel_draft-text-B001") == "high" and knobs.effort("draft-text-B001") is None
+
+
+def test_a_channels_draft_is_made_by_its_own_calls_and_its_pictures_may_think_long(stand_in, home):
+    from assetizer.topics import draft, media_dir
+    from assetizer.llm import LLM
+    d = draft.Draft("abcdefghijk", {"id": "abcdefghijk", "title": "加支撑", "channel": "Lab"}, media_dir("abcdefghijk") / "source.mkv", LLM(), lambda: None,
+                    lambda done, of: None, step="channel_draft").make()
+    assert not d["gaps"] and "model" not in d  # which model answered is in each call's receipt, not one word for all
+    assert {k.rsplit("-", 1)[0] for k in stand_in} == {"channel_draft-visual", "channel_draft-text"}
+    # pictures may think long, asked of whichever model each call lands on (agy.quiet_for keeps Flash at 5 minutes)
+    assert all(QUIET[k] == draft.QUIET == 1800 for k in stand_in if "-visual-" in k)
+    assert all(QUIET[k] is None for k in stand_in if "-text-" in k)  # reading frames is quick: the usual 5 minutes
+
+
+def test_a_drafts_quota_goes_by_its_model():
+    from assetizer.topics.draft import rate
+    assert rate("agy/gemini-3.8-flash-high") == 0.0034
+    assert rate("agy/gemini-4-hydrogen-high") == 0.007
+    assert rate("agy/gemini-4-carbon-high") == rate("agy/gemini-4-argon-high") == rate("agy/gemini-5-pro-high") == 0.026
+
+
 def test_drafting_a_channel_prompt_is_not_a_topic_draft(home, monkeypatch):
     """The 学习目标 draft goes where the compiler's calls go, whatever the topic's 底稿 is set to."""
     from assetizer import compiler, knobs, providers
@@ -143,9 +189,9 @@ WRITE = ("写作提示词：按问题写这期的做法和参数，每个数字�
 
 
 def answer(kind: str) -> str:
-    if kind.startswith("draft-visual"):
+    if kind.startswith(("draft-visual", "channel_draft-visual")):
         return RECORD
-    if kind.startswith("draft-text"):
+    if kind.startswith(("draft-text", "channel_draft-text")):
         return "## 图1\nSupport density 80%\n## 图2\nLift 1.2 mm"
     if kind == "topic-plan":
         return json.dumps({"fit": "high", "reason": "讲支撑参数", "write": WRITE, "looks": [
@@ -174,6 +220,7 @@ def answer(kind: str) -> str:
 
 
 ASKED: dict[str, str] = {}  # the last prompt of each kind the stand-in was given
+QUIET: dict[str, float | None] = {}  # how long each kind of call was let go without a word (agy.QUIET)
 
 
 @pytest.fixture
@@ -185,13 +232,15 @@ def stand_in(home, monkeypatch):
     from assetizer.topics import media_dir
     calls: list[str] = []
     ASKED.clear()
+    QUIET.clear()
 
     class Stand:
-        name, media_size_limit = "agy", None
+        name, media_size_limit, model = "agy", None, "stand-in"
 
-        def call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None):
+        def call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None, quiet=None):
             calls.append(kind)
             ASKED[kind] = prompt
+            QUIET[kind] = quiet
             call_dir.mkdir(parents=True, exist_ok=True)
             return CallResult(answer(kind), {"status": "SUCCESS", "actual_model": "stand-in", "usage": {"input_tokens": 1}})
 

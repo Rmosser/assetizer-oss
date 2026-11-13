@@ -74,6 +74,8 @@ def for_stage(stage: str):
     key = stage_key(stage)
     if key in knobs.TOPIC_STAGES:  # a topic's step: routed on its own (knobs.topic_routes)
         return _make(knobs.topic_routes()[key])
+    if key == knobs.CHANNEL_DRAFT:  # a channel's 底稿 while it is tuned: likewise (knobs.channel_draft_route)
+        return _make(knobs.channel_draft_route())
     choice = (db.setting("stage_providers") or {}).get(key)
     return _make(choice) if choice else get()
 
@@ -89,9 +91,11 @@ def safety_fallback(stage: str) -> tuple[str, object] | None:
     key = stage_key(stage)
     if key in knobs.TOPIC_STAGES:
         own = knobs.topic_routes()[key]
+    elif key == knobs.CHANNEL_DRAFT:
+        own = knobs.channel_draft_route()
     else:
         own = (db.setting("stage_providers") or {}).get(key) or db.setting("llm_provider") or "agy"
-    video = key in knobs.VIDEO_STAGES or key in knobs.TOPIC_VIDEO
+    video = key in knobs.VIDEO_STAGES or key in knobs.TOPIC_VIDEO or key == knobs.CHANNEL_DRAFT
     if resolve(route) == resolve(own) or (video and not knobs.watches(resolve(route))):
         return None
     return resolve(route), _make(route)

@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { post } from "../api";
-import { boxLines, cookieState, gdriveLine, type Line, MAGPIE_DOWN, MAIN_STEPS, quotaLefts, ROUTE_STEPS, STEP } from "../box";
+import { boxLines, cookieState, DRAFT_STEP, gdriveLine, type Line, MAGPIE_DOWN, MAIN_STEPS, quotaLefts, ROUTE_STEPS, STEP } from "../box";
 import { openAgyLogin } from "../components/AgyLogin";
 import { BackfillPanel } from "../components/BackfillPanel";
 import { Cmd } from "../components/Cmd";
@@ -297,9 +297,10 @@ export default function Settings() {
 
   const kn = data.knobs;
   const models: any[] = [...(data.agy_models || []), ...(data.magpie?.state?.models || [])];
-  const routes = { default: data.providers?.default || "agy", stages: data.providers?.stages || {} };
+  const main: string = data.providers?.default || "agy";
+  const routes = { default: main, stages: { ...(data.providers?.stages || {}), [DRAFT_STEP]: data.providers?.channel_draft || main } };
   const missing: string[] = data.magpie?.missing || [];
-  const lost = lostRoutes(ROUTE_STEPS, routes, models, missing);
+  const lost = lostRoutes([...ROUTE_STEPS, DRAFT_STEP], routes, models, missing);
   const lines: Record<string, Line | undefined> = { ...boxLines(data), gdrive: gdriveLine(data.gdrive), models: lost ? { lamp: "bad", value: `${lost} 处要换` } : undefined };
   const bad = ALL.filter((s) => lines[s.k]?.lamp === "bad");
   const lefts = quotaLefts(data);
@@ -342,7 +343,7 @@ export default function Settings() {
         <div className="st-main">
           <Sec id="models" title="模型分工" line={lines.models}>
             <div className="st-routes">
-              <RouteCells kn={kn} steps={ROUTE_STEPS} label={STEP} save={save} models={models} lefts={lefts} routes={routes} missing={missing} />
+              <RouteCells kn={kn} steps={ROUTE_STEPS} own={[DRAFT_STEP]} label={STEP} save={save} models={models} lefts={lefts} routes={routes} missing={missing} />
             </div>
           </Sec>
           <Sec id="retry" title="自动重试">

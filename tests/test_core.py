@@ -1409,6 +1409,22 @@ def test_both_spellings_of_the_agy_media_read_are_accepted(fake_agy, home, tool,
     assert r.receipt["status"] == "SUCCESS" and r.receipt["view_file_count"] == 1 and r.receipt["media_tool"] == tool
 
 
+def test_a_call_may_think_long_off_flash_only_judged_of_the_model_it_runs_on(fake_agy, home, monkeypatch):
+    """A 底稿's picture pass may go 30 minutes without a word (§R-21), judged of the model the call runs on, as model_for
+    makes it: Flash keeps agy's own 5, whatever model the draft started on (a 设置 changed mid-draft, a fallback)."""
+    from assetizer import db
+    from assetizer.providers import agy
+    real, asked = agy.quiet_for, []
+    monkeypatch.setattr(agy, "quiet_for", lambda model, q: asked.append((model, q)) or real(model, q))
+    db.set_setting("agy_models", [{"id": "gemini-4-hydrogen-high", "name": "Gemini 4 Hydrogen", "levels": ["low", "medium", "high", "xhigh"]}])
+    fake_agy(answer="在线")
+    agy.AgyProvider(model="gemini-4-hydrogen-high").call(home / "a", "看", kind="draft-visual-P001", effort="xhigh", quiet=1800)
+    agy.AgyProvider(model="gemini-3.8-flash-high").call(home / "b", "看", kind="draft-visual-P001", quiet=1800)
+    agy.AgyProvider(model="gemini-4-carbon-high").call(home / "c", "看", kind="draft-text-B001")
+    assert asked == [("gemini-4-hydrogen-xhigh", 1800), ("gemini-3.8-flash-high", 1800), ("gemini-4-carbon-high", None)]
+    assert [real(m, q) for m, q in asked] == [1800, agy.QUIET, agy.QUIET]
+
+
 def test_a_call_returns_as_soon_as_agy_reports_its_result(fake_agy, home, monkeypatch):
     import time
     from assetizer.providers.agy import AgyProvider
@@ -2775,7 +2791,7 @@ class _BenchProvider:
     def version(self):
         return "fake"
 
-    def call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None):
+    def call(self, call_dir, prompt, *, kind, schema=None, media=None, effort=None, timeout=None, quiet=None):
         import json
         from pathlib import Path
         from assetizer.providers.agy import CallResult, ProviderError
@@ -3011,6 +3027,8 @@ def test_a_level_of_thinking_set_for_a_cell_stands_over_the_calls_own(cc_api, ho
     assert asked == [("knowledge", "medium")]  # a fixed provider (bench, tests) is not the page's
     assert knobs.effort("understand-CH01") is None
     assert model_for("gemini-3.8-flash-high", "max") == "gemini-3.8-flash-high"  # agy's Gemini tops out at high
+    assert model_for("gemini-4-hydrogen-high", "xhigh", ["low", "medium", "high", "xhigh"]) == "gemini-4-hydrogen-xhigh"
+    assert model_for("gemini-4-hydrogen-xhigh", "low", ["low", "medium", "high", "xhigh"]) == "gemini-4-hydrogen-low"
     assert model_for("gemini-3.8-flash-high", "minimal") == "gemini-3.8-flash-low"
 
 
@@ -6581,6 +6599,10 @@ def test_agy_models_are_listed_once_each_at_the_level_of_the_box_model():
     assert out == [{"id": "gemini-4-argon-high", "name": "Gemini 4 Argon", "levels": ["low", "medium", "high"]},
                    {"id": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash", "levels": ["medium", "high"]}]
     assert parse_models(AGY_MODELS, "gemini-3.8-flash-medium")[1]["id"] == "gemini-3.8-flash-medium"
+    # Gemini 4 Hydrogen also takes xhigh: a level of the one model, not a model of its own
+    hydrogen = "".join(f"gemini-4-hydrogen-{x}\tGemini 4 Hydrogen ({x.capitalize()})\n" for x in ("high", "xhigh", "low"))
+    assert parse_models(hydrogen, "gemini-3.8-flash-high") == [
+        {"id": "gemini-4-hydrogen-high", "name": "Gemini 4 Hydrogen", "levels": ["low", "high", "xhigh"]}]
     assert parse_models("Error: Please sign in to view available models.\n", "gemini-3.8-flash-high") == []
 
 
@@ -6616,6 +6638,13 @@ def test_the_page_gets_agy_models_and_marks_one_agy_no_longer_lists(home):
     db.set_setting("agy_models", [{"id": base, "name": "Gemini 3.8 Flash"}])
     assert [m["id"] for m in route_models()] == [f"agy/{base}"] and route_models()[0]["watches"] is True
     assert missing_routes() == ["agy/gemini-4-argon-high"]
+    # a route kept at another level the model lists (Hydrogen's xhigh, listed apart before its levels were read) is listed
+    knobs.save({"stage_route": {"article": "agy/gemini-4-hydrogen-xhigh"}})
+    db.set_setting("agy_models", [{"id": base, "name": "Gemini 3.8 Flash", "levels": ["low", "medium", "high"]},
+                                  {"id": "gemini-4-hydrogen-high", "name": "Gemini 4 Hydrogen", "levels": ["low", "medium", "high", "xhigh"]}])
+    assert missing_routes() == []
+    knobs.save({"stage_route": {"article": "agy/gemini-3.8-flash-xhigh"}})  # a level it does not list
+    assert missing_routes() == ["agy/gemini-3.8-flash-xhigh"]
 
 
 def test_agy_saying_it_has_no_such_model_pauses_like_magpie_saying_so():

@@ -10,8 +10,10 @@ export type Group = { name: string; models: string; buckets: Bucket[] };
 
 /** stage keys of model calls (providers.stage_key) */
 export const STEP: Record<string, string> = { understanding: "理解", merge: "合并", knowledge: "知识", article: "文章", selection: "选片", boundary: "边界", review: "预审", comments: "批注", compile: "编译", health: "探测", media: "自检",
-  draft: "底稿", look: "回看", second: "复核", topic: "写作" };
+  draft: "底稿", look: "回看", second: "复核", topic: "写作", channel_draft: "底稿" };
 export const MAIN_STEPS = ["understanding", "merge", "knowledge", "article", "selection", "boundary", "review"];
+/** a channel's 底稿 while it is tuned (knobs.CHANNEL_DRAFT, design §R-21): a cell after the stages, routed apart from them */
+export const DRAFT_STEP = "channel_draft";
 /** 分工's cells on the 设置 page: the stages above, then 批注, which reads the asks on an issue's Notion page as text */
 export const ROUTE_STEPS = [...MAIN_STEPS, "comments"];
 

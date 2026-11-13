@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { post } from "../api";
-import { agyGroups, alertFix, boxLines, type Bucket, creditText, type Group, groupName, MAGPIE_DOWN, MAIN_STEPS, onCredits, resets, STEP, subFamily, subName } from "../box";
+import { agyGroups, alertFix, boxLines, type Bucket, creditText, DRAFT_STEP, type Group, groupName, MAGPIE_DOWN, MAIN_STEPS, onCredits, resets, STEP, subFamily, subName } from "../box";
 import { deJargon, issueHeadline } from "../cjk";
 import { agyAlert, openAgyLogin } from "../components/AgyLogin";
 import { about, big, Columns, HBars, hrs, Kpi, Meter, pct, Spark } from "../components/Figures";
@@ -561,7 +561,8 @@ export default function Engine() {
           <Press runs={data.runs} labels={data.stage_labels || {}} family={family} />
           <div className="eg-split">
             <h2 className="eg-l">分工</h2>
-            <RouteLinks steps={MAIN_STEPS} label={STEP} models={models} routes={{ default: main, stages }} missing={m.missing || []} live={liveKeys} efforts={data.knobs?.efforts} />
+            <RouteLinks steps={MAIN_STEPS} own={[DRAFT_STEP]} label={STEP} models={models} routes={{ default: main, stages: { ...stages, [DRAFT_STEP]: data.providers?.channel_draft || main } }}
+              missing={m.missing || []} live={liveKeys} efforts={data.knobs?.efforts} />
           </div>
         </section>
         <System data={data} />

@@ -18,20 +18,22 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, StrictBool
 
 from .. import config, db, knobs, playback, youtube
+from ..providers import resolve
 from ..topics import draft_dir, root, work_dir
 from ..topics import backup, backup_rules
 from ..topics import comments as TC
 from ..topics import notion as TN
 from ..topics import watch as TW
 from ..topics import write as W
+from ..topics.draft import rate
 from ..topics.run import changed, held, settle, signature
 from ..util import now
 
 router = APIRouter(prefix="/api/topics")
 VID = re.compile(r"^[A-Za-z0-9_-]{11}$")
-# Gemini weekly quota a read takes, measured on 31 videos (2026-11): the picture 0.20% and the text pass 0.14% per hour
-# of video, the looks 0.47% per video. A video drafted already spends only the looks.
-PER_HOUR, PER_VIDEO = 0.0034, 0.0047
+# Gemini weekly quota a read takes besides its 底稿 (draft.rate, by the model it is on): the looks, 0.47% per video,
+# measured on 31 videos (2026-11). A video drafted already spends only the looks.
+PER_VIDEO = 0.0047
 PEEK_TTL, PEEK_MOST = 600, 50
 # a line that is a link (with https://, or a host and a path) and the hosts that are YouTube's: any other is refused
 URLISH = re.compile(r"^(?:https?://\S+|(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?/\S*)$", re.I)
@@ -84,19 +86,20 @@ def _counts(items: list[dict]) -> dict:
 
 def _budget() -> dict:
     """What the 新专题 sheet shows of the Gemini week: what is left, and what the channels keep."""
-    from ..providers import is_agy, resolve
+    from ..providers import is_agy
     from ..providers.agy import quota_group
     q = db.setting("agy_quota") or {}
     left = None
     video = resolve(knobs.topic_routes()["draft"])
     if q.get("groups") and is_agy(video) and (g := quota_group(q["groups"], video[len("agy/"):])):
         left = next((b["remaining"] for b in g["buckets"] if b["window"] == "weekly" and not b.get("disabled")), None)
-    return {"weekly_left": left, "floor": knobs.get("topic_min_weekly"), "per_hour": PER_HOUR, "per_video": PER_VIDEO,
+    return {"weekly_left": left, "floor": knobs.get("topic_min_weekly"), "per_hour": rate(video), "per_video": PER_VIDEO,
             "gemini": is_agy(video)}
 
 
 def _cost(videos: list[dict]) -> float:
-    return sum((0 if v.get("drafted") else PER_HOUR * (v.get("duration") or 0) / 3600) + PER_VIDEO for v in videos)
+    per_hour = rate(resolve(knobs.topic_routes()["draft"]))
+    return sum((0 if v.get("drafted") else per_hour * (v.get("duration") or 0) / 3600) + PER_VIDEO for v in videos)
 
 
 def _topic(tid: int) -> dict:

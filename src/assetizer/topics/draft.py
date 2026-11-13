@@ -34,6 +34,20 @@ SEG, OVER = 600.0, 20.0
 BATCH = 12             # frames to one call of the text pass
 BRIEF = 160            # characters of a frame's text kept in index.md
 GIVE_UP = ("PROVIDER_QUOTA", "AGY_AUTH_REQUIRED", "PROVIDER_MODEL", "AGY_MEDIA_READ")  # no other segment would fare better
+# How long a picture call may think without a word (agy.QUIET is 5 minutes): Gemini 4 Carbon watches its ten minutes and
+# thinks 5–9 minutes before it writes; 19 of its 20 calls went past 5 minutes (2026-11-13), and a killed call is charged.
+# Flash keeps the 5, as agy decides of the model each call lands on (agy.quiet_for).
+QUIET = 1800.0
+
+# Gemini weekly quota a draft takes per hour of video, picture and text pass together, by the family of its model: Flash
+# measured on 31 videos (2026-11), the others on the four hardest of 2026-11-13. A model of none of these is taken for one
+# as dear as Carbon: an estimate too high only asks for more room than it needs.
+RATE = (("flash", 0.0034), ("hydrogen", 0.007), ("", 0.026))
+
+
+def rate(route: str) -> float:
+    """The weekly quota a 底稿 on `route` takes per hour of video."""
+    return next(r for family, r in RATE if family in route)
 
 _SPAN = r"\[(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—~]\s*(\d{1,2}:\d{2}(?::\d{2})?)\]"
 TC = re.compile(r"^\s*" + _SPAN, re.M)
@@ -248,11 +262,13 @@ def render(meta: dict, duration: float, entries_: list[dict], t: dict, shots: li
 
 class Draft:
     """Making one video's 底稿. `check` raises Stopped when the read it is for should stop; `progress(done, of)` tells the
-    page how far it is (segments, then frame batches)."""
+    page how far it is (segments, then frame batches). `step` names the calls and so where they go: "draft" for a topic
+    (knobs.topic_routes), knobs.CHANNEL_DRAFT for a channel's sample while it is tuned (knobs.channel_draft_route)."""
 
     def __init__(self, vid: str, meta: dict, src: Path | None, llm: LLM, check: Callable[[], None],
-                 progress: Callable[[int, int], None]):
+                 progress: Callable[[int, int], None], step: str = "draft"):
         self.vid, self.meta, self.src, self.llm, self.check, self.progress = vid, meta, src, llm, check, progress
+        self.step = step
         self.d = draft_dir(vid)
         self.done, self.of = 0, 0
 
@@ -274,10 +290,10 @@ class Draft:
         why = ""
         for attempt in range(1, 4):
             self.check()
-            stage = f"draft-visual-{pid}" + ("" if attempt == 1 else f"-r{attempt}")
+            stage = f"{self.step}-visual-{pid}" + ("" if attempt == 1 else f"-r{attempt}")
             try:
                 with gate(stage):
-                    text = self.llm.text(self.d / "calls", stage, ask, min_chars=40, media=[str(proxy)])
+                    text = self.llm.text(self.d / "calls", stage, ask, min_chars=40, media=[str(proxy)], quiet=QUIET)
             except ProviderError as e:
                 if e.kind in GIVE_UP:
                     raise
@@ -338,7 +354,7 @@ class Draft:
             self.check()
             files = [grab(self.src, t, frames / f"{k * BATCH + i + 1:03d}.jpg") for i, t in enumerate(chunk)]
             images = "\n".join(f"{i}. {f.resolve()}" for i, f in enumerate(files, 1))
-            stage = f"draft-text-B{k + 1:03d}"
+            stage = f"{self.step}-text-B{k + 1:03d}"
             try:
                 with gate(stage):
                     text = self.llm.text(self.d / "calls", stage, fill(prompt("text"), images=images), min_chars=1,
@@ -369,7 +385,8 @@ class Draft:
         plan = segments(duration)
         self.done, self.of = 0, len(plan)
         self.progress(0, self.of)
-        limit = getattr(self.llm.provider("draft"), "media_size_limit", ffmpeg.VIEW_FILE_LIMIT)
+        provider = self.llm.provider(self.step)
+        limit = getattr(provider, "media_size_limit", ffmpeg.VIEW_FILE_LIMIT)
         self.d.mkdir(parents=True, exist_ok=True)  # the speech thread writes its wav here before any visual makes it
         with ThreadPoolExecutor(1) as speech:
             heard_ = speech.submit(self._speech)

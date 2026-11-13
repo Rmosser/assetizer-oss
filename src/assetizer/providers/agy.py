@@ -44,6 +44,16 @@ LIVE_RUNS: dict[int, str] = {}  # those working for a run: the run (清空 stops
 USAGE_LOCK = threading.Lock()  # `agy -p /usage`: one at a time in a process
 # after an error step at a media read, how long agy gets to say why before it is stopped
 MEDIA_ERROR_GRACE = 30.0
+# How long a call may go without a stream event before it is taken for hung and killed, unless the call says longer
+# (`quiet`: a 底稿's picture pass, topics.draft.QUIET).
+QUIET = 300.0
+
+
+def quiet_for(model: str, asked: float | None) -> float:
+    """How long a call on `model` (as it runs, after model_for) may go without a word: as the call asks, but Flash writes
+    within minutes and keeps the 5, so a hung call of a topic's Flash draft holds its slot no longer than it did. Asked
+    of the model the call lands on, whatever it started on: the 设置 changed mid-draft, a content-safety fallback."""
+    return asked if asked and "flash" not in model else QUIET
 
 
 def run_of(path: Path | str) -> str | None:
@@ -117,14 +127,32 @@ def _benign(name: str | None, params: dict) -> bool:
     return False
 
 
-def model_for(base: str, effort: str | None) -> str:
-    """agy encodes effort in the model id (gemini-3.8-flash-{low,medium,high}); --effort conflicts. A level beyond those
-    (xhigh, set on the page for a cell that was on another model) goes to the nearest."""
+LEVELLED = re.compile(r"(.*)-(low|medium|high|xhigh)")  # agy's ids say the level; Gemini 4 Hydrogen also takes xhigh
+
+
+def model_for(base: str, effort: str | None, levels: list[str] | None = None) -> str:
+    """agy encodes effort in the model id (gemini-3.8-flash-{low,medium,high}); --effort conflicts. A level the model does
+    not take (xhigh on Flash, set on the page for a cell that was on another model) goes to the nearest it does: `levels`
+    as agy lists them (listed_levels), else Gemini's three."""
     from . import GEMINI_LEVELS, LEVELS, nearest
     if not effort or effort not in LEVELS:
         return base
-    m = re.match(r"^(.*)-(low|medium|high)$", base)
-    return f"{m[1]}-{nearest(effort, GEMINI_LEVELS)}" if m else base
+    m = LEVELLED.fullmatch(base)
+    return f"{m[1]}-{nearest(effort, levels or GEMINI_LEVELS)}" if m else base
+
+
+def _base(model: str) -> str:
+    return m[1] if (m := LEVELLED.fullmatch(model)) else model
+
+
+def listed_levels(model: str) -> list[str]:
+    """The levels agy lists for a model (setting agy_models); [] before it has been asked."""
+    from .. import db
+    try:
+        rows = db.setting("agy_models") or []
+    except Exception:  # no database: a provider used outside the box's home
+        return []
+    return next((r.get("levels") or [] for r in rows if _base(r.get("id") or "") == _base(model)), [])
 
 
 def _seconds(spec: str) -> float:
@@ -213,6 +241,7 @@ class AgyProvider:
         media: list[str] | None = None,
         effort: str | None = None,
         timeout: str | None = None,
+        quiet: float | None = None,
     ) -> CallResult:
         call_dir = Path(call_dir)
         call_dir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +255,7 @@ class AgyProvider:
         # (MUBB14vJc9U-r5, 2026-10-22). They hold nothing the model was not already given, so reading them is benign.
         own_inputs = {str((call_dir / n).resolve()) for n in ("prompt.md", "schema.json", "stdin-message.jsonl")}
         write_text(call_dir / "prompt.md", prompt)
-        model = model_for(self.model, effort)
+        model = model_for(self.model, effort, listed_levels(self.model))
         cmd = [
             self.s.agy_bin, "--model", model,
             "--disable-slash-commands", "--dangerously-skip-permissions",
@@ -284,6 +313,7 @@ class AgyProvider:
                 LIVE_RUNS[proc.pid] = rid
             threading.Thread(target=monitor, daemon=True).start()
             limit = _seconds(timeout or self.s.agy_print_timeout) + 300
+            quiet = quiet_for(model, quiet)
             last_line = [time.monotonic()]
             killed = [None]
 
@@ -291,8 +321,8 @@ class AgyProvider:
                 while not done.is_set():
                     idle = time.monotonic() - last_line[0]
                     total = time.monotonic() - t0
-                    if idle > 300 or total > limit:
-                        killed[0] = "NO_STREAM_EVENTS_5MIN" if idle > 300 else "WALL_TIMEOUT"
+                    if idle > quiet or total > limit:
+                        killed[0] = f"NO_STREAM_EVENTS_{round(quiet / 60)}MIN" if idle > quiet else "WALL_TIMEOUT"
                         try:
                             os.killpg(proc.pid, signal.SIGKILL)
                         except ProcessLookupError:
@@ -548,18 +578,18 @@ def parse_models(text: str, prefer: str) -> list[dict]:
     """`agy models` (id, tab, name; one line per level) as one row per model. Each stage says its own level (model_for),
     so the page offers models with the levels each takes (`levels`): the id kept has the level of the box's model, which is
     what a call that says none runs at."""
-    level = re.fullmatch(r".*-(low|medium|high)", prefer)
+    level = LEVELLED.fullmatch(prefer)
     rows: dict[str, dict] = {}
     for line in text.splitlines():
         cells = line.split("\t")
         if len(cells) != 2 or not cells[0].startswith("gemini-"):
             continue
-        m = re.fullmatch(r"(.*)-(low|medium|high)", cells[0])
+        m = LEVELLED.fullmatch(cells[0])
         base = m[1] if m else cells[0]
         levels = [*rows[base]["levels"], m[2]] if base in rows and m else [m[2]] if m else []
-        if base not in rows or (m and level and m[2] == level[1]):
-            rows[base] = {"id": cells[0], "name": re.sub(r"\s*\((?:low|medium|high)\)\s*$", "", cells[1], flags=re.I)}
-        rows[base]["levels"] = sorted(set(levels), key=("low", "medium", "high").index)
+        if base not in rows or (m and level and m[2] == level[2]):
+            rows[base] = {"id": cells[0], "name": re.sub(r"\s*\((?:low|medium|high|xhigh)\)\s*$", "", cells[1], flags=re.I)}
+        rows[base]["levels"] = sorted(set(levels), key=("low", "medium", "high", "xhigh").index)
     return list(rows.values())
 
 
@@ -574,7 +604,7 @@ def read_models() -> list[dict]:
 
 def _name(model: str) -> str:
     """A name for a model agy has not listed yet: gemini-3.8-flash-high → Gemini 3.8 Flash."""
-    return " ".join(w.capitalize() for w in re.sub(r"-(low|medium|high)$", "", model).split("-"))
+    return " ".join(w.capitalize() for w in _base(model).split("-"))
 
 
 def route_models() -> list[dict]:
@@ -588,16 +618,25 @@ def route_models() -> list[dict]:
     groups = (db.setting("agy_quota") or {}).get("groups") or []
     # rows kept before levels were: the three, for an id that carries one
     return [{"id": AGY_PREFIX + m["id"], "name": m["name"], "vendor": "agy", "group": False, "watches": True,
-             "levels": m.get("levels", ["low", "medium", "high"] if re.search(r"-(low|medium|high)$", m["id"]) else []),
+             "levels": m.get("levels", ["low", "medium", "high"] if LEVELLED.fullmatch(m["id"]) else []),
              "quota": (quota_group(groups, m["id"]) or {}).get("name")} for m in rows]
+
+
+def listed(model: str, rows: list[dict]) -> bool:
+    """`model` is one of `rows` (setting agy_models): as listed, or at another level the model lists. Each model is kept
+    once, at the box's level (parse_models); a route kept at another (gemini-4-hydrogen-xhigh, listed apart before its
+    levels were read) is still that model."""
+    m = LEVELLED.fullmatch(model)
+    return any(r.get("id") == model or (m and _base(r.get("id") or "") == m[1] and m[2] in (r.get("levels") or []))
+               for r in rows)
 
 
 def missing_routes() -> list[str]:
     """The routes on agy's models that agy no longer lists."""
     from .. import db
     from . import AGY_PREFIX, is_agy, routes
-    listed = {AGY_PREFIX + m["id"] for m in db.setting("agy_models") or []}
-    return [r for r in routes() if is_agy(r) and listed and r not in listed]
+    rows = db.setting("agy_models") or []
+    return [r for r in routes() if is_agy(r) and rows and not listed(r[len(AGY_PREFIX):], rows)]
 
 
 def parse_usage(payload: dict) -> list[dict]:
@@ -653,7 +692,7 @@ def quota_group(groups: list[dict], model: str) -> dict | None:
     (a -flash-lite model: "Gemini Flash Lite", then "Gemini Flash"). A model neither places (Argon on agy 1.5) is counted in
     the Gemini group named for no model, if there is just one; otherwise it has none."""
     gem = [g for g in groups if _gemini(g)]
-    name = _words(re.sub(r"-(low|medium|high)$", "", model)).split()
+    name = _words(_base(model)).split()
     for n in range(len(name), 1, -1):
         said = f" {' '.join(name[:n])} "
         for part in ("name", "models"):

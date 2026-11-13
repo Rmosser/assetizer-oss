@@ -28,6 +28,12 @@ TOPIC_STAGES = ("draft", "look", "second", "topic")
 TOPIC_NAMES = dict(zip(TOPIC_STAGES, ("底稿", "回看", "复核", "写作")))
 TOPIC_VIDEO = ("draft", "look")      # watch video: Gemini, or a model of the gateway that takes images
 TOPIC_TEXT = "claude/claude-opus-5-5"  # the plans, notes and answers, when magpie lists it (else where 知识 goes)
+# A channel's 底稿 while it is tuned (design §R-21): routed on its own, apart from production and from the topics, and only
+# for the sample videos of a channel being tuned; the stages that run every day stay where they are. Gemini 4 Carbon when
+# agy lists it: on the four hardest videos of 2026-11-13 it was wrong least (12.8% of what it said about random moments,
+# Flash 30.7%) and wrote nothing into seconds of black, at about six times Flash's quota; a channel tunes on a few videos.
+CHANNEL_DRAFT = "channel_draft"
+CHANNEL_DRAFT_MODEL = "gemini-4-carbon"
 # How often the call that failed is tried again, by what failed it (design §R6-10). Kinds not listed are never tried again:
 # a login, a quota or a model taken off the list waits for the user or the health probe, not for another call.
 RETRY_DEFAULTS = {"CONTENT_SAFETY": 2, "CONTRACT": 1, "MODALITY_ROUTING_DEVIATION": 2, "MEDIA_READ_FAILED": 0,
@@ -40,13 +46,13 @@ RETRY_ALIAS = {"MEDIA_READ_COUNT": "MODALITY_ROUTING_DEVIATION"}  # read the fil
 NO_FALLBACK = "off"
 # A cell of 分工 with no level of thinking set (providers.LEVELS) leaves it to the code: each call says its own (compile high,
 # merge medium…), else the model's default.
-EFFORT_KEYS = (*STAGES, *TOPIC_STAGES, "default")  # "default": 其余, the calls of no stage on the page (compile, audit…)
+EFFORT_KEYS = (*STAGES, *TOPIC_STAGES, CHANNEL_DRAFT, "default")  # "default": 其余, the calls of no stage on the page (compile, audit…)
 
 
 @dataclass(frozen=True)
 class Knob:
     label: str
-    kind: str  # "int" "float" "provider" "stages" "topic_stages" "efforts" "url" "hours" "burst" "retries" "fallback"
+    kind: str  # "int" "float" "provider" "stages" "topic_stages" "watcher" "efforts" "url" "hours" "burst" "retries" "fallback"
     lo: float = 0
     hi: float = 0
     default: Any = None
@@ -77,6 +83,7 @@ KNOBS: dict[str, Knob] = {
     "topic_slots": Knob("专题同时读", "int", 1, 8, 3),
     "topic_min_weekly": Knob("专题留下的周额度", "float", 0, 0.9, 0.2),
     "topic_min_5h": Knob("专题留下的 5 小时额度", "float", 0, 0.9, 0.15),
+    CHANNEL_DRAFT: Knob("频道底稿", "watcher", default=None),  # None: channel_draft_default
 }
 _URL = re.compile(r"https?://[^\s/]+(:\d+)?/?")
 
@@ -167,6 +174,8 @@ def get(key: str) -> Any:
             return {s: p for s, p in v.items() if s in STAGES and route_ok(p)} if isinstance(v, dict) else {}
         if k.kind == "topic_stages":
             return {s: p for s, p in v.items() if s in TOPIC_STAGES and route_ok(p)} if isinstance(v, dict) else {}
+        if k.kind == "watcher":
+            return v if route_ok(v) else default(key)
         if k.kind == "efforts":
             return {s: x for s, x in v.items() if s in EFFORT_KEYS and x in LEVELS} if isinstance(v, dict) else {}
         if k.kind == "hours":
@@ -229,6 +238,21 @@ def topic_routes() -> dict[str, str]:
     return {s: set_.get(s) or topic_default(s) for s in TOPIC_STAGES}
 
 
+def channel_draft_default() -> str:
+    """Where a channel's 底稿 goes when it is not set: Gemini 4 Carbon at high when agy lists it, else where 理解 goes (agy
+    if that cannot watch)."""
+    listed = {re.sub(r"-(low|medium|high|xhigh)$", "", m.get("id") or "") for m in db.setting("agy_models") or []}
+    if CHANNEL_DRAFT_MODEL in listed:
+        return f"agy/{CHANNEL_DRAFT_MODEL}-high"
+    video = get("stage_providers").get("understanding") or get("llm_provider")
+    return video if watches(video) else "agy"
+
+
+def channel_draft_route() -> str:
+    """Where a channel's 底稿 goes now: as set on the 设置 page, else its default."""
+    return get(CHANNEL_DRAFT) or channel_draft_default()
+
+
 def takes_images(route: str) -> bool:
     """Whether a route can be the second look: shown at most twelve images in a call (topics.look.SECOND_IMAGES), so
     Claude's subscription can, as long as the model takes images at all."""
@@ -269,6 +293,12 @@ def _check(key: str, v: Any) -> Any:
             raise KnobError(key, f"{TOPIC_NAMES[blind[0]]}要看视频，这个模型看不了")
         if "second" in v and not takes_images(v["second"]):
             raise KnobError(key, "复核要看图，这个模型看不了")
+        return v
+    if k.kind == "watcher":
+        if not route_ok(v):
+            raise KnobError(key, f"{k.label}的模型不认识")
+        if not watches(v):
+            raise KnobError(key, f"{k.label}要看视频，这个模型看不了")
         return v
     if k.kind == "efforts":
         if not isinstance(v, dict) or not all(s in EFFORT_KEYS and x in LEVELS for s, x in v.items()):
@@ -356,6 +386,8 @@ def save(body: Any) -> dict:
             v = {e: n for e, n in (v or {}).items() if n != RETRY_DEFAULTS[e]} or None
         if KNOBS[key].kind == "topic_stages":  # nor a step sent where it goes anyway
             v = {s: p for s, p in (v or {}).items() if resolve(p) != resolve(topic_default(s))} or None
+        if KNOBS[key].kind == "watcher" and v and resolve(v) == resolve(channel_draft_default()):
+            v = None
         if v is None:
             db.exec("DELETE FROM settings WHERE key=?", key)
         else:
@@ -367,8 +399,11 @@ def save(body: Any) -> dict:
         elif now != before and KNOBS[key].kind == "topic_stages":
             changed += [f"专题{TOPIC_NAMES[s]} {resolve(before.get(s) or topic_default(s))} → {resolve(now.get(s) or topic_default(s))}"
                         for s in TOPIC_STAGES if before.get(s) != now.get(s)]
+        elif now != before and KNOBS[key].kind == "watcher":
+            changed.append(f"{KNOBS[key].label} {resolve(before or channel_draft_default())} → {resolve(now or channel_draft_default())}")
         elif now != before and KNOBS[key].kind == "efforts":
-            name = {**STAGE_NAMES, **{s: f"专题{n}" for s, n in TOPIC_NAMES.items()}, "default": "其余"}
+            name = {**STAGE_NAMES, **{s: f"专题{n}" for s, n in TOPIC_NAMES.items()}, CHANNEL_DRAFT: KNOBS[CHANNEL_DRAFT].label,
+                    "default": "其余"}
             changed += [f"{name[s]}思考 {before.get(s, '自动')} → {now.get(s, '自动')}" for s in EFFORT_KEYS if before.get(s) != now.get(s)]
         elif now != before and KNOBS[key].kind == "retries":
             changed += [f"{KNOBS[key].label}：{RETRY_NAMES[e]} {before[e]} → {now[e]} 次" for e in RETRY_DEFAULTS if before[e] != now[e]]

@@ -233,7 +233,8 @@ class LLM:
             return None, other[0]
 
     def text(self, call_root: Path, stage: str, prompt: str, *, min_chars: int = 200,
-             media: list[str] | None = None, effort: str | None = None) -> str:
+             media: list[str] | None = None, effort: str | None = None, quiet: float | None = None) -> str:
+        """`quiet`: how long the call may go without a word before agy's watchdog takes it for hung (agy.QUIET)."""
         d = Path(call_root) / stage
         accepted = d / "accepted.md"
         key = _fingerprint(prompt, media, effort)
@@ -243,7 +244,8 @@ class LLM:
         def enough(text: str) -> None:
             if len(text.strip()) < min_chars:
                 raise ContractError("CONTENT_FAILURE", f"response only {len(text)} chars")
-        r = self._call(d / "attempt-1", stage, prompt, accept=enough, kind=stage, media=media, effort=effort)
+        r = self._call(d / "attempt-1", stage, prompt, accept=enough, kind=stage, media=media, effort=effort,
+                       **({"quiet": quiet} if quiet else {}))
         try:
             enough(r.text)
         except ContractError as e:

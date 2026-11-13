@@ -107,7 +107,9 @@ def held() -> dict | None:
 
 def crowded() -> bool:
     """A channel's run is queued and every slot is taken: a topic's read gives its slot back at its next step (and goes
-    on from there once the channels have room), so a new video never waits an hour behind a topic."""
+    on from there once the channels have room). A step keeps it while its call is retried: with two retries about 16
+    minutes of a hung agy call's silence (91 for a 底稿's picture pass off Flash, agy.quiet_for), up to two hours for one
+    that keeps writing and never ends (agy's wall limit)."""
     if db.setting("queue_paused") or not db.one("SELECT 1 FROM runs WHERE production='QUEUED'"):
         return False
     busy = db.one("""SELECT (SELECT COUNT(*) FROM runs WHERE production='RUNNING')

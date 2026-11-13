@@ -34,10 +34,12 @@ class Stopped(Exception):
 
 @contextmanager
 def gate(stage: str) -> Iterator[None]:
-    """Hold one of the topic's model call slots for the route `stage` goes to (knobs.topic_routes)."""
+    """Hold one of the topic's model call slots for the route `stage` goes to (knobs.topic_routes; a channel's 底稿,
+    knobs.channel_draft_route)."""
     from .. import knobs
     from ..providers import is_agy, resolve, stage_key
-    route = resolve(knobs.topic_routes()[stage_key(stage)])
+    key = stage_key(stage)
+    route = resolve(knobs.channel_draft_route() if key == knobs.CHANNEL_DRAFT else knobs.topic_routes()[key])
     with _GATES["agy" if is_agy(route) else "magpie"]:
         yield
 

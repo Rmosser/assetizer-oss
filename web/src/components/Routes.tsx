@@ -8,21 +8,28 @@ import { Sheet, type SheetHandle } from "./Sheet";
 
 const PROVIDER: Record<string, string> = { agy: "Gemini", tuzi: "Gemini（兔子）" };
 /** the stages that watch video: anything but Gemini gets frames and a transcript in its place */
-const VIDEO_STEPS = new Set(["understanding", "boundary"]);
+const VIDEO_STEPS = new Set(["understanding", "boundary", "channel_draft"]);
 const BLIND = "看不了视频";
 const VENDOR_FAMILY: Record<string, string> = { codex: "chatgpt", claude: "claude", grok: "grok", gemini: "gemini", agy: "gemini" };
 const VENDOR_ORDER = ["agy", "codex", "claude", "grok"];
 const isAgy = (route: string) => route === "agy" || route.startsWith("agy/");
 /** Where a picker may also say no model at all (knobs.NO_FALLBACK) */
 export const NO_ROUTE = "off";
+const LEVELLED = /^(.*)-(low|medium|high|xhigh)$/;
+/** The model a route is, as listed. agy lists each model once, at the box's level: a route kept at another level it
+ * lists (gemini-4-hydrogen-xhigh, listed apart before its levels were read) is that model (providers.agy.listed) */
+function listed(route: string, models: any[]): any {
+  const lv = isAgy(route) ? LEVELLED.exec(route) : null;
+  return models.find((m) => m.id === route) ?? (lv ? models.find((m) => LEVELLED.exec(m.id)?.[1] === lv[1] && m.levels?.includes(lv[2])) : undefined);
+}
 /** Off the list of whoever lists it: agy for its models, magpie for the rest. No list yet says nothing. */
-const withdrawn = (route: string, models: any[]) => route !== NO_ROUTE && route !== "tuzi" && route !== "agy" && !models.some((m) => m.id === route)
+const withdrawn = (route: string, models: any[]) => route !== NO_ROUTE && route !== "tuzi" && route !== "agy" && !listed(route, models)
   && models.some((m) => (m.vendor === "agy") === isAgy(route));
 
 /** A route's name: the provider's, the model's as magpie lists it, else its id with the provider left off */
 function modelName(route: string, models: any[]): string {
   if (route === NO_ROUTE) return "不换";
-  return PROVIDER[route] || models.find((m) => m.id === route)?.name || route.split("/").pop() || route;
+  return PROVIDER[route] || listed(route, models)?.name || route.split("/").pop() || route;
 }
 
 /** How hard a model thinks (providers.LEVELS), lowest first, and what the page calls each */
@@ -32,7 +39,7 @@ const GEMINI_LEVELS = ["low", "medium", "high"];
 /** The levels a route takes: as magpie or agy lists the model; Gemini's three for 兔子 */
 export function levelsOf(route: string, models: any[]): string[] {
   if (route === "tuzi") return GEMINI_LEVELS;
-  return ((models.find((m) => m.id === route)?.levels || []) as string[]).filter((x) => LEVELS.includes(x));
+  return ((listed(route, models)?.levels || []) as string[]).filter((x) => LEVELS.includes(x));
 }
 /** The level of `have` a set one runs at (providers.nearest): itself, else the closest, ties going lower */
 function nearest(level: string, have: string[]): string | undefined {
@@ -48,7 +55,7 @@ export type Effort = { value: string | null; onPick: (level: string | null) => v
 /** Whose color a route wears on this page */
 export function familyOf(route: string, models: any[]): string {
   if (route === "agy" || route === "tuzi") return "gemini";
-  const vendor = models.find((m) => m.id === route)?.vendor ?? (route.includes("/") && !route.startsWith("group/") ? route.split("/")[0] : "");
+  const vendor = listed(route, models)?.vendor ?? (route.includes("/") && !route.startsWith("group/") ? route.split("/")[0] : "");
   return VENDOR_FAMILY[vendor] || "other";
 }
 
@@ -62,6 +69,7 @@ function sections(value: string, models: any[], video: boolean, lefts: Record<st
   const opt = (m: any, told = false): Opt => ({ id: m.id, name: m.name, off: video && !m.watches, tag: video && !m.watches && !told ? BLIND : undefined });
   // on a stage that watches video everyone but Gemini gets frames: said once per subscription, not on every row
   const framed = (ms: any[]) => (!video ? undefined : ms.some((m) => m.watches) ? "抽帧" : BLIND);
+  // a route kept at another level of a listed model (listed) stays a row of its own, so the list shows what is picked
   const known = value === NO_ROUTE || value === "agy" || value === "tuzi" || models.some((m) => m.id === value);
   const out = withdrawn(value, models);
   const own = models.filter((m) => !m.group);
@@ -294,8 +302,9 @@ function useEfforts(stored: Record<string, string>, save: Save) {
   });
 }
 
-export function RouteCells({ kn, steps, label, save, models, routes, missing, lefts }: {
-  kn: any; steps: string[]; label: Record<string, string>; save: Save; models: any[];
+/** `own`: cells after 其余 that are settings of their own rather than stages (a channel's 底稿, knobs.CHANNEL_DRAFT) */
+export function RouteCells({ kn, steps, own = [], label, save, models, routes, missing, lefts }: {
+  kn: any; steps: string[]; own?: string[]; label: Record<string, string>; save: Save; models: any[];
   routes: { default: string; stages: Record<string, string> }; missing: string[]; lefts: Record<string, Left | null>;
 }) {
   // a pick shows at once; the page's next read of the box replaces it, and one that was refused goes back
@@ -311,7 +320,7 @@ export function RouteCells({ kn, steps, label, save, models, routes, missing, le
       ? Object.fromEntries(steps.filter((s) => VIDEO_STEPS.has(s)).map((s) => [s, route(s)])) : {};
     setPicks((was) => ({ ...was, ...stay, [k]: r }));
     sending.current = sending.current.then(async () => {
-      if (!await save(k === "default" ? { llm_provider: r } : { stage_route: { [k]: r } })) setPicks({});
+      if (!await save(k === "default" ? { llm_provider: r } : own.includes(k) ? { [k]: r } : { stage_route: { [k]: r } })) setPicks({});
     });
   };
   return (
@@ -322,6 +331,10 @@ export function RouteCells({ kn, steps, label, save, models, routes, missing, le
       ))}
       <RoutePicker value={main} models={models} video={false} name="其余" bad={missing.includes(main)} lefts={lefts} onPick={(r) => pick("default", r)}
         effort={effort("default")} />
+      {own.map((k) => (
+        <RoutePicker key={k} value={route(k)} models={models} video={VIDEO_STEPS.has(k)} name={label[k]}
+          bad={missing.includes(route(k))} lefts={lefts} onPick={(r) => pick(k, r)} effort={effort(k)} />
+      ))}
     </div>
   );
 }
@@ -366,8 +379,8 @@ export function lostRoutes(steps: string[], routes: { default: string; stages: R
 }
 
 /** 分工 as the 机房 shows it: who is doing each stage, and how each is doing. The choosing is on the 设置 page. */
-export function RouteLinks({ steps, label, models, routes, missing, live, efforts = {} }: {
-  steps: string[]; label: Record<string, string>; models: any[];
+export function RouteLinks({ steps, own = [], label, models, routes, missing, live, efforts = {} }: {
+  steps: string[]; own?: string[]; label: Record<string, string>; models: any[];
   routes: { default: string; stages: Record<string, string> }; missing: string[]; live: string[]; efforts?: Record<string, string>;
 }) {
   const cell = (k: string, name: string, value: string, video: boolean) => {
@@ -390,6 +403,7 @@ export function RouteLinks({ steps, label, models, routes, missing, live, effort
     <div className="eg-routes">
       {steps.map((k) => cell(k, label[k], routes.stages[k] || routes.default, VIDEO_STEPS.has(k)))}
       {cell("default", "其余", routes.default, false)}
+      {own.map((k) => cell(k, label[k], routes.stages[k] || routes.default, VIDEO_STEPS.has(k)))}
     </div>
   );
 }
