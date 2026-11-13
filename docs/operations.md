@@ -60,7 +60,7 @@
 lzc-cli docker -- exec cloudlazycatappassetizer-web-1 python -m assetizer.cli <命令>
 ```
 
-常用：`status`（队列与最近的运行）、`doctor`（ffmpeg、ffprobe、agy、yt-dlp、磁盘、Notion token、Telegram、服务器 Chromium 配置；加 `--agy` 才探测默认 provider 的登录，会调用一次模型；不查 CookieCloud 和分给别家的工序）、`cookies`（探测 CookieCloud）、`set <键> <值>`（机房卡片里能改的设置也可以这样写，键和范围见 `knobs.py`，例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`、`logs`（只读导出日志，见下面「日志与迭代」）。
+常用：`status`（队列与最近的运行）、`doctor`（ffmpeg、ffprobe、agy、yt-dlp、磁盘、Notion token、Telegram、服务器 Chromium 配置；加 `--agy` 才探测默认 provider 的登录，会调用一次模型；不查 CookieCloud 和分给别家的工序）、`cookies`（探测 CookieCloud）、`set <键> <值>`（设置页能改的设置也可以这样写，键和范围见 `knobs.py`，例如 `set worker_slots 2`）、`submit <链接>`、`deliver <视频 id>`、`telegram-setup`、`notify-digest`、`logs`（只读导出日志，见下面「日志与迭代」）。
 
 新盒子的 `init` 不能在容器里跑：LPK 不含 `seeds/`（`scripts/lzc/build_content.sh`），`init` 要读它。
 
@@ -221,6 +221,6 @@ lzc-cli docker -- exec -i cloudlazycatappassetizer-web-1 sh -c 'umask 077; mkdir
 
 验证令牌保存在 `secrets/notion-hook-verification`，0600、临时文件原子替换，不进 settings 和日志；收到时间另存 settings。换令牌后清空「首次有效签名」时间、rejected 拒收计数和 rejected_at 最近拒收时间，之后第一次有效签名说明 Notion 已开始投递。接收锁最多等 5 秒，独立数据库连接获取写锁也最多等 5 秒，超时回 503 由 Notion 重投，持久化成功才回 200；其他生产数据库连接仍等 120 秒。签名按收到的原始字节校验，请求全进程限 120 次/分钟，最大 64 KB。状态的 total 统计验签成功的事件请求（包括重复和非评论类型），rejected 统计签名拒绝，rejected_at 为最近一次拒收的 ISO 时间（没有时为 null），界面只显示 24 小时内的拒收；相同事件 id 只处理一次。元数据队列 `notion_events` 随日志 retention 清理 30 天前的行，专题处理错误记终态和不含原始内容的 warn，靠整页兜底。频道页读的 429、5xx、网络或超时错误不记 done，tries/retry_at 保存在事件队列，依次退避 1 分钟、5 分钟、30 分钟、2 小时、6 小时，第五次重试还失败才记终态和 warn，同次处理同一来源只记一条，带期次标题和事件数；尚未到期的事件不占处理线程。其他频道页错误照旧，终态后可在原串再写一句重新读到。
 
-`assetizer asks --days 30` 列专题与频道共用的用量和待修，频道用量按 source 分组；频道待修带 `source_id` 和期次标题。`assetizer logs` 导出同样的数据，周一日报和设置里的批注数也按两者合计。修好用 `assetizer asks --fixed N --version V`，既有 `_tell_fixed` 会在原串回「〔课代表〕已修 #N · V」。频道调用的完整用量回执记在 `issue-<source_id>` 下，不计入采用运行；「批注」分工的额度和登录不挡生产、补录。模型输出和断点在数据目录 `issue-asks/<批次>/`，DONE 后删除、FAILED 保留；APPLY 的临时数据库错误下个 tick 只重做入库，不重新调模型；讨论串位置及原稿保存在 issue_positions，回复认领和完成均核 issue_replies.version，交付期间作废不会吞掉新说明；预览和失败交付不记改正错位 warn，成功读回作废时才按期次合记；`issue_state.failed_at` 只拦自动模型重调，不影响新推送读取。
+`python -m assetizer.cli asks --days 30` 列专题与频道共用的用量和待修，频道用量按 source 分组；频道待修带 `source_id` 和期次标题。`python -m assetizer.cli logs` 导出同样的数据，周一日报和设置里的批注数也按两者合计。修好用 `python -m assetizer.cli asks --fixed N --version V`，既有 `_tell_fixed` 会在原串回「〔课代表〕已修 #N · V」。频道调用的完整用量回执记在 `issue-<source_id>` 下，不计入采用运行；「批注」分工的额度和登录不挡生产、补录。模型输出和断点在数据目录 `issue-asks/<批次>/`，DONE 后删除、FAILED 保留；APPLY 的临时数据库错误下个 tick 只重做入库，不重新调模型；讨论串位置及原稿保存在 issue_positions，回复认领和完成均核 issue_replies.version，交付期间作废不会吞掉新说明；预览和失败交付不记改正错位 warn，成功读回作废时才按期次合记；`issue_state.failed_at` 只拦自动模型重调，不影响新推送读取。
 
-`assetizer doctor` 的 `notion_hook` 一项列出验证令牌和隧道 token 文件是否存在、最近事件时间、签名拒绝次数，不输出凭据值。
+`python -m assetizer.cli doctor` 的 `notion_hook` 一项列出验证令牌和隧道 token 文件是否存在、最近事件时间、签名拒绝次数，不输出凭据值。

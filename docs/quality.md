@@ -21,13 +21,13 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'   # 生产用的 whis
 npm --prefix web ci
 ```
 
-新工作树没有 `.venv` 时，可以复用另一份检出的环境，把下面的 `.venv/bin/pytest` 换成 `PYTHONPATH=src ../assetizer/.venv/bin/python -m pytest`。
+新工作树没有 `.venv` 时，可以复用主检出（`git worktree list` 的第一行）的环境，把下面的 `.venv/bin/pytest` 换成 `PYTHONPATH=src <主检出>/.venv/bin/python -m pytest`；`.claude/worktrees/<名字>/` 下的工作树就是 `PYTHONPATH=src ../../../.venv/bin/python -m pytest`。
 
 ## 每次改动
 
 | 检查 | 命令 | 说明 |
 |---|---|---|
-| 后端测试 | `.venv/bin/pytest -q` | 在 `tests/test_core.py`，专题在 `tests/test_topics.py`（替身模型走完整的读与综合，不下载、不调模型）和 `tests/test_topic_notion.py`（专题存到 Notion，内存里的假 Notion）；`home` fixture 给每个测试一个隔离的数据库；Notion 调用全部打桩（`FakeNotion`），不会写真实 Notion |
+| 后端测试 | `.venv/bin/pytest -q` | `tests/` 下按领域分文件：`test_core.py`（生产、频道、交付）；`test_topics.py`（专题，替身模型走完整的读与综合，不下载、不调模型）、`test_topic_notion.py`（专题存到 Notion）；`test_channel_notion.py`（频道页逐块写）；`test_notion_hook.py`（批注推送与 webhook）、`test_issue_asks*.py`（频道页上点名课代表的批注，§R3-12）；`test_topic_backup.py`、`test_backup_rules.py`（网盘备份，假 rclone 与 OAuth）。`home` fixture 给每个测试一个隔离的数据库；Notion 调用全部打桩（`FakeNotion` 或内存里的假 Notion），不会写真实 Notion |
 | 定向测试 | `.venv/bin/pytest -q -k <关键词>` | 改哪块先跑哪块 |
 | 前端类型检查 + 构建 | `cd web && npm run build` | `tsc -b` 加 `vite build`，产物写入 `src/assetizer/web/static`（不进 Git） |
 | 前端工具函数 | `cd web && npm run test:util` | 中文数字（期数）和失败原因的标签；不用 build，也不用浏览器 |

@@ -23,7 +23,9 @@
 | 学习目标编译、规程、稿纸批注、重新编译 | [channel-page.md](channel-page.md) §3.4 | `compiler.py`、`web/app.py`（重新编译与编译状态） |
 | 频道调试：样片、试跑、采用、对比、定稿 | [channel-page.md](channel-page.md) §3 | `tuning.py`、`pipeline/runner.py`（跑完自动采用）、`web/app.py`（定稿单查库）、`delivery.py` |
 | 频道页的界面、点亮与连线、展开并排、断点、样式坑 | [channel-page.md](channel-page.md) | `web/src/pages/Channel.tsx`、`web/src/components/channel/`、`web/src/channel.css` |
-| Notion 交付、映射、页面模板、查重、预览 | [architecture.md](architecture.md)「交付到 Notion」、[channel-page.md](channel-page.md) §4 | `delivery.py`、`notion/`、`templates.py`、`preview.py` |
+| Notion 交付、映射、页面模板、页面图标、查重、预览 | [architecture.md](architecture.md)「交付到 Notion」、[channel-page.md](channel-page.md) §4 | `delivery.py`、`notion/`、`templates.py`、`channel_icons.py`、`preview.py` |
+| Notion 里点名「课代表」的批注：推送、读评论、回复、改正、待修清单 | [design.md](design.md) §R3-12、§R8-13、[channel-page.md](channel-page.md) §4.1、[topics.md](topics.md)「存到 Notion」、[operations.md](operations.md)「Notion 批注推送」 | `issue_asks.py`（频道页）、`topics/comments.py`（专题、`asks` 编号）、`notion/hook.py`、`web/notion_hook.py`（webhook）、`scripts/lzc/hook-tunnel.sh`、`cli.py`（`asks`） |
+| 网盘备份：按作者和专题的规则、上传、取回、可删除清单 | [design.md](design.md) §R8-8、[topics.md](topics.md)「保留」、[operations.md](operations.md)「凭据与登录」 | `topics/backup.py`、`topics/backup_rules.py`、`topics/backup_retention.py`、`web/src/components/GDrive.tsx`、`GDriveRules.tsx` |
 | 自动收录新视频、立即扫描、补录旧视频 | [architecture.md](architecture.md)「频道生命周期」、[design.md](design.md) §R6-5、§R6-6、[channel-page.md](channel-page.md) §2 | `ingest.py`、`web/app.py`（看板接口）、`web/src/components/channel/Board.tsx` |
 | agy 在网页里登录、额度（5 小时 / 每周） | [operations.md](operations.md)「凭据与登录」、[design.md](design.md) §R6-3、§R6-4 | `providers/agy_login.py`、`providers/agy.py`（`usage`、`record_usage`、按型号找额度组的 `quota_group` 与 `groups_in_use`）、`providers/magpie.py`（`quota_view`）、`web/src/components/AgyLogin.tsx` |
 | magpie：订阅额度、模型、分工、上报 | [design.md](design.md) §R6-8、§R6-9、§R5-5 | `providers/magpie_state.py`、`providers/magpie.py`、`providers/__init__.py`（路由）、`knobs.py`、`web/src/components/Routes.tsx`（分工与模型列表）、`web/src/pages/Engine.tsx`（`SubTile`） |
@@ -37,7 +39,7 @@
 | 其他页面：刊、对照视图、机房、设置，统计口径 | [architecture.md](architecture.md)「前端」、[design.md](design.md) §R6-1、§R6-2 | `web/src/pages/`、`web/src/components/Figures.tsx`、`web/app.py`（`/api/engine/stats`） |
 | 为什么这样设计（长期决定与理由） | [design.md](design.md) | — |
 | 内容原则：视频是唯一事实来源 | [`contracts/policy.md`](../src/assetizer/contracts/policy.md) | — |
-| 改完怎么检查 | [quality.md](quality.md) | `tests/test_core.py`、`tests/test_topics.py` |
+| 改完怎么检查 | [quality.md](quality.md) | `tests/`、`.woodpecker/quality.yml`、`scripts/ci/` |
 | 发版、升级、回滚、凭据、登录、测试副本、直接看容器、容器出站 | [operations.md](operations.md) | `scripts/lzc/`、`lzc-manifest.yml` |
 | 哪些复杂度是给模型和工具的限制打的补丁、每周基准怎么跑 | [benchmarks.md](benchmarks.md) | `src/assetizer/bench/` |
 
@@ -48,6 +50,7 @@
 | 文档 | 是什么 |
 |---|---|
 | [design-v0.2.md](history/design-v0.2.md) | v0.2 设计与裁决全文；现行条目已整理进 design.md |
+| [topic-picker-and-notion-draft.md](history/topic-picker-and-notion-draft.md) | 选片扩展与专题存到 Notion 的定稿方案（2026-11-09）；结论已并入 design.md §R8 与 topics.md |
 | [lazycat-lpk-plan.md](history/lazycat-lpk-plan.md) | 迁移到懒猫前的打包方案（已实施） |
 | [design-review.md](history/design-review.md) | v0.1 设计的独立评审（2026-10-05） |
 | [code-review.md](history/code-review.md) | 首版代码的独立评审（2026-10-05，提交 `3bb533f`） |
