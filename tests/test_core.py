@@ -5690,6 +5690,55 @@ def test_a_clip_can_be_rendered_from_pieces(tmp_path):
     assert abs(ffmpeg.duration(ffmpeg.render_pieces(src, [[1.0, 3.0]], tmp_path / "d.mp4")) - 2.0) < 0.2
 
 
+def test_a_chunk_too_dense_to_understand_at_once_is_understood_in_halves(home, monkeypatch):
+    from assetizer import db
+    from assetizer.llm import LLM
+    from assetizer.media import ffmpeg
+    from assetizer.pipeline import acquire, semantic
+    from assetizer.pipeline.context import RunContext
+    from assetizer.providers.agy import ProviderError
+    db.connect()
+    db.exec("INSERT INTO sources(id, url, title, duration, created_at, updated_at) VALUES ('dense','u','T',3000,'2026','2026')")
+    db.exec("INSERT INTO runs(id, source_id, kind, production, created_at) VALUES ('dense-r1','dense','PRODUCTION','RUNNING','2026')")
+    ctx = RunContext(run=db.one("SELECT * FROM runs WHERE id='dense-r1'"), source=db.one("SELECT * FROM sources WHERE id='dense'"))
+    ctx.playbook = {"identity": {"channel": "C", "speaker": "S"}, "rules": [], "facets": []}
+    ctx.save("machine/chunk-plan.json", {"duration": 3000.0, "chunks": [
+        {"part_id": "CH01", "path": "/x/CH01.mp4", "offset": 0.0, "length": 3000.0, "encoding": {}}]})
+    cuts = {}
+
+    def proxy(ctx_, pid, offset, length):
+        cuts[pid] = (offset, length)
+        return Path(f"/x/{pid}.mp4"), {}
+
+    monkeypatch.setattr(acquire, "_proxy", proxy)
+    monkeypatch.setattr(ffmpeg, "duration", lambda p: cuts[Path(p).stem][1])
+    asked = []
+
+    def answer(self, root, stage, prompt, schema, **kw):
+        asked.append(stage)
+        if stage == "understand-CH01":
+            raise ProviderError("PROVIDER_OUTPUT_LIMIT", "exceeded the output token limit")
+        o = {"speakers": [], "uncertainties": [], "topics": [
+            {"id": "t1", "title": stage, "start": "00:00", "end": "27:00", "summary": "s", "tickers": [], "claims": [],
+             "teacher_reasoning": "", "visual_evidence": [], "uncertainties": []}]}
+        kw["check"](o)
+        return o
+
+    monkeypatch.setattr(LLM, "structured", answer)
+    assert semantic.understand(ctx) == {"chunks": 2, "topics": 2}
+    assert asked == ["understand-CH01", "understand-CH01a", "understand-CH01b"]
+    assert cuts == {"CH01a": (0.0, 1650.0), "CH01b": (1350.0, 1650.0)}  # halves that overlap by the plan's 5 minutes
+    plan = ctx.load("machine/chunk-plan.json")["chunks"]
+    assert [c["part_id"] for c in plan] == ["CH01a", "CH01b"]  # merge finds the seam in the plan; a rerun starts from it
+    chunks = ctx.load("machine/chunks.json")
+    assert [c["topics"][0]["start_s"] for c in chunks] == [0.0, 1350.0]
+
+    ctx.save("machine/chunk-plan.json", {"duration": 1000.0, "chunks": [
+        {"part_id": "CH01", "path": "/x/CH01.mp4", "offset": 0.0, "length": 1000.0, "encoding": {}}]})
+    with pytest.raises(ProviderError):  # under 20 minutes, halves would not help
+        semantic.understand(ctx)
+
+
 def test_a_time_scope_outside_the_list_only_loses_the_hint():
     from assetizer.pipeline.semantic import clean_time_scope
     o = {"topics": [{"claims": [{"time_scope": "PLAN"}, {"time_scope": "NOW"}, {"time_scope": None}]}]}

@@ -35,11 +35,34 @@ def clean_time_scope(o):
 
 
 # ------------------------------------------------------------------ understand
+MIN_SPLIT = 600.0  # 理解输出超长时对半切的最短一段；再短还超长就是别的毛病
+
+
+def _halves(ctx: RunContext, ch: dict) -> list[dict]:
+    """A chunk too dense to describe in one answer, as two that overlap like the plan's chunks do."""
+    from .. import config
+    from ..media import ffmpeg
+    from .acquire import _proxy
+    over = min(config.get().chunk_overlap_minutes * 60, ch["length"] / 4)
+    half = ch["length"] / 2
+    out = []
+    for suffix, offset, length in (("a", ch["offset"], half + over / 2),
+                                   ("b", ch["offset"] + half - over / 2, ch["length"] - half + over / 2)):
+        path, enc = _proxy(ctx, ch["part_id"] + suffix, offset, length)
+        length = ffmpeg.duration(path)
+        out.append({"part_id": ch["part_id"] + suffix, "path": str(path), "offset": offset, "length": length,
+                    "encoding": enc, "source_start": fmt_tc(offset), "source_end": fmt_tc(offset + length)})
+    return out
+
+
 def understand(ctx: RunContext) -> dict:
     plan = ctx.load("machine/chunk-plan.json")
     llm = ctx.llm()
     out = []
-    for ch in plan["chunks"]:
+    i = 0
+    while i < len(plan["chunks"]):
+        ch = plan["chunks"][i]
+
         def check(o, L=ch["length"]):
             spans = []
             for t in o["topics"]:
@@ -51,9 +74,20 @@ def understand(ctx: RunContext) -> dict:
             if covered < min(0.3 * L, 600):
                 raise ContractError("CONTENT_FAILURE", f"topics cover only {covered:.0f}s of {L:.0f}s")
 
-        rec = llm.structured(ctx.calls, f"understand-{ch['part_id']}",
-                             P.understand_prompt(ctx.playbook, ch["path"], ch, ch["length"]),
-                             P.UNDERSTAND_SCHEMA, media=[ch["path"]], check=check, normalize=clean_time_scope)
+        try:
+            rec = llm.structured(ctx.calls, f"understand-{ch['part_id']}",
+                                 P.understand_prompt(ctx.playbook, ch["path"], ch, ch["length"]),
+                                 P.UNDERSTAND_SCHEMA, media=[ch["path"]], check=check, normalize=clean_time_scope)
+        except ProviderError as e:
+            # ghf6mWCp_HY-r1 (2026-11-05)：50 分钟的经济话题，话题和论断写不下一个回答。切开后的计划存回去，
+            # 合并按它找接缝，重跑也直接用切开的两段
+            if e.kind != "PROVIDER_OUTPUT_LIMIT" or ch["length"] / 2 < MIN_SPLIT:
+                raise
+            plan["chunks"][i:i + 1] = _halves(ctx, ch)
+            ctx.save("machine/chunk-plan.json", plan)
+            ctx.event(f"{ch['part_id']} 输出超长，切成两段重新理解")
+            continue
+        i += 1
         topics = []
         for t in rec["topics"]:
             try:
