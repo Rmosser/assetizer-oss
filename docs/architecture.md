@@ -98,4 +98,4 @@ web 只接受三种请求（`app.py` 的 `guard`）：Host 头是 localhost / 12
 
 ## 部署形态
 
-当前生产在懒猫微服 prodbox（LPK：一个运行时镜像，web / worker / hook-tunnel 三个服务），开发机是 devbox；做法见 [operations.md](operations.md)。仓库里的 `deploy/`（OVH 的 systemd 单元与 `deploy.sh`）是迁移到懒猫之前的部署方式。
+当前生产在懒猫微服 prodbox（LPK：一个运行时镜像，web / worker / hook-tunnel 三个服务），开发机是 devbox；做法见 [operations.md](operations.md)。

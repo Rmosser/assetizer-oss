@@ -14,10 +14,8 @@
 | `tests/` | 全部后端测试，按领域分文件（核心流水线、专题、Notion 交付、批注与推送、网盘备份）；外部服务一律是替身，见 [docs/quality.md](docs/quality.md) |
 | `seeds/` | 两个频道的初始学习目标与规程（`assetizer init` 使用；只在源码环境有，LPK 不含） |
 | `assets/` | 字幕用的中文字体；代码按源码目录的相对路径找它，打包时与 `src/` 放在一起 |
-| `experiments/` | 2026-10-05 对照实验的一次性脚本，不参与运行 |
 | `package.yml`、`lzc-*.yml`、`docker/`、`scripts/lzc/` | 懒猫 LPK 打包与发版 |
-| `deploy/` | 迁移到懒猫之前的 OVH 部署方式，OVH 退役后删除 |
-| `docs/` | 当前文档；`docs/history/` 是历史记录，默认不读 |
+| `docs/` | 当前文档 |
 | `var/` | 本机运行数据（含 `secrets/`），被忽略；不要读取凭据，不要提交 |
 
 ## 检查
@@ -42,6 +40,6 @@ PR 和 main 上由 Woodpecker 跑全量（后端、前端构建、hook-tunnel）
 - 频道页（`web/src/pages/Channel.tsx`、`web/src/components/channel/`）改动前读 [docs/channel-page.md](docs/channel-page.md)：页面级类名用 `ch-` 前缀，复刻区块里的短类名一律写在 `.chp` 之下，避开 `styles.css` 的全局类名；高亮用墨色，朱红只用于冲突、失败、挡住交付的问题、校注刻度和「定」章；JS 与 CSS 的断点一起改。
 - 界面文案少字：布局已经说明的事不加次级标签和说明文字。
 - 改变长期决定时更新 [docs/design.md](docs/design.md)，保留条目编号（代码注释会引用「design §R2-5」这样的编号）。
-- 改了行为就同步更新 README 与相关 docs；新增模块或功能领域时在 [docs/index.md](docs/index.md)「按问题找」补一行，`docs/history/` 新增文件时补进它的历史表；当前文档写现状，过程与验证写在提交或 PR 里；需求单和方案落地后移进 `docs/history/`，现状另写进当前文档。提交信息用中文：标题一句话说明改了什么，正文列要点；发版提交写「版本 x.y.z：…」。
+- 改了行为就同步更新 README 与相关 docs；新增模块或功能领域时在 [docs/index.md](docs/index.md)「按问题找」补一行；当前文档写现状，过程与验证写在提交或 PR 里；需求单和方案落地后，现状写进当前文档。提交信息用中文：标题一句话说明改了什么，正文列要点；发版提交写「版本 x.y.z：…」。
 - 交付前审阅自己的净差异，集中修复确认的问题；检查通过、目标满足、没有实质阻断就停，不为一般建议继续扩大改动。
 - 改 agy、yt-dlp 的适配之前，或周一日报写「日志多了」时，按 [operations.md](docs/operations.md)「日志与迭代」只读扫一遍生产日志。

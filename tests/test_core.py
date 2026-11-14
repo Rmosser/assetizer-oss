@@ -1979,7 +1979,7 @@ def test_digest_goes_at_the_hour_set_in_the_engine_room_and_waits_between_tries(
     assert notify.digest_due()
 
 
-# ---------------------------------------------------------------- LazyCat package (docs/lazycat-lpk-plan.md)
+# ---------------------------------------------------------------- LazyCat package
 def test_lazycat_gateway_needs_a_logged_in_user(tmp_path, monkeypatch):
     import dataclasses
     from fastapi.testclient import TestClient

@@ -3,7 +3,7 @@ version: 0.4.51
 name: Assetizer
 description: Turns long investment videos into knowledge units, clips and Notion pages.
 author: Rmosser
-license: Proprietary
+license: AGPL-3.0-only
 locales:
   en:
     name: Assetizer

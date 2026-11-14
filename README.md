@@ -3,8 +3,9 @@
 把长期关注的投资 / 金融长视频，按频道学习目标自动拆成 Knowledge Units，并生成结构化文章、截图、实际视频片段、字幕、Notion 多媒体知识页与发布素材包。用户只在频道调试期参与（试跑样片、改学习目标、定稿）；定稿后每期自动写入 Notion，日常只在 Notion 阅读。
 
 - 代号 `assetizer`：包名、子域名、命令行和代码里沿用它
-- 文档地图：[docs/index.md](docs/index.md)（架构、频道页设计、质量检查、运维与历史记录）
-- 产品基线：Notion「PRD v0.2 · Post-Validation Baseline」与「Product Validation Closure」；人的介入点以修订「PRD v0.2 → v0.2.1」为准，长期决定与理由见 [docs/design.md](docs/design.md)
+- 文档地图：[docs/index.md](docs/index.md)（架构、频道页设计、质量检查、运维）
+- 长期决定与理由：[docs/design.md](docs/design.md)
+- 文档里的 `prodbox`、`devbox` 是作者的生产盒子和开发盒子，`example.com` 下的域名代替作者自己的公网入口；部署时换成你自己的
 
 ## 日常使用
 
@@ -74,7 +75,7 @@ sh scripts/lzc/release.sh                                                 # 打�
 lzc-cli lpk install .pkgout/cloud.lazycat.app.assetizer-v<版本>.lpk --apk n
 ```
 
-升级前备份、安装后验收、回滚、容器里的命令行（`python -m assetizer.cli status|doctor|submit|set …`）见 [docs/operations.md](docs/operations.md)。`deploy/` 是迁移到懒猫之前在 OVH 上的部署方式，OVH 退役后删除。
+升级前备份、安装后验收、回滚、容器里的命令行（`python -m assetizer.cli status|doctor|submit|set …`）见 [docs/operations.md](docs/operations.md)。
 
 ## 设计要点
 
@@ -84,3 +85,7 @@ lzc-cli lpk install .pkgout/cloud.lazycat.app.assetizer-v<版本>.lpk --apk n
 - **校注**：系统对边界、条件、归属没把握时生成 Flag；分批的纯文本预审对照 ASR 检查片段首尾与陈述（CAVA 类问题）。调试期在对照视图里逐条看；稳定期不是待办，写进 Notion 每期页面末尾的折叠「校注」区块。没有逐期审阅（design §R2）。
 - **Notion**：每期一行数据库记录；块映射 + 续传前读回对账，崩溃不会重复追加；交付独立于生产。
 - **小硬盘**：agy 每次调用的会话缓存即时清理；原始媒体按保留期清理；原片栏的低清版只给调试中的样片，定稿或移出就删，另有保留期和总量上限（默认 14 天、5 GB）；这几个保留期都在「设置」→「磁盘」里改；发布包用硬链接；magpie 的抽帧缓存（`cache/magpie-media/`）目前不清理。
+
+## 许可证
+
+[AGPL-3.0](LICENSE)。字幕字体 Noto Sans CJK 按 [SIL OFL 1.1](assets/subtitle/OFL.txt) 随附。

@@ -151,7 +151,7 @@ def egress_ip(timeout: float = 8) -> str | None:
 
 def _error_code(r) -> str:
     """Name a non-200 answer. JSON from the ingress proxy or CookieCloud carries its own `code`; everything else is
-    Cloudflare in front of them (docs/cookiecloud-credentials-ui.md §3.2, docs/cookiecloud-read-tunnel-530.md)."""
+    Cloudflare in front of them (docs/cookiecloud-credentials-ui.md §3.2)."""
     status = r.status_code
     if not _cloudflare_error(r):
         try:

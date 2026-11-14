@@ -6,7 +6,6 @@
 2. 本页：按问题找到下面的当前文档。
 3. 当前文档：只描述现状，改代码时一起改。
 4. 代码与模块 docstring：细节和参数以代码为准。
-5. [history/](history/)：当时的记录，默认不读，只在追溯「为什么」时翻。
 
 ## 按问题找
 
@@ -44,18 +43,3 @@
 | 哪些复杂度是给模型和工具的限制打的补丁、每周基准怎么跑 | [benchmarks.md](benchmarks.md) | `src/assetizer/bench/` |
 
 表里的代码路径都相对 `src/assetizer/`；以 `web/src/`、`tests/`、`scripts/` 开头的路径和 `lzc-manifest.yml` 相对仓库根目录。
-
-## 历史记录（docs/history/）
-
-| 文档 | 是什么 |
-|---|---|
-| [design-v0.2.md](history/design-v0.2.md) | v0.2 设计与裁决全文；现行条目已整理进 design.md |
-| [topic-picker-and-notion-draft.md](history/topic-picker-and-notion-draft.md) | 选片扩展与专题存到 Notion 的定稿方案（2026-11-09）；结论已并入 design.md §R8 与 topics.md |
-| [lazycat-lpk-plan.md](history/lazycat-lpk-plan.md) | 迁移到懒猫前的打包方案（已实施） |
-| [design-review.md](history/design-review.md) | v0.1 设计的独立评审（2026-10-05） |
-| [code-review.md](history/code-review.md) | 首版代码的独立评审（2026-10-05，提交 `3bb533f`） |
-| [ui-review-round1.md](history/ui-review-round1.md)、[ui-review-round2.md](history/ui-review-round2.md) | 首版界面的两轮评审（2026-10-06） |
-| [experiments-2026-10-05.md](history/experiments-2026-10-05.md) | 媒体条件变化后的对照实验（design.md §R-18 的依据） |
-| [cookiecloud-credentials-review.md](history/cookiecloud-credentials-review.md) | CookieCloud 凭据界面的审查（2026-10-13） |
-| [cookiecloud-ingress-request.md](history/cookiecloud-ingress-request.md)、[cookiecloud-credentials-request.md](history/cookiecloud-credentials-request.md) | CookieCloud 只读入口和凭据界面的需求单（2026-10-13，OVH 时期） |
-| [cookiecloud-read-tunnel-530.md](history/cookiecloud-read-tunnel-530.md) | CookieCloud 只读入口间歇性 530 / 502 的问题报告（2026-10-22，OVH 时期） |
